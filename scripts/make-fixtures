@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# Generates the synthetic .eml fixtures into Tests/Fixtures/eml/ (D-018).
+# Never real mail. The generator is scripts/make-fixtures.swift.
+set -euo pipefail
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+swift "$ROOT/scripts/make-fixtures.swift" "$ROOT"

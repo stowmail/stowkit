@@ -1,0 +1,24 @@
+.DS_Store
+/.build
+/Packages
+xcuserdata/
+DerivedData/
+.swiftpm/configuration/registries.json
+.swiftpm/xcode/package.xcworkspace/contents.xcworkspacedata
+.netrc
+# Local configuration (D-007). .env.example is committed; .env never is.
+.env
+.env.*
+!.env.example
+
+# SQLCipher binary: fetched and verified by scripts/fetch-sqlcipher.sh (D-011)
+/Vendor/SQLCipher/SQLCipher.xcframework/
+/Vendor/SQLCipher/.fetched-version
+
+# Generated fixtures: recreate with scripts/make-fixtures (D-018)
+/Tests/Fixtures/eml/
+
+# Archive data must never be committed
+*.sqlite
+*.sqlite-*
+archive-data/
