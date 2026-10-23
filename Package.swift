@@ -20,6 +20,8 @@ let package = Package(
         // Pre-1.0: pin to the minor version. Newer versions need macOS 15 (D-013).
         .package(url: "https://github.com/apple/swift-nio-imap.git", .upToNextMinor(from: "0.4.0")),
         .package(url: "https://github.com/apple/swift-nio-transport-services.git", from: "1.28.0"),
+        // Already pulled in by the two packages above; named directly because StowSync uses NIOCore (D-101).
+        .package(url: "https://github.com/apple/swift-nio.git", from: "2.104.0"),
         .package(url: "https://github.com/apple/swift-argument-parser.git", from: "1.8.2"),
         .package(url: "https://github.com/apple/swift-log.git", from: "1.16.2"),
         // GRDB built against SQLCipher, vendored by scripts/vendor-grdb.sh (D-011).
@@ -36,6 +38,7 @@ let package = Package(
                 "StowSecrets",
                 .product(name: "NIOIMAP", package: "swift-nio-imap"),
                 .product(name: "NIOTransportServices", package: "swift-nio-transport-services"),
+                .product(name: "NIOCore", package: "swift-nio"),
                 .product(name: "Logging", package: "swift-log"),
             ]
         ),
@@ -76,7 +79,16 @@ let package = Package(
         ),
         .testTarget(name: "StowCoreTests", dependencies: ["StowCore"]),
         .testTarget(name: "StowSecretsTests", dependencies: ["StowSecrets"]),
-        .testTarget(name: "StowSyncTests", dependencies: ["StowSync"]),
+        .testTarget(
+            name: "StowSyncTests",
+            dependencies: [
+                "StowSync",
+                "StowCore",
+                "StowSecrets",
+                .product(name: "NIOIMAP", package: "swift-nio-imap"),
+                .product(name: "NIOCore", package: "swift-nio"),
+            ]
+        ),
         .testTarget(name: "StowStoreTests", dependencies: ["StowStore", .product(name: "GRDB", package: "GRDB")]),
         .testTarget(name: "StowSearchTests", dependencies: ["StowSearch"]),
         .testTarget(name: "StowRulesTests", dependencies: ["StowRules"]),
