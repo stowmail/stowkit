@@ -48,7 +48,9 @@ public struct ImportSummary: Sendable, Equatable, CustomStringConvertible {
 /// Each message is written in one database transaction, after its encrypted
 /// files are in place, so a crash leaves either the whole message or none of
 /// its rows (an orphaned encrypted file is harmless and reused next time).
-/// Importing is idempotent: the same server copy is skipped before it is even
+/// Its lookups run on the writer connection rather than the pool's readers,
+/// so a long import does not slow down searches running at the same time
+/// (D-206). Importing is idempotent: the same server copy is skipped before it is even
 /// read, and the same bytes for the same account map to the same row
 /// (`UNIQUE (account_id, raw_hash)`).
 public final class Importer: Sendable {
@@ -98,6 +100,9 @@ public final class Importer: Sendable {
             }
         }
         summary.seconds = Date().timeIntervalSince(start)
+        // Reader connections that lived through a long run of writes become slow (measured: ten times
+        // slower FTS queries); closing idle ones lets searches start fresh.
+        archive.database.releaseMemory()
         logger.info("import finished", metadata: ["summary": "\(summary)"])
         return summary
     }
@@ -105,7 +110,7 @@ public final class Importer: Sendable {
     // MARK: - One message
 
     public func isAlreadyPresent(_ key: RawMessageKey) throws -> Bool {
-        try archive.database.read { db in
+        try archive.database.writeWithoutTransaction { db in
             try Bool.fetchOne(db, sql: """
                 SELECT EXISTS (
                     SELECT 1 FROM message_folders mf JOIN folders f ON f.id = mf.folder_id
@@ -147,7 +152,7 @@ public final class Importer: Sendable {
     }
 
     private func existingMessage(account: AccountID, rawHash: Data) throws -> StoredMessageID? {
-        try archive.database.read { db in try Self.messageID(db, account: account, rawHash: rawHash) }
+        try archive.database.writeWithoutTransaction { db in try Self.messageID(db, account: account, rawHash: rawHash) }
     }
 
     static func messageID(_ db: Database, account: AccountID, rawHash: Data) throws -> StoredMessageID? {
@@ -167,7 +172,7 @@ public final class Importer: Sendable {
 
     private func prepare(_ attachment: ParsedAttachment) throws -> PreparedAttachment {
         let hash = archive.attachmentFiles.hash(of: attachment.data)
-        let known = try archive.database.read { db in
+        let known = try archive.database.writeWithoutTransaction { db in
             try Bool.fetchOne(db, sql: "SELECT EXISTS (SELECT 1 FROM attachments WHERE content_hash = ?)", arguments: [hash]) ?? false
         }
         let stored = try archive.attachmentFiles.write(attachment.data, hash: hash).storedSize

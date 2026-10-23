@@ -56,7 +56,7 @@ public final class Archive: Sendable {
     }
 
     public func accountExists(_ id: AccountID) throws -> Bool {
-        try database.read { db in
+        try database.writeWithoutTransaction { db in
             try Bool.fetchOne(db, sql: "SELECT EXISTS (SELECT 1 FROM accounts WHERE id = ?)", arguments: [id.rawValue]) ?? false
         }
     }

@@ -70,13 +70,23 @@ public final class MessageSearcher: MessageSearching, Sendable {
         let ranked: [(id: Int64, rank: Double)]
         let match = Self.matchExpression(query)
         if let match {
-            let filterSQL = filters.isEmpty ? "" : " AND " + filters.joined(separator: " AND ")
-            let rows = try Row.fetchAll(db, sql: """
-                SELECT m.id, \(Self.bm25) AS score
-                FROM messages_fts JOIN messages m ON m.id = messages_fts.rowid
-                WHERE messages_fts MATCH ?\(filterSQL)
-                ORDER BY score, m.internal_date DESC LIMIT ? OFFSET ?
-                """, arguments: StatementArguments([match] + arguments + [limit, offset]))
+            // Measured at 100,000 messages (D-206): bm25() over the FTS table alone is fastest
+            // without filters; with filters, a plain join beats both a materialised CTE and
+            // `rowid IN (subquery)` (which is catastrophically slow).
+            let rows: [Row]
+            if filters.isEmpty {
+                rows = try Row.fetchAll(db, sql: """
+                    SELECT rowid AS id, \(Self.bm25) AS score FROM messages_fts WHERE messages_fts MATCH ?
+                    ORDER BY score LIMIT ? OFFSET ?
+                    """, arguments: [match, limit, offset])
+            } else {
+                rows = try Row.fetchAll(db, sql: """
+                    SELECT m.id, \(Self.bm25) AS score
+                    FROM messages_fts JOIN messages m ON m.id = messages_fts.rowid
+                    WHERE messages_fts MATCH ? AND \(filters.joined(separator: " AND "))
+                    ORDER BY score LIMIT ? OFFSET ?
+                    """, arguments: StatementArguments([match] + arguments + [limit, offset]))
+            }
             ranked = rows.map { ($0["id"], $0["score"]) }
         } else if query.hasAttachment != nil || !query.accounts.isEmpty || query.since != nil || query.before != nil {
             // Filters only: newest first.
