@@ -30,7 +30,57 @@ public struct AccountStatus: Sendable, Equatable {
     }
 }
 
+/// One synced folder's numbers, for `stowmail status --folders`: what the
+/// server said it holds, against what Stow has archived, queued or recorded.
+public struct FolderReport: Sendable, Equatable {
+    public var name: String
+    /// EXISTS from the server's last EXAMINE: its own message count.
+    public var serverCount: Int?
+    /// Archived copies at the current UIDVALIDITY that the server still had last time.
+    public var archived = 0
+    public var queued = 0
+    public var unfetchable = 0
+    public var firstSyncComplete = false
+    public var lastSyncAt: Date?
+    public var lastError: String?
+
+    /// Whether Stow accounts for every message the server reported. A difference
+    /// can be mail that arrived since the last listing, or one message stored
+    /// twice in the same folder (kept once).
+    public var matches: Bool {
+        serverCount.map { $0 == archived + queued + unfetchable } ?? false
+    }
+}
+
 public enum ArchiveStatus {
+    /// Per-folder numbers for one account's synced folders, by name.
+    public static func folders(_ archive: Archive, account: AccountID) throws -> [FolderReport] {
+        try archive.database.read { db in
+            try Row.fetchAll(db, sql: """
+                SELECT f.name, s.server_exists, s.first_sync_completed_at, s.last_sync_at, s.last_error,
+                    (SELECT count(*) FROM message_folders mf WHERE mf.folder_id = f.id AND mf.uid_validity = s.uid_validity
+                        AND mf.removed_from_server_at IS NULL) AS archived,
+                    (SELECT count(*) FROM download_queue q WHERE q.folder_id = f.id AND q.uid_validity = s.uid_validity
+                        AND q.state = 'queued') AS queued,
+                    (SELECT count(*) FROM download_queue q WHERE q.folder_id = f.id AND q.uid_validity = s.uid_validity
+                        AND q.state = 'unfetchable') AS unfetchable
+                FROM folders f JOIN sync_state s ON s.folder_id = f.id
+                WHERE f.account_id = ? AND f.kind = 'folder' AND f.skipped_reason IS NULL
+                ORDER BY f.name
+                """, arguments: [account.rawValue]).map { row in
+                var report = FolderReport(name: row["name"])
+                report.serverCount = row["server_exists"]
+                report.archived = row["archived"]
+                report.queued = row["queued"]
+                report.unfetchable = row["unfetchable"]
+                report.firstSyncComplete = (row["first_sync_completed_at"] as Int64?) != nil
+                report.lastSyncAt = (row["last_sync_at"] as Int64?).map { Date(timeIntervalSince1970: TimeInterval($0)) }
+                report.lastError = row["last_error"]
+                return report
+            }
+        }
+    }
+
     public static func collect(_ archive: Archive, now: Date = Date()) throws -> [AccountStatus] {
         let records = try ArchiveAccounts(archive: archive).all()
         return try archive.database.read { db in

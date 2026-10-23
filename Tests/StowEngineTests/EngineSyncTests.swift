@@ -244,6 +244,30 @@ import Testing
     }
 }
 
+@Suite(.serialized) struct FolderReportTests {
+    /// `stowmail status --folders`: Stow's numbers add up to the server's own count.
+    @Test func folderCountsAddUpToTheServers() async throws {
+        let fixtures = try TestFixtures.small()
+        let server = FakeIMAPServer(mailboxes: [
+            .init(name: "INBOX", attributes: [], uidValidity: 11, messages: (1...6).map { .init(uid: UInt32($0), bytes: fixtures[$0].bytes) }),
+            .init(name: "Sent Items", attributes: ["\\Sent"], uidValidity: 12, messages: (1...3).map { .init(uid: UInt32($0), bytes: fixtures[$0 + 8].bytes) }),
+        ])
+        server.capabilities = ["IMAP4rev1", "AUTH=XOAUTH2", "SASL-IR"]
+        server.bodylessUIDs = [2] // in both folders: listed, never returned
+        let harness = try await EngineHarness(server: server, provider: .microsoft)
+        defer { harness.cleanUp() }
+        _ = try await harness.run()
+
+        let reports = try ArchiveStatus.folders(harness.archive, account: harness.account.id)
+        #expect(reports.map(\.name) == ["INBOX", "Sent Items"])
+        #expect(reports.map(\.serverCount) == [6, 3])
+        #expect(reports.map(\.archived) == [5, 2])
+        #expect(reports.map(\.queued) == [1, 1])
+        #expect(reports.allSatisfy { $0.matches })
+        #expect(reports.allSatisfy { !$0.firstSyncComplete })
+    }
+}
+
 extension AccountSyncer {
     /// The syncer's own session opener, to build a variant with another sink in tests.
     var openSessionForTests: @Sendable () async throws -> IMAPSession { openSession }

@@ -67,7 +67,12 @@ struct Daemon: AsyncParsableCommand {
 
 /// Per account: last sync, progress, downloads today, last error (step 8).
 struct Status: AsyncParsableCommand {
-    static let configuration = CommandConfiguration(abstract: "Show how each account's sync is going, and the background sync.")
+    static let configuration = CommandConfiguration(
+        abstract: "Show how each account's sync is going, and the background sync.",
+        discussion: "With --folders, also each synced folder's own message count on the server against what Stow has archived, queued or could not download."
+    )
+
+    @Flag(help: "Also show each synced folder: the server's count against Stow's.") var folders = false
 
     func run() async throws {
         let location = CLIArchive.location()
@@ -106,6 +111,7 @@ struct Status: AsyncParsableCommand {
                 print("  Changed in the mailbox (kept here): \(parts.joined(separator: ", ")). Spam is hidden from search.")
             }
             for error in status.folderErrors { print("  Folder problem: \(error)") }
+            if folders { try Self.printFolders(archive, account: record.account.id) }
             if status.removed > 0 { print("  Removed from the archive: \(status.removed) (`stowmail removed`).") }
         }
         let heartbeat = (try? archive.meta("daemon_heartbeat")).flatMap { $0 }.flatMap(Int.init).map { Date(timeIntervalSince1970: TimeInterval($0)) }
@@ -113,5 +119,27 @@ struct Status: AsyncParsableCommand {
         print("Background sync: \(daemon)\(heartbeat.map { ", last active \(CLI.time($0))" } ?? "")")
         if let reason = PowerState.current().pauseReason { print("Sync is paused: \(reason).") }
         print("Archive: \(location.root.path). Logs: \(LaunchAgent.logDirectory.path)")
+    }
+
+    /// One line per synced folder. "=" when Stow accounts for every message the
+    /// server counted (archived + queued + could not download), else the difference.
+    static func printFolders(_ archive: Archive, account: AccountID) throws {
+        let reports = try ArchiveStatus.folders(archive, account: account)
+        guard !reports.isEmpty else {
+            print("  Folders: none listed yet.")
+            return
+        }
+        print("  Folders (server count | archived + queued + could not download):")
+        for report in reports {
+            let ours = report.archived + report.queued + report.unfetchable
+            let server = report.serverCount.map(String.init) ?? "?"
+            let verdict = report.serverCount == nil ? "" : report.matches ? "  =" : "  differs by \(ours - report.serverCount!)"
+            let detail = [report.queued > 0 ? "\(report.queued) queued" : nil,
+                          report.unfetchable > 0 ? "\(report.unfetchable) could not download" : nil,
+                          report.firstSyncComplete ? nil : "first sync in progress",
+                          report.lastError.map { "error: \($0)" }].compactMap { $0 }
+            print("    \(report.name): \(server) | \(report.archived) archived\(verdict)\(detail.isEmpty ? "" : "  (\(detail.joined(separator: ", ")))")")
+        }
+        print("    (Counts are from the last listing; mail that arrived since shows as a difference until the next sync.)")
     }
 }
