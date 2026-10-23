@@ -245,8 +245,7 @@ public struct MIMEParser: Sendable {
         var lineStart = body.lowerBound
 
         while lineStart < body.upperBound {
-            var lineEnd = lineStart
-            while lineEnd < body.upperBound, bytes[lineEnd] != 0x0A { lineEnd += 1 }
+            let lineEnd = Self.nextLineFeed(bytes, from: lineStart, to: body.upperBound)
             let next = min(lineEnd + 1, body.upperBound)
 
             if lineEnd - lineStart >= delimiter.count, bytes[lineStart] == 0x2D,
@@ -278,6 +277,18 @@ public struct MIMEParser: Sendable {
             }
         }
         return parts
+    }
+
+    /// Index of the next line feed in `bytes[start..<end]`, or `end`. Uses
+    /// `memchr`, which is far faster than a Swift loop on multi-megabyte bodies.
+    static func nextLineFeed(_ bytes: [UInt8], from start: Int, to end: Int) -> Int {
+        guard start < end else { return end }
+        return bytes.withUnsafeBufferPointer { buffer in
+            guard let base = buffer.baseAddress,
+                  let found = memchr(base + start, 0x0A, end - start)
+            else { return end }
+            return base.distance(to: found.assumingMemoryBound(to: UInt8.self))
+        }
     }
 
     /// The line break before a delimiter belongs to the delimiter, not the part.

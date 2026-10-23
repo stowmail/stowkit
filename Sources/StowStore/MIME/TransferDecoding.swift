@@ -44,6 +44,14 @@ enum TransferDecoding {
     /// Lenient base64: skips line breaks and any character outside the
     /// alphabet, stops at padding, and keeps whole bytes from a short tail.
     static func base64(_ bytes: [UInt8], _ range: Range<Int>) -> (Data, Bool) {
+        // Fast path: Foundation's decoder handles well-formed bodies with line breaks.
+        if let data = Data(base64Encoded: Data(bytes[range]), options: .ignoreUnknownCharacters) {
+            return (data, false)
+        }
+        return lenientBase64(bytes, range)
+    }
+
+    static func lenientBase64(_ bytes: [UInt8], _ range: Range<Int>) -> (Data, Bool) {
         var output = [UInt8]()
         output.reserveCapacity(range.count * 3 / 4)
         var accumulator: UInt32 = 0
