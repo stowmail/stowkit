@@ -537,7 +537,7 @@ final class AnnouncedCounts: @unchecked Sendable {
         defer { harness.cleanUp() }
         let ledger = UnfetchableLedger(fileURL: nil)
         _ = try? await harness.syncer(unfetchable: ledger).run()
-        #expect(harness.sleeps.delays == [2])
+        #expect(harness.server.connectionCount == 2) // one reconnect within the run
         #expect(await ledger.entries(folder: "Deleted Items").first?.attempts == 1)
     }
 }
@@ -578,5 +578,86 @@ final class AnnouncedCounts: @unchecked Sendable {
     @Test func otherRefusalsStayAuthenticationFailures() {
         #expect(IMAPSession.classifyAuthenticationFailure("NO AUTHENTICATE failed.") == .authenticationFailed("NO AUTHENTICATE failed."))
         #expect(IMAPSession.classifyAuthenticationFailure("NO User is authenticated but not connected.") == .mailboxUnavailable("NO User is authenticated but not connected."))
+    }
+}
+
+/// D-118: Microsoft 365 sometimes returns only part of a FETCH batch, then the
+/// rest on a later try. Missing UIDs are retried within the run first.
+@Suite struct PartialFetchTests {
+    static let allMail = "[Gmail]/Tous les messages"
+
+    @Test func uidsLeftOutOnceAreRecoveredWithinTheRun() async throws {
+        let fixtures = try Fixtures.small()
+        let server = gmailServer(fixtures) // UIDs 3, 5, 7, ...
+        server.refusals = [9: 1, 13: 1]
+        let harness = try await SyncHarness(server: server)
+        defer { harness.cleanUp() }
+        let ledger = UnfetchableLedger(fileURL: nil)
+
+        let report = try await harness.syncer(unfetchable: ledger).run(SyncOptions(batches: BatchPlanner(maxMessages: 6)))
+        #expect(report.notDownloaded.isEmpty)
+        #expect(report.outcome == .complete)
+        #expect(try await harness.storedUIDs() == (0..<fixtures.count).map { UInt32($0 * 2 + 3) })
+        #expect(harness.sleeps.delays == [2]) // one short pause, no reconnect
+        #expect(await ledger.totals() == (0, 0))
+        // The retry asked for just the missing UIDs.
+        #expect(harness.server.commandLog.contains { $0.contains("UID FETCH 9,13 (") })
+    }
+
+    @Test func stubbornUIDsAreFetchedOneAtATimeAfterTheSecondPause() async throws {
+        let fixtures = try Fixtures.small()
+        let server = gmailServer(fixtures)
+        server.refusals = [9: 2, 13: 2]
+        let harness = try await SyncHarness(server: server)
+        defer { harness.cleanUp() }
+
+        let report = try await harness.syncer().run(SyncOptions(batches: BatchPlanner(maxMessages: 6)))
+        #expect(report.notDownloaded.isEmpty)
+        #expect(harness.sleeps.delays == [2, 5])
+        let log = harness.server.commandLog
+        #expect(log.contains { $0.contains("UID FETCH 9 (") } && log.contains { $0.contains("UID FETCH 13 (") })
+        #expect(try await harness.storedUIDs().count == fixtures.count)
+    }
+
+    @Test func stillMissingAfterTheRetriesFallsThroughToD113() async throws {
+        let fixtures = try Fixtures.small()
+        let server = gmailServer(fixtures)
+        server.refusals = [9: 3]
+        let harness = try await SyncHarness(server: server)
+        defer { harness.cleanUp() }
+
+        let first = try await harness.syncer().run(SyncOptions(batches: BatchPlanner(maxMessages: 6)))
+        #expect(first.notDownloaded == [0: 1])
+        #expect(try await harness.store.checkpoint(accountID: harness.account.id, folder: Self.allMail)?.highestUID == 7)
+        // Transient: the next run gets it, and the folder completes.
+        let second = try await harness.syncer().run()
+        #expect(second.notDownloaded.isEmpty)
+        #expect(try await harness.storedUIDs().count == fixtures.count)
+    }
+
+    /// A NO completion on a partial FETCH is a partial reply, not a fatal error,
+    /// and its status, code and untagged text are logged at notice.
+    @Test func noCompletionIsPartialAndDiagnosticsAreLogged() async throws {
+        _ = CapturedLogs.installed
+        let fixtures = try Fixtures.small()
+        let server = gmailServer(fixtures)
+        server.refusals = [9: 1]
+        server.partialCompletion = "NO [UNAVAILABLE] Some messages could not be FETCHed (Failure)"
+        server.partialUntagged = "NO Item 9 is temporarily unavailable"
+        let harness = try await SyncHarness(server: server)
+        defer { harness.cleanUp() }
+
+        let report = try await harness.syncer().run(SyncOptions(batches: BatchPlanner(maxMessages: 6)))
+        #expect(report.notDownloaded.isEmpty)
+        #expect(try await harness.storedUIDs().count == fixtures.count)
+
+        let lines = CapturedLogs.shared.all.filter { $0.contains("Partial FETCH reply") && $0.contains("\(harness.account.id)") }
+        let line = try #require(lines.first)
+        #expect(line.hasPrefix("notice"))
+        #expect(line.contains("status: NO") || line.contains("\"status\": NO") || line.contains("status\": \"NO"))
+        #expect(line.contains("UNAVAILABLE") || line.contains("unavailable"))
+        #expect(line.contains("temporarily unavailable"))
+        #expect(line.contains("asked: 6") || line.contains("\"asked\": 6") || line.contains("asked\": \"6"))
+        #expect(!line.contains("sam@example.com"))
     }
 }

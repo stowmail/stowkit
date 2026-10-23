@@ -143,11 +143,46 @@ public actor IMAPSession {
     /// Downloads complete messages with BODY.PEEK[]. Messages deleted on the
     /// server in the meantime are simply absent from the result.
     public func fetchMessages(uids: [UInt32], gmail: Bool) async throws -> [FetchedMessage] {
-        guard !uids.isEmpty else { return [] }
+        try await fetchMessagesWithDiagnostics(uids: uids, gmail: gmail).messages
+    }
+
+    /// Like `fetchMessages`, plus how the server completed the command, for
+    /// diagnosing partial replies (D-118). A NO completion is treated as a
+    /// partial reply rather than an error: whatever arrived is returned. Only a
+    /// quota reply still throws.
+    public func fetchMessagesWithDiagnostics(uids: [UInt32], gmail: Bool) async throws -> (messages: [FetchedMessage], diagnostics: FetchDiagnostics) {
+        guard !uids.isEmpty else { return ([], FetchDiagnostics(status: "OK")) }
         var builder = FetchAssembler()
-        _ = try await run(.fetchMessages(uids: uids, gmail: gmail)) { try builder.consume($0) }
+        var untagged: [String] = []
+        let byeBefore = lastBye
+        let completion = try await runForCompletion(.fetchMessages(uids: uids, gmail: gmail)) { response in
+            switch response {
+            case .untagged(.conditionalState(.no(let text))): untagged.append("NO " + Self.describe(text))
+            case .untagged(.conditionalState(.bad(let text))): untagged.append("BAD " + Self.describe(text))
+            default: try builder.consume(response)
+            }
+        }
+        if lastBye != byeBefore, let bye = lastBye { untagged.append("BYE " + bye) }
+        switch completion.status {
+        case "OK":
+            break
+        case "NO":
+            // Kept as a partial reply (with its diagnostics) unless it is a
+            // daily quota reply, which no amount of retrying will fix. A
+            // throttling NO is also kept: the in-run retry already backs off.
+            let failure = Self.classifyFailure(command: "UID FETCH", status: "NO", text: completion.text)
+            if case .quotaExceeded = failure { throw failure }
+        default:
+            throw Self.classifyFailure(command: "UID FETCH", status: completion.status, text: completion.text)
+        }
+        let diagnostics = FetchDiagnostics(
+            status: completion.status,
+            code: completion.text.code.map { Redact.scrub(String(describing: $0)) },
+            text: Self.describe(completion.text),
+            untagged: untagged
+        )
         let wanted = Set(uids)
-        return try builder.finished.compactMap { partial -> FetchedMessage? in
+        let messages = try builder.finished.compactMap { partial -> FetchedMessage? in
             guard let uid = partial.uid, wanted.contains(uid) else { return nil }
             guard let bytes = partial.body else {
                 throw SyncError.protocolViolation("FETCH reply for UID \(uid) had no message body")
@@ -165,6 +200,12 @@ public actor IMAPSession {
                 bytes: bytes
             )
         }.sorted { $0.uid < $1.uid }
+        return (messages, diagnostics)
+    }
+
+    /// Server free text for logs: scrubbed (D-014) and kept short.
+    static func describe(_ text: ResponseText) -> String {
+        String(Redact.scrub(text.text).prefix(200))
     }
 
     /// Says goodbye and closes the connection. Never throws.
@@ -216,6 +257,16 @@ public actor IMAPSession {
     /// Sends one command and feeds every reply to `handle` until the tagged
     /// completion. Returns the text of the OK; throws on NO, BAD or BYE.
     private func run(_ command: ReadOnlyCommand, handle: (Response) throws -> Void) async throws -> ResponseText {
+        let completion = try await runForCompletion(command, handle: handle)
+        switch completion.status {
+        case "OK": return completion.text
+        default: throw Self.classifyFailure(command: command.verb, status: completion.status, text: completion.text)
+        }
+    }
+
+    /// Sends one command and feeds every reply to `handle` until the tagged
+    /// completion, which it returns whether OK, NO or BAD. Throws on BYE or a lost connection.
+    private func runForCompletion(_ command: ReadOnlyCommand, handle: (Response) throws -> Void) async throws -> (status: String, text: ResponseText) {
         if Task.isCancelled {
             await disconnect()
             throw SyncError.cancelled
@@ -226,18 +277,15 @@ public actor IMAPSession {
         try await connection.send(tag: tag, command)
         while true {
             guard let response = try await nextResponse() else {
-                if case .logout = command { return ResponseText(text: "") }
+                if case .logout = command { return ("OK", ResponseText(text: "")) }
                 throw Self.classifyBye(lastBye)
             }
             switch response {
             case .tagged(let tagged) where tagged.tag == tag:
                 switch tagged.state {
-                case .ok(let text):
-                    return text
-                case .no(let text):
-                    throw Self.classifyFailure(command: command.verb, status: "NO", text: text)
-                case .bad(let text):
-                    throw Self.classifyFailure(command: command.verb, status: "BAD", text: text)
+                case .ok(let text): return ("OK", text)
+                case .no(let text): return ("NO", text)
+                case .bad(let text): return ("BAD", text)
                 }
             case .authenticationChallenge:
                 // XOAUTH2 reports failure as a challenge carrying JSON; the

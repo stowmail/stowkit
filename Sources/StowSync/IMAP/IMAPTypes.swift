@@ -118,3 +118,15 @@ extension ServerMessageDate {
         return calendar.date(from: DateComponents(year: c.year, month: c.month, day: c.day, hour: c.hour, minute: c.minute, second: c.second))
     }
 }
+
+/// How the server completed a message FETCH, for diagnosing partial replies
+/// (D-118). Server text is scrubbed; nothing here holds message content.
+public struct FetchDiagnostics: Sendable, Equatable {
+    /// `OK` or `NO`.
+    public var status: String
+    /// The response code on the completion, for example `UNAVAILABLE`, if any.
+    public var code: String?
+    public var text: String = ""
+    /// Untagged NO, BAD or BYE lines received during the command.
+    public var untagged: [String] = []
+}

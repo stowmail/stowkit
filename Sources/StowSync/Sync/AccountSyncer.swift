@@ -9,12 +9,36 @@ public struct SyncOptions: Sendable {
     public var batches: BatchPlanner
     /// UIDs listed per listing command, so a huge folder is walked in pieces.
     public var listWindow: UInt32
+    /// How a batch that came back partial is retried within the run before the
+    /// folder stops (D-118): each round waits, then re-fetches the still-missing
+    /// UIDs in chunks of the given size.
+    public var partialRetry: [PartialRetryRound]
 
-    public init(limit: Int? = nil, batches: BatchPlanner = BatchPlanner(), listWindow: UInt32 = 50_000) {
+    public init(
+        limit: Int? = nil,
+        batches: BatchPlanner = BatchPlanner(),
+        listWindow: UInt32 = 50_000,
+        partialRetry: [PartialRetryRound] = PartialRetryRound.default
+    ) {
         self.limit = limit
         self.batches = batches
         self.listWindow = max(1, listWindow)
+        self.partialRetry = partialRetry
     }
+}
+
+/// One round of re-fetching UIDs a partial FETCH left out (D-118).
+public struct PartialRetryRound: Sendable, Equatable {
+    public var delay: TimeInterval
+    public var chunkSize: Int
+
+    public init(delay: TimeInterval, chunkSize: Int) {
+        self.delay = delay
+        self.chunkSize = max(1, chunkSize)
+    }
+
+    /// 2 s then up to 10 at a time; 5 s then one at a time.
+    public static let `default` = [PartialRetryRound(delay: 2, chunkSize: 10), PartialRetryRound(delay: 5, chunkSize: 1)]
 }
 
 /// Progress events, for the CLI to print. They carry no folder names or message content.
@@ -212,7 +236,7 @@ public struct AccountSyncer: Sendable {
                 let used = await budget.used()
                 return .budgetExhausted(usedBytes: used, limitBytes: budget.limit ?? 0)
             }
-            let messages = try await session.fetchMessages(uids: batch.map(\.uid), gmail: account.provider == .gmail)
+            let messages = try await fetchRetryingPartial(batch.map(\.uid), session: session, options: options, folderIndex: index)
             var bytes: Int64 = 0
             for message in messages {
                 try await sink.write(RawMessage(
@@ -282,6 +306,57 @@ public struct AccountSyncer: Sendable {
             if let limit = options.limit, report.messagesWritten >= limit { return .limitReached }
         }
         return .complete
+    }
+
+    /// Fetches a batch. If the server leaves some UIDs out, waits and re-fetches
+    /// just those in smaller chunks, as `options.partialRetry` says, logging what
+    /// the server said each time (D-118). Whatever is still missing afterwards
+    /// is left to the D-113 and D-115 handling.
+    private func fetchRetryingPartial(_ uids: [UInt32], session: IMAPSession, options: SyncOptions, folderIndex: Int) async throws -> [FetchedMessage] {
+        let gmail = account.provider == .gmail
+        let first = try await session.fetchMessagesWithDiagnostics(uids: uids, gmail: gmail)
+        var messages = first.messages
+        var missing = Self.missing(uids, from: messages)
+        guard !missing.isEmpty else { return messages }
+        logPartial(first.diagnostics, folderIndex: folderIndex, round: 0, asked: uids.count, returned: first.messages.count)
+
+        for (number, round) in options.partialRetry.enumerated() where !missing.isEmpty {
+            do {
+                try await sleep(round.delay)
+            } catch {
+                throw SyncError.cancelled
+            }
+            for start in stride(from: 0, to: missing.count, by: round.chunkSize) {
+                let chunk = Array(missing[start..<min(start + round.chunkSize, missing.count)])
+                let reply = try await session.fetchMessagesWithDiagnostics(uids: chunk, gmail: gmail)
+                messages += reply.messages
+                if reply.messages.count < chunk.count {
+                    logPartial(reply.diagnostics, folderIndex: folderIndex, round: number + 1, asked: chunk.count, returned: reply.messages.count)
+                }
+            }
+            missing = Self.missing(uids, from: messages)
+        }
+        logger.notice("Partial FETCH retried within the run", metadata: [
+            "account": "\(account.id)", "folderIndex": "\(folderIndex)", "asked": "\(uids.count)",
+            "returnedFirstTime": "\(first.messages.count)", "stillMissing": "\(missing.count)",
+        ])
+        return messages
+    }
+
+    static func missing(_ uids: [UInt32], from messages: [FetchedMessage]) -> [UInt32] {
+        let got = Set(messages.map(\.uid))
+        return uids.filter { !got.contains($0) }
+    }
+
+    /// Notice-level record of how the server completed a partial FETCH. Counts,
+    /// status, response code and scrubbed server text only: no content, no addresses.
+    private func logPartial(_ diagnostics: FetchDiagnostics, folderIndex: Int, round: Int, asked: Int, returned: Int) {
+        logger.notice("Partial FETCH reply", metadata: [
+            "account": "\(account.id)", "folderIndex": "\(folderIndex)", "round": "\(round)",
+            "asked": "\(asked)", "returned": "\(returned)",
+            "status": "\(diagnostics.status)", "code": "\(diagnostics.code ?? "none")",
+            "text": "\(diagnostics.text)", "untagged": "\(diagnostics.untagged.joined(separator: " | "))",
+        ])
     }
 
     private func saveCheckpoint(folder: IMAPFolder, uidValidity: UInt32, highestUID: UInt32) async throws {

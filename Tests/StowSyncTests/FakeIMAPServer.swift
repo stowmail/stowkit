@@ -42,6 +42,13 @@ final class FakeIMAPServer: @unchecked Sendable {
     /// UIDs deleted from the mailbox the moment a body fetch arrives, as if
     /// another client expunged them between listing and download.
     var expungeOnBodyFetch: Set<UInt32> { get { sync { _expunge } } set { sync { _expunge = newValue } } }
+    /// How many body fetches leave each UID out before it is returned (transient
+    /// partial replies, as seen on Microsoft 365).
+    var refusals: [UInt32: Int] { get { sync { _refusals } } set { sync { _refusals = newValue } } }
+    /// When a body fetch leaves anything out: the tagged completion to send
+    /// instead of OK (for example "NO [UNAVAILABLE] Try later"), and an untagged line to add.
+    var partialCompletion: String? { get { sync { _partialCompletion } } set { sync { _partialCompletion = newValue } } }
+    var partialUntagged: String? { get { sync { _partialUntagged } } set { sync { _partialUntagged = newValue } } }
     /// Refuse every AUTHENTICATE at once with this text (no SASL challenge),
     /// as Exchange does for an account without a mailbox.
     var authFailureText: String? { get { sync { _authFailure } } set { sync { _authFailure = newValue } } }
@@ -65,6 +72,9 @@ final class FakeIMAPServer: @unchecked Sendable {
     private var _readWrite = false
     private var _dropEvery = false
     private var _authFailure: String?
+    private var _refusals: [UInt32: Int] = [:]
+    private var _partialCompletion: String?
+    private var _partialUntagged: String?
     private var _bodyless: Set<UInt32> = []
     private var _expunge: Set<UInt32> = []
     private var _log: [String] = []
@@ -277,8 +287,14 @@ final class FakeIMAPServer: @unchecked Sendable {
         let maxUID = mailbox.messages.map(\.uid).max() ?? 0
         let wanted = Self.parseSet(set, maxUID: maxUID)
         var out = Data()
+        var omitted = false
         for (index, message) in mailbox.messages.enumerated() where wanted(message.uid) {
-            if wantsBody, _bodyless.contains(message.uid) { continue }
+            if wantsBody, _bodyless.contains(message.uid) { omitted = true; continue }
+            if wantsBody, let left = _refusals[message.uid], left > 0 {
+                _refusals[message.uid] = left - 1
+                omitted = true
+                continue
+            }
             var items = ["UID \(message.uid)", "RFC822.SIZE \(message.bytes.count)"]
             if attributes.contains(" FLAGS") {
                 items.append("FLAGS (\(message.flags.joined(separator: " ")))")
@@ -298,7 +314,12 @@ final class FakeIMAPServer: @unchecked Sendable {
             }
             out.append(Data(")\r\n".utf8))
         }
-        out.append(Data("\(tag) OK UID FETCH completed\r\n".utf8))
+        if omitted, let untagged = _partialUntagged { out.append(Data("* \(untagged)\r\n".utf8)) }
+        if omitted, let completion = _partialCompletion {
+            out.append(Data("\(tag) \(completion)\r\n".utf8))
+        } else {
+            out.append(Data("\(tag) OK UID FETCH completed\r\n".utf8))
+        }
         send(out, to: client)
     }
 
