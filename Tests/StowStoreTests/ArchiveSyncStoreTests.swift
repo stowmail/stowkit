@@ -43,6 +43,31 @@ import Testing
         #expect(try await store.queueTotals(account) == QueueTotals(queued: 2, queuedBytes: 200, unfetchable: 0))
     }
 
+    @Test func personalMailArrivingAfterTheFirstWalkGoesAheadOfTheBacklog() async throws {
+        let (test, store) = try setUp()
+        defer { test.remove() }
+        let account = test.account.id
+        _ = try await store.beginFolder(account, folder: inbox, uidValidity: 1, exists: 3)
+        try await store.enqueue(account, folder: inbox, uidValidity: 1, messages: [queued(1), queued(2)], listedThrough: 2)
+        // Still the first walk: a later chunk of the same listing is backlog too.
+        try await store.enqueue(account, folder: inbox, uidValidity: 1, messages: [queued(3)], listedThrough: 3)
+        try await store.folderWalked(account, folder: inbox, uidValidity: 1, at: Date())
+        // The next listing finds new mail: personal goes first, bulk keeps its place.
+        try await store.enqueue(account, folder: inbox, uidValidity: 1,
+                                messages: [queued(4), queued(5, priority: 2)], listedThrough: 5)
+
+        #expect(try await store.nextDownloads(account, runID: "r", maxMessages: 10, maxBytes: 10_000).map(\.uid) == [4])
+        try await store.downloaded(account, folder: inbox, uidValidity: 1, uids: [4])
+        #expect(try await store.nextDownloads(account, runID: "r", maxMessages: 10, maxBytes: 10_000).map(\.uid) == [1, 2, 3])
+        try await store.downloaded(account, folder: inbox, uidValidity: 1, uids: [1, 2, 3])
+        #expect(try await store.nextDownloads(account, runID: "r", maxMessages: 10, maxBytes: 10_000).map(\.uid) == [5])
+
+        // After a UIDVALIDITY change the folder is walked afresh, so its mail is backlog again.
+        _ = try await store.beginFolder(account, folder: inbox, uidValidity: 2, exists: 1)
+        try await store.enqueue(account, folder: inbox, uidValidity: 2, messages: [queued(9)], listedThrough: 9)
+        #expect(try test.count("download_queue", "priority = 0") == 1)
+    }
+
     @Test func archivedAndRemovedMessagesAreNotQueuedAgain() async throws {
         let (test, store) = try setUp()
         defer { test.remove() }

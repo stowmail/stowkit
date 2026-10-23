@@ -228,6 +228,22 @@ func testKeychain() -> KeychainStore {
         guard case .paused(let reason) = await unconfirmed.round().0 else { Issue.record("should pause"); return }
         #expect(reason.contains("recovery key"))
     }
+
+    /// Files from a batch killed before it was recorded are deleted when the daemon starts.
+    @Test func theFirstRoundDeletesFilesLeftByAKilledSync() async throws {
+        let (archive, location, keys) = try confirmedArchive()
+        defer { try? FileManager.default.removeItem(at: location.root) }
+        let content = Data("left behind".utf8)
+        _ = try archive.attachmentFiles.write(content, hash: archive.attachmentFiles.hash(of: content))
+        try archive.database.close()
+        let scheduler = Scheduler(openArchive: { try Archive.open(location, keys: keys) },
+                                  makeSync: { _ in throw CocoaError(.fileNoSuchFile) },
+                                  power: { PowerState(onBattery: false, batteryPercent: nil, lowPowerMode: false) })
+        #expect(await scheduler.round().0 == .idle)
+        let check = try Archive.open(location, keys: keys)
+        #expect(check.attachmentFiles.allHashes().isEmpty)
+        #expect(try ArchiveVerifier(archive: check).run().unusedAttachmentFiles == 0)
+    }
 }
 
 @Suite struct DaemonPieceTests {

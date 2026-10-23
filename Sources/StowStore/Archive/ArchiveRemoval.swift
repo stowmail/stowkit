@@ -190,7 +190,8 @@ public struct ArchiveRemoval: Sendable {
     }
 
     /// Deletes message and attachment files no database row refers to (left by
-    /// an interrupted removal). Returns how many were deleted.
+    /// an interrupted sync or removal). Call only while holding the writer lock.
+    /// Returns how many were deleted.
     @discardableResult
     public func sweepUnusedFiles() throws -> Int {
         let (raw, attachments) = try archive.database.read { db in

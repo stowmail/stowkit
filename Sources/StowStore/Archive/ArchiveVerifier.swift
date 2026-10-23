@@ -12,7 +12,7 @@ public struct ArchiveVerifyReport: Sendable, Equatable {
     public var attachments = 0
     /// Attachment files missing, damaged, or not matching their recorded hash.
     public var failedAttachments: [Int64] = []
-    /// Files no database row refers to: left by an interrupted removal, harmless.
+    /// Files no database row refers to: left by an interrupted sync or removal, harmless.
     public var unusedMessageFiles = 0
     public var unusedAttachmentFiles = 0
     /// Whether the full-text index matches the stored text (FTS5 integrity-check).

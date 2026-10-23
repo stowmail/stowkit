@@ -105,7 +105,7 @@ public final class ArchiveSyncStore: RawMessageSink, SyncStateStore, Sendable {
             try db.execute(sql: "DELETE FROM download_queue WHERE folder_id = ? AND uid_validity != ?",
                            arguments: [folderID, Int64(uidValidity)])
             try db.execute(sql: """
-                UPDATE sync_state SET uid_validity = ?, listed_through_uid = 0, highest_modseq = NULL,
+                UPDATE sync_state SET uid_validity = ?, listed_through_uid = 0, highest_modseq = NULL, last_sync_at = NULL,
                     first_sync_completed_at = NULL, server_exists = ?, status = 'syncing'
                 WHERE folder_id = ?
                 """, arguments: [Int64(uidValidity), exists, folderID])
@@ -122,6 +122,10 @@ public final class ArchiveSyncStore: RawMessageSink, SyncStateStore, Sendable {
         try await database.write { db in
             let folderID = try Self.folderID(db, account: account, name: folder)
             let now = Self.now()
+            // Once the folder has been walked in full, anything new has just arrived:
+            // personal mail of that kind goes ahead of the backlog (D-043).
+            let walked = try Bool.fetchOne(db, sql: "SELECT last_sync_at IS NOT NULL FROM sync_state WHERE folder_id = ?",
+                                           arguments: [folderID]) ?? false
             var queued = 0
             for message in messages {
                 let location: StatementArguments = [folderID, Int64(uidValidity), Int64(message.uid)]
@@ -160,7 +164,8 @@ public final class ArchiveSyncStore: RawMessageSink, SyncStateStore, Sendable {
                     INSERT INTO download_queue (folder_id, uid_validity, uid, size, internal_date, priority, gmail_msgid, queued_at)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING
                     """, arguments: location + [message.size, message.internalDate.map { Int($0.timeIntervalSince1970) },
-                                                message.priority, message.gmailMessageID.map { Int64(bitPattern: $0) }, now])
+                                                walked && message.priority == 0 ? QueuedMessage.newArrival : message.priority,
+                                                message.gmailMessageID.map { Int64(bitPattern: $0) }, now])
                 queued += db.changesCount
             }
             try db.execute(sql: "UPDATE sync_state SET listed_through_uid = max(listed_through_uid, ?) WHERE folder_id = ?",

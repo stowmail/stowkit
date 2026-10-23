@@ -62,9 +62,13 @@ public struct QueuedMessage: Sendable, Equatable {
     /// RFC822.SIZE: an estimate on Exchange (D-120), used for batching and the budget.
     public var size: Int
     public var internalDate: Date?
-    /// Lower downloads first: 0 for mail that looks personal, higher for bulk (D-028).
+    /// Lower downloads first: 0 for mail that looks personal, higher for bulk (D-028),
+    /// `newArrival` for personal mail that arrived after its folder was first walked (D-043).
     public var priority: Int
     public var gmailMessageID: UInt64?
+
+    /// Ahead of the backlog, so new mail is searchable within a cycle even during a first sync.
+    public static let newArrival = -1
 
     public init(folder: String, uidValidity: UInt32, uid: UInt32, size: Int, internalDate: Date? = nil,
                 priority: Int = 0, gmailMessageID: UInt64? = nil) {

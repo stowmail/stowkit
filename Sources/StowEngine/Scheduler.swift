@@ -69,6 +69,7 @@ public actor Scheduler {
     private var lastFullCheck: [AccountID: Date] = [:]
     private var nextStart = 0
     private var lastLogged: RoundResult?
+    private var swept = false
 
     public init(
         settings: SchedulerSettings = SchedulerSettings(),
@@ -128,6 +129,14 @@ public actor Scheduler {
         guard ArchiveSetup.isConfirmed(archive) else { return (.paused(ArchiveSetupError.recoveryNotConfirmed.description), [:]) }
         guard let lock = try? ArchiveLock.acquire(archive.location) else { return (.busy, [:]) }
         defer { lock.release() }
+        if !swept {
+            // Files written by a batch that was killed before it was recorded. Only
+            // safe while holding the lock, so nothing is mid-write.
+            swept = true
+            if let count = try? ArchiveRemoval(archive: archive).sweepUnusedFiles(), count > 0 {
+                logger.notice("Deleted unused files left by an interrupted sync", metadata: ["count": "\(count)"])
+            }
+        }
 
         let accounts = ArchiveAccounts(archive: archive)
         let records = ((try? accounts.connected()) ?? []).filter { !$0.needsSignIn }

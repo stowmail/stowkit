@@ -200,7 +200,7 @@ struct Verify: AsyncParsableCommand {
         print("Search index: \(report.searchIndexConsistent ? "matches the stored text" : "DOES NOT MATCH")")
         print("Database: \(report.databaseIntegrity)\(report.foreignKeyProblems > 0 ? ", \(report.foreignKeyProblems) broken references" : "")")
         if report.unusedMessageFiles + report.unusedAttachmentFiles > 0 {
-            print("Unused files left by an interrupted removal: \(report.unusedMessageFiles + report.unusedAttachmentFiles) (harmless; deleted by the next `stowmail remove`).")
+            print("Unused files left by an interrupted sync or removal: \(report.unusedMessageFiles + report.unusedAttachmentFiles) (harmless; deleted when background sync next starts, or by `stowmail remove`).")
         }
         guard report.isClean else {
             FileHandle.standardError.write(Data("Verification failed.\n".utf8))
