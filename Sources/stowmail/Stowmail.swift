@@ -12,7 +12,7 @@ struct Stowmail: AsyncParsableCommand {
         abstract: "Stow: a local, encrypted, searchable email archive.",
         version: StowVersion.current,
         subcommands: [
-            Doctor.self, AccountCommand.self, Folders.self, Sync.self,
+            Doctor.self, AccountCommand.self, Folders.self, Sync.self, Verify.self,
             Rules.self, Init.self, Import.self, Stats.self, Search.self, OCR.self,
         ]
     )
