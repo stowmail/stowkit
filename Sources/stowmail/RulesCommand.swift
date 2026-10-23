@@ -69,10 +69,9 @@ struct RulesExplain: ParsableCommand {
     }
 }
 
-/// Where explain gets parsed headers. Header parsing belongs to StowCore (D-017, Track B);
-/// this is the one place to wire it in once that merges.
+/// Where explain gets parsed headers: the shared parser in StowCore (D-017).
 enum HeaderSource {
     static func parse(_ raw: Data) throws -> MessageHeaders {
-        throw ValidationError("The header parser from Track B is not merged yet, so .eml files cannot be read.")
+        try HeaderParser().parseHeaders(raw)
     }
 }
