@@ -82,7 +82,7 @@ let package = Package(
         .testTarget(name: "StowSecretsTests", dependencies: ["StowSecrets"]),
         .testTarget(name: "StowSyncTests", dependencies: ["StowSync"]),
         .testTarget(name: "StowStoreTests", dependencies: ["StowStore", .product(name: "GRDB", package: "GRDB")]),
-        .testTarget(name: "StowSearchTests", dependencies: ["StowSearch"]),
+        .testTarget(name: "StowSearchTests", dependencies: ["StowSearch", "StowStore", "StowSecrets", .product(name: "GRDB", package: "GRDB")]),
         .testTarget(name: "StowRulesTests", dependencies: ["StowRules"]),
         .testTarget(name: "StowMCPTests", dependencies: ["StowMCP"]),
     ],

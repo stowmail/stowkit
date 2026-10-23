@@ -22,7 +22,15 @@ public struct HeaderParser: HeaderParsing {
     public func parseHeaders(_ raw: Data) -> MessageHeaders {
         var warnings: [String] = []
         let block = Self.splitFields(raw, warnings: &warnings)
-        var headers = MessageHeaders(fields: block.fields)
+        return headers(from: block.fields, warnings: warnings)
+    }
+
+    /// Fills `MessageHeaders` from fields already split by `splitFields`, for
+    /// example the headers of a message forwarded as an attachment. `warnings`
+    /// are carried over and added to.
+    public func headers(from fields: [HeaderField], warnings existing: [String] = []) -> MessageHeaders {
+        var warnings = existing
+        var headers = MessageHeaders(fields: fields)
 
         func addresses(_ name: String) -> [EmailAddress] {
             var result: [EmailAddress] = []
@@ -115,14 +123,17 @@ public struct HeaderParser: HeaderParsing {
     /// Windows-1252 then ISO-8859-1 for old 8-bit headers, with a warning.
     public static func splitFields(_ raw: Data, warnings: inout [String]) -> Block {
         let bytes = [UInt8](raw)
+        return splitFields(bytes, in: 0..<bytes.count, warnings: &warnings)
+    }
+
+    /// The same, for the bytes in `range` of a larger buffer (one MIME part of
+    /// a message), without copying the rest. `bodyStart` is an index into `bytes`.
+    public static func splitFields(_ bytes: [UInt8], in range: Range<Int>, warnings: inout [String]) -> Block {
         var lines: [ArraySlice<UInt8>] = []
-        var lineStart = 0
-        var bodyStart = bytes.count
-        var limit = bytes.count
-        if limit > maximumHeaderBytes {
-            limit = maximumHeaderBytes
-        }
-        var i = 0
+        var lineStart = range.lowerBound
+        var bodyStart = range.upperBound
+        let limit = min(range.upperBound, range.lowerBound + maximumHeaderBytes)
+        var i = range.lowerBound
         var foundEnd = false
         while i < limit {
             if bytes[i] == 0x0A {
@@ -139,12 +150,11 @@ public struct HeaderParser: HeaderParsing {
             i += 1
         }
         if !foundEnd {
-            if limit < bytes.count {
+            if limit < range.upperBound {
                 warnings.append("header block truncated at \(maximumHeaderBytes) bytes")
-                bodyStart = bytes.count
-            } else if lineStart < bytes.count {
+            } else if lineStart < range.upperBound {
                 // Input ends without a newline: the last line is still a header.
-                var end = bytes.count
+                var end = range.upperBound
                 if bytes[end - 1] == 0x0D { end -= 1 }
                 if end > lineStart { lines.append(bytes[lineStart..<end]) }
             }
