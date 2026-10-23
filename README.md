@@ -29,7 +29,7 @@ the macOS Keychain only.
 |---|---|
 | `StowCore` | Shared types and protocols: accounts, raw messages, sink and source, checkpoints, headers, search shapes, log redaction. A file-based raw message store. No package dependencies. |
 | `StowSecrets` | Keychain access, OAuth token storage, archive key management, app configuration. |
-| `StowSync` | IMAP sync and OAuth sign-in. Read-only by construction. |
+| `StowSync` | IMAP sync and OAuth sign-in. Read-only by construction: commands only through `ReadOnlyCommand` (EXAMINE, `BODY.PEEK[]`). |
 | `StowStore` | MIME parsing, encrypted database, attachments and raw message files. |
 | `StowSearch` | FTS5 search, text extraction and OCR. |
 | `StowRules` | Bulk-mail signals and rules, from headers only. |
@@ -60,6 +60,7 @@ Error text from servers or libraries goes through `Redact.scrub` first.
 |---|---|
 | swift-nio-imap (0.4.x) | IMAP protocol (Apple) |
 | swift-nio-transport-services | TLS through Network.framework |
+| swift-nio (`NIOCore`) | Channel types used by the IMAP connection; already required by the two above (D-101) |
 | swift-argument-parser | CLI |
 | swift-log | Logging API |
 | GRDB 7.11.1, vendored in `Vendor/GRDB` | SQLite access and migrations, built against SQLCipher |
