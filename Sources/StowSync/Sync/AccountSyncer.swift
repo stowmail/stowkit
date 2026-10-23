@@ -27,6 +27,8 @@ public enum SyncEvent: Sendable {
     /// Some listed messages could not be downloaded and are still on the server.
     /// The folder stops before them; its checkpoint does not pass them (D-113).
     case folderStopped(index: Int, notDownloaded: Int)
+    /// Messages listed but unreturnable on enough separate runs were recorded and passed (D-115).
+    case unfetchableRecorded(index: Int, count: Int)
     case retrying(after: TimeInterval, attempt: Int, reason: String)
 }
 
@@ -45,6 +47,9 @@ public struct SyncReport: Sendable, Equatable {
     /// Messages the server listed but would not return, per folder index (D-113).
     /// Non-empty means the run is incomplete, even if `outcome` is `.complete`.
     public var notDownloaded: [Int: Int] = [:]
+    /// Messages passed this run because they were listed but unreturnable on
+    /// `UnfetchableLedger.threshold` separate runs, per folder index (D-115).
+    public var recordedUnfetchable: [Int: Int] = [:]
     public var outcome: SyncOutcome = .complete
 }
 
@@ -63,6 +68,7 @@ public struct AccountSyncer: Sendable {
     let sink: RawMessageSink
     let checkpoints: SyncCheckpointStore
     let budget: ByteBudget
+    let unfetchable: UnfetchableLedger
     let retry: RetryPolicy
     let sleep: @Sendable (TimeInterval) async throws -> Void
     let now: @Sendable () -> Date
@@ -74,6 +80,7 @@ public struct AccountSyncer: Sendable {
         sink: RawMessageSink,
         checkpoints: SyncCheckpointStore,
         budget: ByteBudget,
+        unfetchable: UnfetchableLedger = UnfetchableLedger(fileURL: nil),
         retry: RetryPolicy = .default,
         sleep: @escaping @Sendable (TimeInterval) async throws -> Void = { try await Task.sleep(nanoseconds: UInt64($0 * 1_000_000_000)) },
         now: @escaping @Sendable () -> Date = { Date() }
@@ -83,6 +90,7 @@ public struct AccountSyncer: Sendable {
         self.sink = sink
         self.checkpoints = checkpoints
         self.budget = budget
+        self.unfetchable = unfetchable
         self.retry = retry
         self.sleep = sleep
         self.now = now
@@ -92,13 +100,15 @@ public struct AccountSyncer: Sendable {
     /// a non-retryable error occurs. Retryable failures reconnect with back-off.
     public func run(_ options: SyncOptions = SyncOptions(), onEvent: @escaping @Sendable (SyncEvent) -> Void = { _ in }) async throws -> SyncReport {
         var report = SyncReport()
+        // Identifies this run, so a reconnect within it never counts as a second attempt (D-115).
+        let runID = UUID().uuidString
         var failuresWithoutProgress = 0
         var attempt = 0
         while true {
             attempt += 1
             let before = report.messagesWritten
             do {
-                try await runOnce(options, report: &report, attempt: attempt, onEvent: onEvent)
+                try await runOnce(options, runID: runID, report: &report, attempt: attempt, onEvent: onEvent)
                 return report
             } catch let error as SyncError where error.isRetryable {
                 failuresWithoutProgress = report.messagesWritten > before ? 1 : failuresWithoutProgress + 1
@@ -117,7 +127,7 @@ public struct AccountSyncer: Sendable {
         }
     }
 
-    private func runOnce(_ options: SyncOptions, report: inout SyncReport, attempt: Int, onEvent: @Sendable (SyncEvent) -> Void) async throws {
+    private func runOnce(_ options: SyncOptions, runID: String, report: inout SyncReport, attempt: Int, onEvent: @Sendable (SyncEvent) -> Void) async throws {
         let session = try await openSession()
         onEvent(.connected(attempt: attempt))
         do {
@@ -126,7 +136,7 @@ public struct AccountSyncer: Sendable {
             onEvent(.folderPlanned(toSync: plan.toSync.count, skipped: plan.skipped.count))
             report.foldersSynced = 0
             for (index, folder) in plan.toSync.enumerated() {
-                let outcome = try await syncFolder(folder, index: index, of: plan.toSync.count, session: session, options: options, report: &report, onEvent: onEvent)
+                let outcome = try await syncFolder(folder, index: index, of: plan.toSync.count, session: session, options: options, runID: runID, report: &report, onEvent: onEvent)
                 report.foldersSynced += 1
                 if outcome != .complete {
                     report.outcome = outcome
@@ -146,6 +156,7 @@ public struct AccountSyncer: Sendable {
         of total: Int,
         session: IMAPSession,
         options: SyncOptions,
+        runID: String,
         report: inout SyncReport,
         onEvent: @Sendable (SyncEvent) -> Void
     ) async throws -> SyncOutcome {
@@ -222,15 +233,30 @@ public struct AccountSyncer: Sendable {
             let written = Set(messages.map(\.uid))
             let missing = batch.map(\.uid).filter { !written.contains($0) }
             var gone: Set<UInt32> = []
+            var relisted: [MessageSummary] = []
             if !missing.isEmpty {
-                let stillThere = Set(try await session.fetchUIDs(missing).map(\.uid))
-                gone = Set(missing).subtracting(stillThere)
+                relisted = try await session.fetchUIDs(missing)
+                gone = Set(missing).subtracting(relisted.map(\.uid))
             }
-            let stuck = missing.filter { !gone.contains($0) }
-            // Advance only through an unbroken run of written or vanished UIDs.
+            // Still listed but not returned: count an attempt; after enough
+            // separate runs they are recorded and passed (D-115).
+            var recorded: Set<UInt32> = []
+            if !relisted.isEmpty {
+                recorded = try await unfetchable.recordAttempt(folder: folder.name, uidValidity: status.uidValidity, runID: runID, stuck: relisted)
+            }
+            try await unfetchable.resolve(folder: folder.name, uidValidity: status.uidValidity, uids: written.union(gone))
+            let stuck = missing.filter { !gone.contains($0) && !recorded.contains($0) }
+            // Advance only through an unbroken run of written, vanished or recorded UIDs.
             for summary in batch {
-                guard written.contains(summary.uid) || gone.contains(summary.uid) else { break }
+                guard written.contains(summary.uid) || gone.contains(summary.uid) || recorded.contains(summary.uid) else { break }
                 checkpointUID = summary.uid
+            }
+            if !recorded.isEmpty {
+                report.recordedUnfetchable[index, default: 0] += recorded.count
+                logger.warning("Passed messages the server never returns, after repeated runs", metadata: [
+                    "account": "\(account.id)", "folderIndex": "\(index)", "count": "\(recorded.count)",
+                ])
+                onEvent(.unfetchableRecorded(index: index, count: recorded.count))
             }
             try await saveCheckpoint(folder: folder, uidValidity: status.uidValidity, highestUID: checkpointUID)
             try await budget.record(bytes)

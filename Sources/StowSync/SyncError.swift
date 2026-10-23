@@ -9,6 +9,10 @@ public enum SyncError: Error, Equatable, CustomStringConvertible {
     case needsSignIn(AccountID)
     /// The server rejected XOAUTH2 even with a freshly refreshed token.
     case authenticationFailed(String)
+    /// Sign-in worked but there is no IMAP mailbox behind the account, for
+    /// example a personal Microsoft account made with a non-Microsoft address,
+    /// or IMAP is turned off. Signing in again cannot help (D-116).
+    case mailboxUnavailable(String)
     case connectionFailed(String)
     /// The server closed the connection, usually with a BYE.
     case connectionClosed(String?)
@@ -44,6 +48,8 @@ public enum SyncError: Error, Equatable, CustomStringConvertible {
             "Account \(id) needs to sign in again. Run `stowmail account signin \(id)`."
         case .authenticationFailed(let text):
             "The mail server rejected the sign-in (\(text)). Try `stowmail account signin`."
+        case .mailboxUnavailable(let text):
+            "Signed in, but the server has no mailbox Stow can reach over IMAP for this account (\(text)). This usually means the Microsoft account has no Outlook.com or Exchange Online mailbox (for example it was created with a non-Microsoft address), or IMAP is turned off for it. Signing in again will not help; this account cannot be synced."
         case .connectionFailed(let text): "Could not connect to the mail server: \(text)"
         case .connectionClosed(let text): "The mail server closed the connection\(text.map { ": \($0)" } ?? ".")"
         case .timedOut: "The mail server stopped responding."

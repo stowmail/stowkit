@@ -21,7 +21,12 @@ struct SyncHarness {
         account = Account(id: AccountID(rawValue: "acct-\(UUID().uuidString.prefix(8).lowercased())"), provider: provider, email: "sam@example.com", displayName: "Sam")
     }
 
-    func syncer(sink: RawMessageSink? = nil, budget: ByteBudget = ByteBudget(limit: nil, fileURL: nil), token: String = "good-token") -> AccountSyncer {
+    func syncer(
+        sink: RawMessageSink? = nil,
+        budget: ByteBudget = ByteBudget(limit: nil, fileURL: nil),
+        unfetchable: UnfetchableLedger = UnfetchableLedger(fileURL: nil),
+        token: String = "good-token"
+    ) -> AccountSyncer {
         let port = Int(self.port)
         let sleeps = self.sleeps
         return AccountSyncer(
@@ -34,6 +39,7 @@ struct SyncHarness {
             sink: sink ?? store,
             checkpoints: store,
             budget: budget,
+            unfetchable: unfetchable,
             sleep: { try await sleeps.sleep($0) }
         )
     }
@@ -405,7 +411,7 @@ actor CrashingSink: RawMessageSink {
         #expect(try await harness.storedUIDs() == expected)
         #expect(try await harness.store.checkpoint(accountID: harness.account.id, folder: Self.allMail)?.highestUID == expected.last)
         // The re-list was a UID FETCH of just the missing UIDs, without bodies.
-        #expect(harness.server.commandLog.contains { $0.contains("UID FETCH 9,11 (UID RFC822.SIZE)") })
+        #expect(harness.server.commandLog.contains { $0.contains("UID FETCH 9,11 (UID RFC822.SIZE FLAGS INTERNALDATE)") })
     }
 
     /// A whole folder of non-mail items (a calendar the name rules miss) stops
@@ -448,4 +454,129 @@ final class AnnouncedCounts: @unchecked Sendable {
     private var _values: [Int] = []
     func add(_ value: Int) { lock.withLock { _values.append(value) } }
     var values: [Int] { lock.withLock { _values } }
+}
+
+/// D-115: messages listed but never returned are recorded after three separate runs.
+@Suite struct UnfetchableTests {
+    static let allMail = "[Gmail]/Tous les messages"
+
+    @Test func ledgerCountsOncePerRunAndRecordsAtTheThreshold() async throws {
+        let file = temporaryDirectory().appendingPathComponent("acct.unfetchable.json")
+        defer { try? FileManager.default.removeItem(at: file.deletingLastPathComponent()) }
+        let ledger = UnfetchableLedger(fileURL: file, threshold: 3)
+        let stuck = [MessageSummary(uid: 9, size: 1234, internalDate: Date(timeIntervalSince1970: 1_700_000_000), flags: ["\\Seen"])]
+
+        #expect(try await ledger.recordAttempt(folder: "F", uidValidity: 1, runID: "a", stuck: stuck).isEmpty)
+        #expect(try await ledger.recordAttempt(folder: "F", uidValidity: 1, runID: "a", stuck: stuck).isEmpty) // same run
+        #expect(try await ledger.recordAttempt(folder: "F", uidValidity: 1, runID: "b", stuck: stuck).isEmpty)
+        #expect(try await ledger.recordAttempt(folder: "F", uidValidity: 1, runID: "c", stuck: stuck) == [9])
+
+        let reloaded = UnfetchableLedger(fileURL: file, threshold: 3)
+        let entry = try #require(await reloaded.entries(folder: "F").first)
+        #expect(entry.attempts == 3 && entry.size == 1234 && entry.flags == ["\\Seen"] && entry.recordedAt != nil)
+        #expect(entry.internalDate == Date(timeIntervalSince1970: 1_700_000_000))
+        #expect(await reloaded.totals() == (1, 0))
+        let permissions = try FileManager.default.attributesOfItem(atPath: file.path)[.posixPermissions] as? Int
+        #expect(permissions == 0o600)
+
+        // A UIDVALIDITY change starts the count again.
+        #expect(try await reloaded.recordAttempt(folder: "F", uidValidity: 2, runID: "d", stuck: stuck).isEmpty)
+        // A message that later downloads is forgotten.
+        try await reloaded.resolve(folder: "F", uidValidity: 2, uids: [9])
+        #expect(await reloaded.entries(folder: "F").isEmpty)
+    }
+
+    /// The Deleted Items case: the folder stops on runs 1 and 2, then on run 3
+    /// the stuck messages are recorded and everything after them syncs.
+    @Test func stuckMessagesAreRecordedOnTheThirdRunAndSyncContinues() async throws {
+        let fixtures = try Fixtures.small()
+        let server = gmailServer(fixtures) // UIDs 3, 5, 7, 9, 11, ...
+        server.bodylessUIDs = [9, 11]
+        let harness = try await SyncHarness(server: server)
+        defer { harness.cleanUp() }
+        let ledgerFile = harness.root.deletingLastPathComponent().appendingPathComponent("\(UUID().uuidString).unfetchable.json")
+        defer { try? FileManager.default.removeItem(at: ledgerFile) }
+        func run() async throws -> SyncReport {
+            try await harness.syncer(unfetchable: UnfetchableLedger(fileURL: ledgerFile)).run(SyncOptions(batches: BatchPlanner(maxMessages: 6)))
+        }
+
+        for _ in 1...2 {
+            let report = try await run()
+            #expect(report.notDownloaded == [0: 2])
+            #expect(report.recordedUnfetchable.isEmpty)
+            #expect(try await harness.store.checkpoint(accountID: harness.account.id, folder: Self.allMail)?.highestUID == 7)
+        }
+        let third = try await run()
+        #expect(third.notDownloaded.isEmpty)
+        #expect(third.recordedUnfetchable == [0: 2])
+        #expect(third.outcome == .complete)
+        let expected = (0..<fixtures.count).map { UInt32($0 * 2 + 3) }.filter { $0 != 9 && $0 != 11 }
+        #expect(try await harness.storedUIDs() == expected)
+        #expect(try await harness.store.checkpoint(accountID: harness.account.id, folder: Self.allMail)?.highestUID == expected.last)
+
+        let entries = await UnfetchableLedger(fileURL: ledgerFile).entries(folder: Self.allMail)
+        #expect(entries.map(\.uid) == [9, 11])
+        #expect(entries.allSatisfy { $0.attempts == 3 && $0.size > 0 && $0.internalDate != nil })
+
+        // A fourth run has nothing left to do and reports nothing new.
+        let fourth = try await run()
+        #expect(fourth.messagesWritten == 0 && fourth.recordedUnfetchable.isEmpty && fourth.notDownloaded.isEmpty)
+    }
+
+    /// Reconnects inside one run do not count as extra attempts.
+    @Test func retriesWithinARunCountOnce() async throws {
+        let fixtures = try Fixtures.small()
+        let server = FakeIMAPServer(mailboxes: [
+            .init(name: "Deleted Items", attributes: ["\\Trash"], uidValidity: 31, messages: (1...3).map { .init(uid: UInt32($0), bytes: fixtures[$0].bytes) }),
+            .init(name: "INBOX", attributes: [], uidValidity: 32, messages: (1...4).map { .init(uid: UInt32($0), bytes: fixtures[$0].bytes) }),
+        ])
+        server.capabilities = ["IMAP4rev1", "AUTH=XOAUTH2", "SASL-IR"]
+        server.bodylessUIDs = [2] // Deleted Items UID 2 is never returned (fetch 1), so that folder stops
+        server.dropOnBodyFetchNumber = 2 // then the first INBOX fetch drops; the run reconnects and redoes Deleted Items
+        let harness = try await SyncHarness(server: server, provider: .microsoft)
+        defer { harness.cleanUp() }
+        let ledger = UnfetchableLedger(fileURL: nil)
+        _ = try? await harness.syncer(unfetchable: ledger).run()
+        #expect(harness.sleeps.delays == [2])
+        #expect(await ledger.entries(folder: "Deleted Items").first?.attempts == 1)
+    }
+}
+
+@Suite struct MailboxUnavailableTests {
+    /// A personal Microsoft account with no Outlook.com mailbox: Exchange accepts
+    /// the token, then says "User is authenticated but not connected."
+    @Test func noMailboxIsItsOwnErrorAndDoesNotMarkTheAccount() async throws {
+        let keychain = makeTestKeychain()
+        defer { try? keychain.deleteAll() }
+        let server = gmailServer([])
+        server.authFailureText = "User is authenticated but not connected."
+        let port = try await server.start()
+        defer { server.stop() }
+
+        let registry = AccountRegistry(keychain: keychain)
+        let tokens = TokenStore(keychain: keychain)
+        let account = Account(id: .generate(), provider: .microsoft, email: "sam@example.com", displayName: "Sam")
+        try registry.add(AccountRecord(account: account))
+        try tokens.save(OAuthTokens(accessToken: "good-token", refreshToken: "r", expiresAt: Date().addingTimeInterval(3600)), for: account.id)
+        let endpoint = FakeTokenEndpoint { _ in (200, #"{"access_token":"other","expires_in":3600}"#) }
+        let provider = TokenProvider(tokenStore: tokens, registry: registry) { _ in OAuthClient(config: .microsoft(testAppConfig), http: endpoint) }
+
+        let factory = SessionFactory(account: account, endpoint: .plaintextLoopback(port: Int(port)), tokens: provider)
+        await #expect {
+            _ = try await factory.open()
+        } throws: { error in
+            guard case SyncError.mailboxUnavailable(let text) = error else { return false }
+            let message = (error as! SyncError).description
+            return text.contains("authenticated but not connected") && message.contains("no Outlook.com or Exchange Online mailbox")
+                && !message.contains("stowmail account signin") && !(error as! SyncError).isRetryable
+        }
+        #expect(await endpoint.requests.isEmpty) // a new token cannot help, so none is asked for
+        #expect(try registry.record(account.id)?.needsSignIn == false)
+        #expect(server.connectionCount == 1)
+    }
+
+    @Test func otherRefusalsStayAuthenticationFailures() {
+        #expect(IMAPSession.classifyAuthenticationFailure("NO AUTHENTICATE failed.") == .authenticationFailed("NO AUTHENTICATE failed."))
+        #expect(IMAPSession.classifyAuthenticationFailure("NO User is authenticated but not connected.") == .mailboxUnavailable("NO User is authenticated but not connected."))
+    }
 }

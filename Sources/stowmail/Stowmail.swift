@@ -55,5 +55,17 @@ struct Doctor: AsyncParsableCommand {
         if status.exists {
             print("  sync may write here: \(status.isProtected ? "yes" : "NO (\(status.problems.joined(separator: "; ")))")")
         }
+
+        // D-115: messages servers list but never return.
+        let state = DevStoreProtection.defaultStateDirectory
+        let ledgers = ((try? FileManager.default.contentsOfDirectory(at: state, includingPropertiesForKeys: nil)) ?? [])
+            .filter { $0.lastPathComponent.hasSuffix(".unfetchable.json") }
+        var recorded = 0, pending = 0
+        for file in ledgers {
+            let totals = await UnfetchableLedger(fileURL: file).totals()
+            recorded += totals.recorded
+            pending += totals.pending
+        }
+        print("Unfetchable messages (listed by the server, never returned, D-115): \(recorded) recorded and passed, \(pending) still being retried")
     }
 }

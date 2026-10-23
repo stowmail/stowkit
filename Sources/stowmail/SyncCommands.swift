@@ -87,7 +87,10 @@ struct Sync: AsyncParsableCommand {
             openSession: { try await factory.open() },
             sink: store,
             checkpoints: store,
-            budget: budget
+            budget: budget,
+            unfetchable: UnfetchableLedger(
+                fileURL: UnfetchableLedger.fileURL(stateDirectory: DevStoreProtection.defaultStateDirectory, accountID: record.account.id)
+            )
         )
 
         print("Syncing \(record.account.email) into \(root.path)")
@@ -105,7 +108,9 @@ struct Sync: AsyncParsableCommand {
             case .batchWritten(let messages, let bytes, let highestUID):
                 print("  wrote \(messages) message(s), \(CLI.megabytes(bytes)), up to UID \(highestUID)")
             case .folderStopped(let index, let count):
-                print("Folder \(index + 1): the server would not return \(count) listed message(s). Stopped this folder before them.")
+                print("Folder \(index + 1): the server would not return \(count) listed message(s). Stopped this folder before them; after \(UnfetchableLedger.defaultThreshold) runs like this they are recorded and passed (D-115).")
+            case .unfetchableRecorded(let index, let count):
+                print("Folder \(index + 1): \(count) message(s) could not be fetched on \(UnfetchableLedger.defaultThreshold) separate runs and were recorded; moving past them.")
             case .retrying(let delay, let attempt, let reason):
                 print("Interrupted (\(reason)). Retry \(attempt) in \(Int(delay)) s.")
             }
@@ -120,6 +125,10 @@ struct Sync: AsyncParsableCommand {
         }
         if report.uidValidityResets > 0 {
             print("\(report.uidValidityResets) folder(s) had a UIDVALIDITY change and were downloaded again.")
+        }
+        let recorded = report.recordedUnfetchable.values.reduce(0, +)
+        if recorded > 0 {
+            print("\(recorded) message(s) could not be fetched and were recorded (see `stowmail doctor`).")
         }
         if !report.notDownloaded.isEmpty {
             throw SyncError.messagesNotDownloaded(folders: report.notDownloaded.count, messages: report.notDownloaded.values.reduce(0, +))

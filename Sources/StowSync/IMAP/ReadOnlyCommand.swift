@@ -16,7 +16,9 @@ enum ReadOnlyCommand: Sendable {
     case examine(rawName: [UInt8])
     /// `UID FETCH lo:hi (UID RFC822.SIZE)`: what exists, and how big, without downloading.
     case fetchSummaries(ClosedRange<UInt32>)
-    /// `UID FETCH <set> (UID RFC822.SIZE)`: which of these UIDs still exist.
+    /// `UID FETCH <set> (UID RFC822.SIZE FLAGS INTERNALDATE)`: which of these
+    /// UIDs still exist, with enough detail to record any that cannot be fetched.
+    /// Fetching FLAGS only reads them.
     case fetchSummariesOf(uids: [UInt32])
     /// `UID FETCH <set> (UID RFC822.SIZE INTERNALDATE BODY.PEEK[] [X-GM-MSGID X-GM-THRID X-GM-LABELS])`.
     case fetchMessages(uids: [UInt32], gmail: Bool)
@@ -52,7 +54,7 @@ enum ReadOnlyCommand: Sendable {
         case .fetchSummaries(let range):
             return .uidFetch(.range(Self.uidRange(range)), [.uid, .rfc822Size], [])
         case .fetchSummariesOf(let uids):
-            return .uidFetch(.set(Self.uidSet(uids)), [.uid, .rfc822Size], [])
+            return .uidFetch(.set(Self.uidSet(uids)), [.uid, .rfc822Size, .flags, .internalDate], [])
         case .fetchMessages(let uids, let gmail):
             var attributes: [FetchAttribute] = [.uid, .rfc822Size, .internalDate, .bodySection(peek: true, .complete, nil)]
             if gmail { attributes += [.gmailMessageID, .gmailThreadID, .gmailLabels] }

@@ -91,6 +91,9 @@ public struct FolderStatus: Sendable, Equatable {
 public struct MessageSummary: Sendable, Equatable {
     public var uid: UInt32
     public var size: Int
+    /// Only filled in by the re-listing of specific UIDs.
+    public var internalDate: Date? = nil
+    public var flags: [String] = []
 }
 
 /// One message as fetched, before it is turned into a `RawMessage`.

@@ -15,6 +15,7 @@ final class FakeIMAPServer: @unchecked Sendable {
         var gmailMessageID: UInt64 = 0
         var gmailThreadID: UInt64 = 0
         var internalDate = "17-Jul-2024 02:44:25 -0700"
+        var flags: [String] = []
     }
 
     struct Mailbox {
@@ -41,6 +42,9 @@ final class FakeIMAPServer: @unchecked Sendable {
     /// UIDs deleted from the mailbox the moment a body fetch arrives, as if
     /// another client expunged them between listing and download.
     var expungeOnBodyFetch: Set<UInt32> { get { sync { _expunge } } set { sync { _expunge = newValue } } }
+    /// Refuse every AUTHENTICATE at once with this text (no SASL challenge),
+    /// as Exchange does for an account without a mailbox.
+    var authFailureText: String? { get { sync { _authFailure } } set { sync { _authFailure = newValue } } }
     /// Answer EXAMINE with READ-WRITE, to test that the session refuses it.
     var examineAnswersReadWrite: Bool { get { sync { _readWrite } } set { sync { _readWrite = newValue } } }
 
@@ -60,6 +64,7 @@ final class FakeIMAPServer: @unchecked Sendable {
     private var _byeOn: (Int, String)?
     private var _readWrite = false
     private var _dropEvery = false
+    private var _authFailure: String?
     private var _bodyless: Set<UInt32> = []
     private var _expunge: Set<UInt32> = []
     private var _log: [String] = []
@@ -219,6 +224,10 @@ final class FakeIMAPServer: @unchecked Sendable {
             send("\(tag) BAD Malformed AUTHENTICATE\r\n", to: client)
             return
         }
+        if let failure = _authFailure {
+            send("\(tag) NO \(failure)\r\n", to: client)
+            return
+        }
         let text = String(decoding: decoded, as: UTF8.self)
         let token = text.components(separatedBy: "auth=Bearer ").last?.components(separatedBy: "\u{01}").first ?? ""
         let user = text.components(separatedBy: "user=").last?.components(separatedBy: "\u{01}").first ?? ""
@@ -271,6 +280,9 @@ final class FakeIMAPServer: @unchecked Sendable {
         for (index, message) in mailbox.messages.enumerated() where wanted(message.uid) {
             if wantsBody, _bodyless.contains(message.uid) { continue }
             var items = ["UID \(message.uid)", "RFC822.SIZE \(message.bytes.count)"]
+            if attributes.contains(" FLAGS") {
+                items.append("FLAGS (\(message.flags.joined(separator: " ")))")
+            }
             if attributes.contains("INTERNALDATE") { items.append("INTERNALDATE \"\(message.internalDate)\"") }
             if attributes.contains("X-GM-MSGID") { items.append("X-GM-MSGID \(message.gmailMessageID)") }
             if attributes.contains("X-GM-THRID") { items.append("X-GM-THRID \(message.gmailThreadID)") }

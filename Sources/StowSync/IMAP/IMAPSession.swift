@@ -52,8 +52,14 @@ public actor IMAPSession {
                 knownCapabilities = nil // They change after sign-in; ask again when needed.
             }
         } catch SyncError.commandFailed(_, let status, let text) {
-            throw SyncError.authenticationFailed("\(status) \(text)")
+            throw Self.classifyAuthenticationFailure("\(status) \(text)")
         }
+    }
+
+    /// Exchange says "User is authenticated but not connected." when the token
+    /// is fine but there is no mailbox it can open (D-116).
+    static func classifyAuthenticationFailure(_ text: String) -> SyncError {
+        text.lowercased().contains("authenticated but not connected") ? .mailboxUnavailable(text) : .authenticationFailed(text)
     }
 
     /// Capability names, uppercased, for example `IMAP4REV1`, `X-GM-EXT-1`.
@@ -127,7 +133,9 @@ public actor IMAPSession {
         _ = try await run(.fetchSummariesOf(uids: uids)) { try builder.consume($0) }
         let wanted = Set(uids)
         return builder.finished
-            .compactMap { message in message.uid.map { MessageSummary(uid: $0, size: message.size ?? 0) } }
+            .compactMap { message in
+                message.uid.map { MessageSummary(uid: $0, size: message.size ?? 0, internalDate: message.internalDate, flags: message.flags) }
+            }
             .filter { wanted.contains($0.uid) }
             .sorted { $0.uid < $1.uid }
     }
@@ -313,6 +321,7 @@ struct FetchAssembler {
         var gmailMessageID: UInt64?
         var gmailThreadID: UInt64?
         var labels: [String] = []
+        var flags: [String] = []
         var body: Data?
     }
 
@@ -334,6 +343,7 @@ struct FetchAssembler {
             case .gmailMessageID(let id): current?.gmailMessageID = id
             case .gmailThreadID(let id): current?.gmailThreadID = id
             case .gmailLabels(let labels): current?.labels = labels.map { $0.makeDisplayString() }
+            case .flags(let flags): current?.flags = flags.map { String($0) }
             default: break
             }
         case .streamingBegin(let kind, let byteCount):
