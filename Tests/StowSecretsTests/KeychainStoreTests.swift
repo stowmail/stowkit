@@ -4,9 +4,10 @@ import Testing
 @testable import StowSecrets
 
 /// A Keychain store under a throwaway service name. Tests delete everything
-/// under it afterwards, and check that nothing is left behind.
+/// under it afterwards, and check that nothing is left behind. Tests store
+/// only fake values, so they skip the FileVault requirement.
 func makeTestKeychain(_ backend: KeychainBackend = .file) -> KeychainStore {
-    KeychainStore(service: "uk.getstow.stow.tests.\(UUID().uuidString)", backend: backend)
+    KeychainStore(service: "uk.getstow.stow.tests.\(UUID().uuidString)", backend: backend, fileVaultIsOn: { true })
 }
 
 /// True when this binary may use the data protection keychain (it is signed
@@ -67,6 +68,26 @@ let dataProtectionAvailable: Bool = {
         #expect(KeychainBackend.fromEnvironment([:]) == .dataProtection)
         #expect(KeychainBackend.fromEnvironment(["STOW_KEYCHAIN": "file"]) == .file)
         #expect(KeychainBackend.fromEnvironment(["STOW_KEYCHAIN": "anything-else"]) == .dataProtection)
+    }
+
+    @Test func loginKeychainNeedsFileVault() throws {
+        let keychain = KeychainStore(service: "uk.getstow.stow.tests.\(UUID().uuidString)", backend: .file, fileVaultIsOn: { false })
+        defer { try? keychain.deleteAll() }
+        #expect(throws: KeychainError.fileVaultRequired) { try keychain.set(Data("x".utf8), for: "item") }
+        #expect(throws: KeychainError.fileVaultRequired) { try keychain.get("item") }
+        try keychain.delete("item") // Removing secrets is always allowed.
+        #expect(try keychain.items().isEmpty)
+    }
+
+    @Test func dataProtectionBackendIgnoresFileVault() throws {
+        let keychain = KeychainStore(service: "x", backend: .dataProtection, fileVaultIsOn: { false })
+        // Fails (if at all) for lack of entitlement, never for FileVault.
+        do {
+            try keychain.set(Data("x".utf8), for: "item")
+            try keychain.deleteAll()
+        } catch let error as KeychainError {
+            #expect(error != .fileVaultRequired)
+        }
     }
 
     @Test func unsignedBuildsGetAClearError() throws {

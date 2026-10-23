@@ -27,7 +27,8 @@ struct Doctor: AsyncParsableCommand {
         print("SQLCipher: \(cipher ?? "NOT LINKED")")
 
         let backend = KeychainBackend.fromEnvironment()
-        print("Keychain backend: \(backend.rawValue)\(backend == .file ? " (development only, D-012)" : "")")
+        print("Keychain backend: \(backend.rawValue)\(backend == .file ? " (until builds are signed, D-012)" : "")")
+        print("FileVault: \(FileVault.isOn ? "on" : "OFF")\(backend == .file && !FileVault.isOn ? " (the file backend will refuse to run)" : "")")
 
         print("App configuration:")
         do {

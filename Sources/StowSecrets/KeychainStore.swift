@@ -8,8 +8,9 @@ public enum KeychainBackend: String, Sendable, CaseIterable {
     /// keychain entitlement; unsigned builds get `errSecMissingEntitlement`.
     case dataProtection
     /// The older file-based login keychain. Works for unsigned command-line builds,
-    /// but macOS ignores the `ThisDeviceOnly` setting there. Development only,
-    /// and only when chosen explicitly with `STOW_KEYCHAIN=file`.
+    /// but macOS ignores the `ThisDeviceOnly` setting there. Used until builds are
+    /// signed, only when chosen explicitly with `STOW_KEYCHAIN=file`, and only while
+    /// FileVault is on (D-012).
     case file
 
     /// The environment variable that selects the backend.
@@ -25,6 +26,8 @@ public enum KeychainError: Error, Equatable, CustomStringConvertible {
     /// The binary is not signed with a keychain entitlement, so the data
     /// protection keychain refused it.
     case missingEntitlement
+    /// The login keychain backend was chosen but FileVault is off (D-012).
+    case fileVaultRequired
     case unexpectedStatus(OSStatus)
     case unexpectedData
 
@@ -32,6 +35,8 @@ public enum KeychainError: Error, Equatable, CustomStringConvertible {
         switch self {
         case .missingEntitlement:
             "This build is not signed with a keychain entitlement, so the data protection keychain is unavailable (D-012). For development, set STOW_KEYCHAIN=file to use the login keychain."
+        case .fileVaultRequired:
+            "STOW_KEYCHAIN=file is only allowed while FileVault is on (D-012). Turn on FileVault in System Settings > Privacy & Security."
         case .unexpectedStatus(let status):
             "Keychain error \(status): \(SecCopyErrorMessageString(status, nil) as String? ?? "unknown")"
         case .unexpectedData:
@@ -44,6 +49,27 @@ public enum KeychainError: Error, Equatable, CustomStringConvertible {
     }
 }
 
+/// Whether FileVault full-disk encryption is on.
+public enum FileVault {
+    /// Asks `fdesetup isactive`, once per process. Any failure counts as off.
+    public static let isOn: Bool = {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/fdesetup")
+        process.arguments = ["isactive"]
+        let output = Pipe()
+        process.standardOutput = output
+        process.standardError = FileHandle.nullDevice
+        do {
+            try process.run()
+        } catch {
+            return false
+        }
+        process.waitUntilExit()
+        let text = String(decoding: output.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+        return process.terminationStatus == 0 && text.trimmingCharacters(in: .whitespacesAndNewlines) == "true"
+    }()
+}
+
 /// Stores small secrets as generic password items in the macOS Keychain.
 ///
 /// Every item is filed under one service name (`uk.getstow.stow` by default)
@@ -54,14 +80,32 @@ public struct KeychainStore: Sendable {
 
     public let service: String
     public let backend: KeychainBackend
+    /// Reports whether FileVault is on. Only consulted for the `.file` backend.
+    let fileVaultIsOn: @Sendable () -> Bool
 
-    public init(service: String = KeychainStore.defaultService, backend: KeychainBackend = .fromEnvironment()) {
+    /// - Parameter fileVaultIsOn: tests that store only fake values pass `{ true }`;
+    ///   everything else keeps the default, the real FileVault check.
+    public init(
+        service: String = KeychainStore.defaultService,
+        backend: KeychainBackend = .fromEnvironment(),
+        fileVaultIsOn: @escaping @Sendable () -> Bool = { FileVault.isOn }
+    ) {
         self.service = service
         self.backend = backend
+        self.fileVaultIsOn = fileVaultIsOn
+    }
+
+    /// The login keychain is only used while FileVault is on (D-012). Deleting is
+    /// always allowed, so secrets can be removed whatever the disk state.
+    private func checkBackendAllowed() throws {
+        if backend == .file && !fileVaultIsOn() {
+            throw KeychainError.fileVaultRequired
+        }
     }
 
     /// Saves `data` under `item`, replacing any existing value.
     public func set(_ data: Data, for item: String) throws {
+        try checkBackendAllowed()
         let status = SecItemAdd(addAttributes(item: item, data: data) as CFDictionary, nil)
         switch status {
         case errSecSuccess:
@@ -77,6 +121,7 @@ public struct KeychainStore: Sendable {
 
     /// The value saved under `item`, or nil if there is none.
     public func get(_ item: String) throws -> Data? {
+        try checkBackendAllowed()
         var query = baseQuery(item: item)
         query[kSecReturnData as String] = true
         query[kSecMatchLimit as String] = kSecMatchLimitOne
