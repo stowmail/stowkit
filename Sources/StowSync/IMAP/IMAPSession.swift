@@ -120,6 +120,18 @@ public actor IMAPSession {
             .sorted { $0.uid < $1.uid }
     }
 
+    /// UIDs and sizes of whichever of `uids` still exist. Downloads no content.
+    public func fetchUIDs(_ uids: [UInt32]) async throws -> [MessageSummary] {
+        guard !uids.isEmpty else { return [] }
+        var builder = FetchAssembler()
+        _ = try await run(.fetchSummariesOf(uids: uids)) { try builder.consume($0) }
+        let wanted = Set(uids)
+        return builder.finished
+            .compactMap { message in message.uid.map { MessageSummary(uid: $0, size: message.size ?? 0) } }
+            .filter { wanted.contains($0.uid) }
+            .sorted { $0.uid < $1.uid }
+    }
+
     /// Downloads complete messages with BODY.PEEK[]. Messages deleted on the
     /// server in the meantime are simply absent from the result.
     public func fetchMessages(uids: [UInt32], gmail: Bool) async throws -> [FetchedMessage] {

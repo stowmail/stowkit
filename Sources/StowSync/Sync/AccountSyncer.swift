@@ -24,6 +24,9 @@ public enum SyncEvent: Sendable {
     case folderStarted(index: Int, of: Int, newMessages: Int)
     case uidValidityChanged(folderIndex: Int, old: UInt32, new: UInt32)
     case batchWritten(messages: Int, bytes: Int64, highestUID: UInt32)
+    /// Some listed messages could not be downloaded and are still on the server.
+    /// The folder stops before them; its checkpoint does not pass them (D-113).
+    case folderStopped(index: Int, notDownloaded: Int)
     case retrying(after: TimeInterval, attempt: Int, reason: String)
 }
 
@@ -39,6 +42,9 @@ public struct SyncReport: Sendable, Equatable {
     public var bytesWritten: Int64 = 0
     public var foldersSynced = 0
     public var uidValidityResets = 0
+    /// Messages the server listed but would not return, per folder index (D-113).
+    /// Non-empty means the run is incomplete, even if `outcome` is `.complete`.
+    public var notDownloaded: [Int: Int] = [:]
     public var outcome: SyncOutcome = .complete
 }
 
@@ -47,8 +53,9 @@ public struct SyncReport: Sendable, Equatable {
 ///
 /// For each folder: EXAMINE, compare UIDVALIDITY with the checkpoint, list
 /// what is newer than the checkpoint, then fetch in batches. After each batch
-/// is written and flushed, the checkpoint moves to the batch's highest UID.
-/// A crash therefore repeats at most one batch (the sink ignores the
+/// is written and flushed, the checkpoint moves to the highest UID below which
+/// every listed message was either written or confirmed gone from the server
+/// (D-113). A crash therefore repeats at most one batch (the sink ignores the
 /// repeats) and never skips one.
 public struct AccountSyncer: Sendable {
     public let account: Account
@@ -169,59 +176,84 @@ public struct AccountSyncer: Sendable {
             return .complete
         }
 
+        // List the whole range first (UIDs and sizes only, cheap), so the count
+        // announced is right even when the first windows are empty.
         let window = status.uidNext == nil ? UInt32.max : options.listWindow
+        var summaries: [MessageSummary] = []
         var windowStart = highestDone + 1
-        var announced = false
         while windowStart <= upper {
             let windowEnd = upper - windowStart < window ? upper : windowStart + window - 1
-            var summaries = try await session.fetchUIDs(windowStart...windowEnd)
-            if !announced {
-                onEvent(.folderStarted(index: index, of: total, newMessages: summaries.count))
-                announced = true
-            }
-            if let limit = options.limit {
-                let remaining = limit - report.messagesWritten
-                if remaining <= 0 { return .limitReached }
-                if summaries.count > remaining { summaries = Array(summaries.prefix(remaining)) }
-            }
-            for batch in options.batches.batches(summaries) {
-                let planned = Int64(batch.reduce(0) { $0 + $1.size })
-                guard await budget.allows(planned) else {
-                    let used = await budget.used()
-                    return .budgetExhausted(usedBytes: used, limitBytes: budget.limit ?? 0)
-                }
-                let messages = try await session.fetchMessages(uids: batch.map(\.uid), gmail: account.provider == .gmail)
-                if messages.count != batch.count {
-                    // Usually messages deleted on the server since they were listed.
-                    logger.notice("Fewer messages fetched than listed", metadata: [
-                        "account": "\(account.id)", "listed": "\(batch.count)", "fetched": "\(messages.count)",
-                    ])
-                }
-                var bytes: Int64 = 0
-                for message in messages {
-                    try await sink.write(RawMessage(
-                        key: RawMessageKey(accountID: account.id, folder: folder.name, uidValidity: status.uidValidity, uid: message.uid),
-                        labels: message.labels,
-                        gmailMessageID: message.gmailMessageID,
-                        gmailThreadID: message.gmailThreadID,
-                        internalDate: message.internalDate,
-                        size: message.size,
-                        bytes: message.bytes
-                    ))
-                    bytes += Int64(message.bytes.count)
-                }
-                // Durable first, then the checkpoint: a crash can repeat a batch but never skip one.
-                try await sink.flush()
-                let highest = batch.last!.uid
-                try await saveCheckpoint(folder: folder, uidValidity: status.uidValidity, highestUID: highest)
-                try await budget.record(bytes)
-                report.messagesWritten += messages.count
-                report.bytesWritten += bytes
-                onEvent(.batchWritten(messages: messages.count, bytes: bytes, highestUID: highest))
-                if let limit = options.limit, report.messagesWritten >= limit { return .limitReached }
-            }
+            summaries += try await session.fetchUIDs(windowStart...windowEnd)
             if windowEnd == UInt32.max { break }
             windowStart = windowEnd + 1
+        }
+        onEvent(.folderStarted(index: index, of: total, newMessages: summaries.count))
+        if let limit = options.limit {
+            let remaining = limit - report.messagesWritten
+            if remaining <= 0 { return .limitReached }
+            if summaries.count > remaining { summaries = Array(summaries.prefix(remaining)) }
+        }
+
+        var checkpointUID = highestDone
+        for batch in options.batches.batches(summaries) {
+            let planned = Int64(batch.reduce(0) { $0 + $1.size })
+            guard await budget.allows(planned) else {
+                let used = await budget.used()
+                return .budgetExhausted(usedBytes: used, limitBytes: budget.limit ?? 0)
+            }
+            let messages = try await session.fetchMessages(uids: batch.map(\.uid), gmail: account.provider == .gmail)
+            var bytes: Int64 = 0
+            for message in messages {
+                try await sink.write(RawMessage(
+                    key: RawMessageKey(accountID: account.id, folder: folder.name, uidValidity: status.uidValidity, uid: message.uid),
+                    labels: message.labels,
+                    gmailMessageID: message.gmailMessageID,
+                    gmailThreadID: message.gmailThreadID,
+                    internalDate: message.internalDate,
+                    size: message.size,
+                    bytes: message.bytes
+                ))
+                bytes += Int64(message.bytes.count)
+            }
+            // Durable first, then the checkpoint: a crash can repeat a batch but never skip one.
+            try await sink.flush()
+
+            // Listed but not returned: ask again whether they still exist (D-113).
+            let written = Set(messages.map(\.uid))
+            let missing = batch.map(\.uid).filter { !written.contains($0) }
+            var gone: Set<UInt32> = []
+            if !missing.isEmpty {
+                let stillThere = Set(try await session.fetchUIDs(missing).map(\.uid))
+                gone = Set(missing).subtracting(stillThere)
+            }
+            let stuck = missing.filter { !gone.contains($0) }
+            // Advance only through an unbroken run of written or vanished UIDs.
+            for summary in batch {
+                guard written.contains(summary.uid) || gone.contains(summary.uid) else { break }
+                checkpointUID = summary.uid
+            }
+            try await saveCheckpoint(folder: folder, uidValidity: status.uidValidity, highestUID: checkpointUID)
+            try await budget.record(bytes)
+            report.messagesWritten += messages.count
+            report.bytesWritten += bytes
+            onEvent(.batchWritten(messages: messages.count, bytes: bytes, highestUID: checkpointUID))
+
+            if !gone.isEmpty {
+                logger.notice("Listed messages were deleted on the server before download", metadata: [
+                    "account": "\(account.id)", "count": "\(gone.count)",
+                ])
+            }
+            if !stuck.isEmpty {
+                // Still on the server but not downloadable. Stop this folder here so
+                // the checkpoint never passes them; report it loudly.
+                logger.error("Server listed messages it would not return; folder stopped", metadata: [
+                    "account": "\(account.id)", "folderIndex": "\(index)", "count": "\(stuck.count)",
+                ])
+                report.notDownloaded[index] = stuck.count
+                onEvent(.folderStopped(index: index, notDownloaded: stuck.count))
+                return .complete
+            }
+            if let limit = options.limit, report.messagesWritten >= limit { return .limitReached }
         }
         return .complete
     }

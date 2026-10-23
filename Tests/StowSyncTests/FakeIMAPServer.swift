@@ -35,6 +35,12 @@ final class FakeIMAPServer: @unchecked Sendable {
     var dropEveryBodyFetch: Bool { get { sync { _dropEvery } } set { sync { _dropEvery = newValue } } }
     /// Answer this body fetch (counted across connections) with BYE and close.
     var byeOnBodyFetchNumber: (Int, String)? { get { sync { _byeOn } } set { sync { _byeOn = newValue } } }
+    /// UIDs that are listed (and re-listed) but for which a body fetch returns no
+    /// FETCH data at all, as Exchange does for calendar items.
+    var bodylessUIDs: Set<UInt32> { get { sync { _bodyless } } set { sync { _bodyless = newValue } } }
+    /// UIDs deleted from the mailbox the moment a body fetch arrives, as if
+    /// another client expunged them between listing and download.
+    var expungeOnBodyFetch: Set<UInt32> { get { sync { _expunge } } set { sync { _expunge = newValue } } }
     /// Answer EXAMINE with READ-WRITE, to test that the session refuses it.
     var examineAnswersReadWrite: Bool { get { sync { _readWrite } } set { sync { _readWrite = newValue } } }
 
@@ -54,6 +60,8 @@ final class FakeIMAPServer: @unchecked Sendable {
     private var _byeOn: (Int, String)?
     private var _readWrite = false
     private var _dropEvery = false
+    private var _bodyless: Set<UInt32> = []
+    private var _expunge: Set<UInt32> = []
     private var _log: [String] = []
     private var _connections = 0
     private var _bodyFetches = 0
@@ -228,7 +236,7 @@ final class FakeIMAPServer: @unchecked Sendable {
             send("\(tag) BAD No mailbox selected\r\n", to: client)
             return
         }
-        let mailbox = _mailboxes[selected]
+        var mailbox = _mailboxes[selected]
         guard let space = rest.firstIndex(of: " ") else {
             send("\(tag) BAD Malformed FETCH\r\n", to: client)
             return
@@ -253,10 +261,15 @@ final class FakeIMAPServer: @unchecked Sendable {
                 return
             }
         }
+        if wantsBody, !_expunge.isEmpty {
+            _mailboxes[selected].messages.removeAll { _expunge.contains($0.uid) }
+            mailbox = _mailboxes[selected]
+        }
         let maxUID = mailbox.messages.map(\.uid).max() ?? 0
         let wanted = Self.parseSet(set, maxUID: maxUID)
         var out = Data()
         for (index, message) in mailbox.messages.enumerated() where wanted(message.uid) {
+            if wantsBody, _bodyless.contains(message.uid) { continue }
             var items = ["UID \(message.uid)", "RFC822.SIZE \(message.bytes.count)"]
             if attributes.contains("INTERNALDATE") { items.append("INTERNALDATE \"\(message.internalDate)\"") }
             if attributes.contains("X-GM-MSGID") { items.append("X-GM-MSGID \(message.gmailMessageID)") }

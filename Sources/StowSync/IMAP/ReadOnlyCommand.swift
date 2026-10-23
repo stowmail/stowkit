@@ -16,6 +16,8 @@ enum ReadOnlyCommand: Sendable {
     case examine(rawName: [UInt8])
     /// `UID FETCH lo:hi (UID RFC822.SIZE)`: what exists, and how big, without downloading.
     case fetchSummaries(ClosedRange<UInt32>)
+    /// `UID FETCH <set> (UID RFC822.SIZE)`: which of these UIDs still exist.
+    case fetchSummariesOf(uids: [UInt32])
     /// `UID FETCH <set> (UID RFC822.SIZE INTERNALDATE BODY.PEEK[] [X-GM-MSGID X-GM-THRID X-GM-LABELS])`.
     case fetchMessages(uids: [UInt32], gmail: Bool)
     case logout
@@ -28,7 +30,7 @@ enum ReadOnlyCommand: Sendable {
         case .authenticateXOAUTH2: "AUTHENTICATE XOAUTH2"
         case .listAll: "LIST"
         case .examine: "EXAMINE"
-        case .fetchSummaries, .fetchMessages: "UID FETCH"
+        case .fetchSummaries, .fetchSummariesOf, .fetchMessages: "UID FETCH"
         case .logout: "LOGOUT"
         }
     }
@@ -49,6 +51,8 @@ enum ReadOnlyCommand: Sendable {
             return .examine(MailboxName(rawName), [])
         case .fetchSummaries(let range):
             return .uidFetch(.range(Self.uidRange(range)), [.uid, .rfc822Size], [])
+        case .fetchSummariesOf(let uids):
+            return .uidFetch(.set(Self.uidSet(uids)), [.uid, .rfc822Size], [])
         case .fetchMessages(let uids, let gmail):
             var attributes: [FetchAttribute] = [.uid, .rfc822Size, .internalDate, .bodySection(peek: true, .complete, nil)]
             if gmail { attributes += [.gmailMessageID, .gmailThreadID, .gmailLabels] }

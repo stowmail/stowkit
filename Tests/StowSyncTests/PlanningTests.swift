@@ -54,6 +54,28 @@ import Testing
         #expect(Set(plan.skipped.map(\.folder.name)) == ["Junk Email", "Parent", "Gone"])
     }
 
+    /// D-112: Exchange's non-mail folders are skipped; look-alike user folders are not.
+    @Test func microsoftSkipsExchangeNonMailFolders() throws {
+        let folders = [
+            folder("INBOX"), folder("Calendar"), folder("Calendar/Birthdays"), folder("Calendar/UK holidays"),
+            folder("Contacts"), folder("Contacts/Recipient Cache"), folder("Journal"), folder("Notes"), folder("Tasks"),
+            folder("Conversation History"), folder("Outbox"), folder("CALENDAR/Shouty"),
+            // Look-alikes that are user mail folders and must sync:
+            folder("Work/Calendar"), folder("Calendar invites"), folder("Notes from meetings"), folder("Archive/Tasks"),
+            folder("Taskforce"), folder("Gym", "\\HasNoChildren"),
+            // Attribute-based, whatever the name:
+            folder("Agenda", "\\Calendar"),
+        ]
+        let plan = try FolderPlanner.plan(provider: .microsoft, folders: folders, capabilities: [])
+        #expect(plan.toSync.map(\.name) == ["INBOX", "Work/Calendar", "Calendar invites", "Notes from meetings", "Archive/Tasks", "Taskforce", "Gym"])
+        let skipped = Dictionary(uniqueKeysWithValues: plan.skipped.map { ($0.folder.name, $0.reason) })
+        #expect(skipped.count == 12)
+        #expect(skipped["Calendar/Birthdays"]?.contains("D-112") == true)
+        #expect(skipped["Agenda"]?.contains("\\calendar") == true)
+        // Gmail is not affected: a Gmail label called Calendar is just a label.
+        #expect(FolderPlanner.nonMailReason(folder("Calendar")) != nil)
+    }
+
     @Test func folderDescriptionHidesTheName() {
         #expect(!String(describing: folder("Private matters", "\\HasNoChildren")).contains("Private"))
     }
@@ -117,7 +139,7 @@ import Testing
     @Test func everyCommandIsReadOnly() {
         let all: [ReadOnlyCommand] = [
             .capability, .authenticateXOAUTH2(user: "u@example.com", accessToken: "t"), .listAll,
-            .examine(rawName: Array("INBOX".utf8)), .fetchSummaries(1...10), .fetchMessages(uids: [1, 2, 5], gmail: true), .logout,
+            .examine(rawName: Array("INBOX".utf8)), .fetchSummaries(1...10), .fetchSummariesOf(uids: [4, 9]), .fetchMessages(uids: [1, 2, 5], gmail: true), .logout,
         ]
         for command in all {
             switch command.command {

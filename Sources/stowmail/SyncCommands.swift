@@ -104,6 +104,8 @@ struct Sync: AsyncParsableCommand {
                 print("Folder \(index + 1): UIDVALIDITY changed from \(old) to \(new); downloading it again.")
             case .batchWritten(let messages, let bytes, let highestUID):
                 print("  wrote \(messages) message(s), \(CLI.megabytes(bytes)), up to UID \(highestUID)")
+            case .folderStopped(let index, let count):
+                print("Folder \(index + 1): the server would not return \(count) listed message(s). Stopped this folder before them.")
             case .retrying(let delay, let attempt, let reason):
                 print("Interrupted (\(reason)). Retry \(attempt) in \(Int(delay)) s.")
             }
@@ -111,13 +113,16 @@ struct Sync: AsyncParsableCommand {
         let seconds = Int(Date().timeIntervalSince(started))
         print("Done in \(seconds) s: \(report.messagesWritten) message(s), \(CLI.megabytes(report.bytesWritten)).")
         switch report.outcome {
-        case .complete: print("Everything is downloaded.")
+        case .complete: print(report.notDownloaded.isEmpty ? "Everything is downloaded." : "Finished, but some folders are incomplete (below).")
         case .limitReached: print("Stopped at --limit. Run again to continue.")
         case .budgetExhausted(let used, let limit):
             print("Stopped: today's download budget is used (\(CLI.megabytes(used)) of \(CLI.megabytes(limit))). Run again tomorrow to continue.")
         }
         if report.uidValidityResets > 0 {
             print("\(report.uidValidityResets) folder(s) had a UIDVALIDITY change and were downloaded again.")
+        }
+        if !report.notDownloaded.isEmpty {
+            throw SyncError.messagesNotDownloaded(folders: report.notDownloaded.count, messages: report.notDownloaded.values.reduce(0, +))
         }
     }
 }

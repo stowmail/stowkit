@@ -362,3 +362,90 @@ actor CrashingSink: RawMessageSink {
         #expect(await endpoint.requests.count == 2)
     }
 }
+
+/// Fixes from part 2 (orchestrator, 2026-10-23).
+@Suite struct MissingMessageTests {
+    static let allMail = "[Gmail]/Tous les messages"
+
+    /// The Microsoft 365 bug: the server lists UIDs but returns no FETCH data.
+    /// The checkpoint must not pass them, and nothing after them may be skipped.
+    @Test func listedButNotReturnedNeverAdvancesPastThem() async throws {
+        let fixtures = try Fixtures.small()
+        let server = gmailServer(fixtures) // UIDs 3, 5, 7, 9, ...
+        server.bodylessUIDs = [9]
+        let harness = try await SyncHarness(server: server)
+        defer { harness.cleanUp() }
+
+        let first = try await harness.syncer().run(SyncOptions(batches: BatchPlanner(maxMessages: 6)))
+        #expect(first.notDownloaded == [0: 1])
+        #expect(try await harness.store.checkpoint(accountID: harness.account.id, folder: Self.allMail)?.highestUID == 7)
+        // A rerun stops at the same place: still incomplete, never silently skipped.
+        let second = try await harness.syncer().run(SyncOptions(batches: BatchPlanner(maxMessages: 6)))
+        #expect(second.notDownloaded == [0: 1])
+        #expect(try await harness.store.checkpoint(accountID: harness.account.id, folder: Self.allMail)?.highestUID == 7)
+
+        // Once the server returns it, the next run fills the gap and finishes.
+        server.bodylessUIDs = []
+        let third = try await harness.syncer().run()
+        #expect(third.notDownloaded.isEmpty)
+        #expect(try await harness.storedUIDs() == (0..<fixtures.count).map { UInt32($0 * 2 + 3) })
+    }
+
+    @Test func messagesDeletedBetweenListingAndFetchAreConfirmedGoneThenPassed() async throws {
+        let fixtures = try Fixtures.small()
+        let server = gmailServer(fixtures)
+        server.expungeOnBodyFetch = [9, 11]
+        let harness = try await SyncHarness(server: server)
+        defer { harness.cleanUp() }
+
+        let report = try await harness.syncer().run(SyncOptions(batches: BatchPlanner(maxMessages: 6)))
+        #expect(report.notDownloaded.isEmpty)
+        #expect(report.outcome == .complete)
+        let expected = (0..<fixtures.count).map { UInt32($0 * 2 + 3) }.filter { $0 != 9 && $0 != 11 }
+        #expect(try await harness.storedUIDs() == expected)
+        #expect(try await harness.store.checkpoint(accountID: harness.account.id, folder: Self.allMail)?.highestUID == expected.last)
+        // The re-list was a UID FETCH of just the missing UIDs, without bodies.
+        #expect(harness.server.commandLog.contains { $0.contains("UID FETCH 9,11 (UID RFC822.SIZE)") })
+    }
+
+    /// A whole folder of non-mail items (a calendar the name rules miss) stops
+    /// that folder, reports it, and the other folders still sync.
+    @Test func unfetchableFolderIsReportedAndOthersContinue() async throws {
+        let fixtures = try Fixtures.small()
+        let server = FakeIMAPServer(mailboxes: [
+            .init(name: "Gym", attributes: ["\\HasNoChildren"], uidValidity: 21, messages: (1...5).map { .init(uid: UInt32($0), bytes: fixtures[0].bytes) }),
+            .init(name: "INBOX", attributes: ["\\HasNoChildren"], uidValidity: 22, messages: (1...3).map { .init(uid: UInt32($0 + 10), bytes: fixtures[$0].bytes) }),
+        ])
+        server.capabilities = ["IMAP4rev1", "AUTH=XOAUTH2", "SASL-IR"]
+        server.bodylessUIDs = [1, 2, 3, 4, 5]
+        let harness = try await SyncHarness(server: server, provider: .microsoft)
+        defer { harness.cleanUp() }
+
+        let report = try await harness.syncer().run()
+        #expect(report.notDownloaded == [0: 5])
+        #expect(report.messagesWritten == 3)
+        #expect(try await harness.store.checkpoint(accountID: harness.account.id, folder: "Gym")?.highestUID == 0)
+        #expect(try await harness.storedUIDs() == [11, 12, 13])
+        #expect(SyncError.messagesNotDownloaded(folders: 1, messages: 5).description.contains("nothing after them was skipped"))
+    }
+
+    /// Cosmetic fix: the announced count covers the whole folder even when the
+    /// first listing window is empty (Gmail UIDs are sparse).
+    @Test func announcedCountIsRightWhenTheFirstWindowIsEmpty() async throws {
+        let fixtures = try Fixtures.small()
+        let harness = try await SyncHarness(server: gmailServer(fixtures)) // first UID is 3
+        defer { harness.cleanUp() }
+        let counts = AnnouncedCounts()
+        _ = try await harness.syncer().run(SyncOptions(listWindow: 2)) { event in
+            if case .folderStarted(_, _, let count) = event { counts.add(count) }
+        }
+        #expect(counts.values == [fixtures.count])
+    }
+}
+
+final class AnnouncedCounts: @unchecked Sendable {
+    private let lock = NSLock()
+    private var _values: [Int] = []
+    func add(_ value: Int) { lock.withLock { _values.append(value) } }
+    var values: [Int] { lock.withLock { _values } }
+}
