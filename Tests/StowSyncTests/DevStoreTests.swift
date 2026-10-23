@@ -94,3 +94,30 @@ final class FakeTimeMachine: TimeMachineExclusion, @unchecked Sendable {
         #expect(tmutil.isExcluded(root))
     }
 }
+
+@Suite struct StateDirectoryTests {
+    @Test func stateDirectoryIsPrivateAndExcludedFromTimeMachine() throws {
+        let base = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: base) }
+        let timeMachine = FakeTimeMachine()
+        let protection = DevStoreProtection(timeMachine: timeMachine)
+        let state = base.appendingPathComponent("Stow/sync-state")
+        #expect(!protection.isStateDirectoryExcluded(state))
+        #expect(try protection.protectStateDirectory(state))
+        #expect(protection.isStateDirectoryExcluded(state))
+        let permissions = try FileManager.default.attributesOfItem(atPath: state.path)[.posixPermissions] as? Int
+        #expect(permissions == 0o700)
+        // The parent (Track B's archive root) is left alone.
+        #expect(!timeMachine.isExcluded(base.appendingPathComponent("Stow")))
+    }
+
+    /// The development store and sync state never share a name with Track B's archive files (D-119).
+    @Test func namesDoNotCollideWithTheArchive() {
+        let stow = DevStoreProtection.defaultRoot.deletingLastPathComponent()
+        #expect(DevStoreProtection.defaultStateDirectory.deletingLastPathComponent() == stow)
+        let ours = [DevStoreProtection.defaultRoot.lastPathComponent, DevStoreProtection.defaultStateDirectory.lastPathComponent]
+        for name in ["archive.sqlite", "archive.sqlite-wal", "archive.sqlite-shm", "raw", "attachments", ".metadata_never_index"] {
+            #expect(!ours.contains(name))
+        }
+    }
+}

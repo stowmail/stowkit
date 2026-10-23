@@ -74,6 +74,7 @@ struct Sync: AsyncParsableCommand {
         let protection = DevStoreProtection()
         try protection.protect(root)
         try protection.requireProtected(root)
+        try protection.protectStateDirectory(DevStoreProtection.defaultStateDirectory)
 
         let profile = ProviderProfile.forProvider(record.account.provider)
         let store = try FileRawMessageStore(root: root)

@@ -93,6 +93,23 @@ public struct DevStoreProtection: Sendable {
         return status
     }
 
+    /// Creates the sync state folder (0700) and excludes it from Time Machine.
+    /// It holds no message content, but the unfetchable ledger names folders,
+    /// and it sits inside the archive root, which Track B keeps in Time Machine
+    /// because the archive itself is encrypted (D-203, D-119).
+    @discardableResult
+    public func protectStateDirectory(_ directory: URL) throws -> Bool {
+        let directory = directory.standardizedFileURL
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: directory.path)
+        if !timeMachine.isExcluded(directory) { try timeMachine.exclude(directory) }
+        return timeMachine.isExcluded(directory)
+    }
+
+    public func isStateDirectoryExcluded(_ directory: URL) -> Bool {
+        FileManager.default.fileExists(atPath: directory.path) && timeMachine.isExcluded(directory.standardizedFileURL)
+    }
+
     /// Throws unless every protection is in place. Sync calls this before writing anything.
     public func requireProtected(_ root: URL) throws {
         let status = status(of: root)

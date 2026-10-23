@@ -11,7 +11,10 @@ struct Stowmail: AsyncParsableCommand {
         commandName: "stowmail",
         abstract: "Stow: a local, encrypted, searchable email archive.",
         version: StowVersion.current,
-        subcommands: [Doctor.self, AccountCommand.self, Folders.self, Sync.self]
+        subcommands: [
+            Doctor.self, AccountCommand.self, Folders.self, Sync.self,
+            Rules.self, Init.self, Import.self, Stats.self, Search.self, OCR.self,
+        ]
     )
 }
 
@@ -58,6 +61,8 @@ struct Doctor: AsyncParsableCommand {
 
         // D-115: messages servers list but never return.
         let state = DevStoreProtection.defaultStateDirectory
+        print("Sync state folder: \(state.path)")
+        print("  excluded from Time Machine: \(DevStoreProtection().isStateDirectoryExcluded(state) ? "yes" : "NO (sync excludes it before writing)")")
         let ledgers = ((try? FileManager.default.contentsOfDirectory(at: state, includingPropertiesForKeys: nil)) ?? [])
             .filter { $0.lastPathComponent.hasSuffix(".unfetchable.json") }
         var recorded = 0, pending = 0

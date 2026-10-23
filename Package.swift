@@ -61,7 +61,11 @@ let package = Package(
                 .product(name: "Logging", package: "swift-log"),
             ]
         ),
-        .target(name: "StowRules", dependencies: ["StowCore"]),
+        .target(
+            name: "StowRules",
+            dependencies: ["StowCore"],
+            resources: [.copy("Resources/rules-data.json")]
+        ),
         .target(name: "StowMCP", dependencies: ["StowCore", "StowSecrets"]),
         .executableTarget(
             name: "stowmail",
@@ -90,7 +94,7 @@ let package = Package(
             ]
         ),
         .testTarget(name: "StowStoreTests", dependencies: ["StowStore", .product(name: "GRDB", package: "GRDB")]),
-        .testTarget(name: "StowSearchTests", dependencies: ["StowSearch"]),
+        .testTarget(name: "StowSearchTests", dependencies: ["StowSearch", "StowStore", "StowSecrets", .product(name: "GRDB", package: "GRDB")]),
         .testTarget(name: "StowRulesTests", dependencies: ["StowRules"]),
         .testTarget(name: "StowMCPTests", dependencies: ["StowMCP"]),
     ],
