@@ -1,0 +1,10 @@
+# Keep secrets and build output out of Cursor's index and AI context (D-007)
+.env
+.env.*
+!.env.example
+**/.env
+.build/
+
+Vendor/
+*.sqlite*
+archive-data/
