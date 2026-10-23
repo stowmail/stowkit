@@ -31,6 +31,8 @@ final class FakeIMAPServer: @unchecked Sendable {
     var acceptedTokens: Set<String> { get { sync { _acceptedTokens } } set { sync { _acceptedTokens = newValue } } }
     /// Drop the connection without replying when this many body fetches have been received (counted across connections).
     var dropOnBodyFetchNumber: Int? { get { sync { _dropOn } } set { sync { _dropOn = newValue } } }
+    /// Drop the connection on every body fetch.
+    var dropEveryBodyFetch: Bool { get { sync { _dropEvery } } set { sync { _dropEvery = newValue } } }
     /// Answer this body fetch (counted across connections) with BYE and close.
     var byeOnBodyFetchNumber: (Int, String)? { get { sync { _byeOn } } set { sync { _byeOn = newValue } } }
     /// Answer EXAMINE with READ-WRITE, to test that the session refuses it.
@@ -51,6 +53,7 @@ final class FakeIMAPServer: @unchecked Sendable {
     private var _dropOn: Int?
     private var _byeOn: (Int, String)?
     private var _readWrite = false
+    private var _dropEvery = false
     private var _log: [String] = []
     private var _connections = 0
     private var _bodyFetches = 0
@@ -239,7 +242,7 @@ final class FakeIMAPServer: @unchecked Sendable {
         }
         if wantsBody {
             _bodyFetches += 1
-            if let drop = _dropOn, _bodyFetches == drop {
+            if _dropEvery || _dropOn == _bodyFetches {
                 client.closed = true
                 client.connection.cancel()
                 return

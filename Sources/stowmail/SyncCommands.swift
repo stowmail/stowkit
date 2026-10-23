@@ -56,7 +56,7 @@ struct Sync: AsyncParsableCommand {
     @Option(name: .long, help: "Development store folder (default: \(DevStoreProtection.defaultRoot.path)). Must end in .noindex.")
     var out: String?
 
-    @Option(name: .long, help: "Messages per batch (default 100).")
+    @Option(name: .long, help: "Messages per batch.")
     var batchSize: Int = 100
 
     func validate() throws {
