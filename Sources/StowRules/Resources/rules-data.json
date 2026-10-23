@@ -1,0 +1,25 @@
+{
+  "version": 1,
+  "note": "Plain data for the sender signals. Domains match themselves and any subdomain. Edit freely; no code change needed.",
+  "noReplyLocalParts": [
+    "noreply", "donotreply", "dontreply", "notreply", "mailerdaemon", "bounce", "bounces"
+  ],
+  "listProviderDomains": [
+    "mcsv.net", "mailchimp.com", "rsgsv.net", "mandrillapp.com",
+    "sendgrid.net", "sendgrid.com",
+    "amazonses.com",
+    "mailgun.org", "mailgun.com",
+    "sparkpostmail.com", "sparkpost.com",
+    "postmarkapp.com", "pm-bounces.com",
+    "constantcontact.com", "ccsend.com",
+    "campaign-archive.com", "list-manage.com",
+    "createsend.com", "cmail19.com", "cmail20.com",
+    "hubspotemail.net", "hs-send.com",
+    "sendinblue.com", "brevo.com", "sib-mail.net",
+    "klaviyomail.com", "klaviyo.com",
+    "mailjet.com", "mjt.lu",
+    "salesforce.com", "exacttarget.com", "et.salesforce.com",
+    "marketo.com", "mktomail.com",
+    "substack.com", "convertkit-mail.com", "ck.page", "beehiiv.com", "buttondown.email"
+  ]
+}

@@ -58,7 +58,11 @@ let package = Package(
                 .product(name: "Logging", package: "swift-log"),
             ]
         ),
-        .target(name: "StowRules", dependencies: ["StowCore"]),
+        .target(
+            name: "StowRules",
+            dependencies: ["StowCore"],
+            resources: [.copy("Resources/rules-data.json")]
+        ),
         .target(name: "StowMCP", dependencies: ["StowCore", "StowSecrets"]),
         .executableTarget(
             name: "stowmail",
