@@ -1,7 +1,9 @@
 import ArgumentParser
 import Foundation
 import StowCore
+import StowEngine
 import StowSecrets
+import StowStore
 import StowSync
 
 struct Folders: AsyncParsableCommand {
@@ -14,9 +16,11 @@ struct Folders: AsyncParsableCommand {
 
     func run() async throws {
         CLI.bootstrapLogging()
-        let record = try CLI.registry().find(account)
+        let accounts = CLIArchive.accounts(try CLIArchive.open())
+        let record = try accounts.find(account)
         let profile = ProviderProfile.forProvider(record.account.provider)
-        let session = try await SessionFactory(account: record.account, endpoint: profile.endpoint, tokens: try CLI.tokenProvider()).open()
+        let session = try await SessionFactory(account: record.account, endpoint: profile.endpoint,
+                                               tokens: try CLI.tokenProvider(accounts: accounts)).open()
         do {
             let capabilities = try await session.capabilities()
             let folders = try await session.listFolders()
@@ -38,13 +42,27 @@ struct Folders: AsyncParsableCommand {
     }
 }
 
+enum ChangeCheckArgument: String, ExpressibleByArgument, CaseIterable {
+    case skip, quick, full
+
+    var check: ChangeCheck {
+        switch self {
+        case .skip: .skip
+        case .quick: .quick
+        case .full: .full
+        }
+    }
+}
+
 struct Sync: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
-        abstract: "Download every message of an account, read-only, into the development store.",
+        abstract: "Download an account's new mail, read-only, into the encrypted archive.",
         discussion: """
-        Resumes from where the last run stopped. Writes unencrypted .eml files (D-015), so the \
-        folder is excluded from Time Machine and Spotlight first, and sync refuses to run if it cannot be.
-        """
+            Lists new messages, then downloads them personal mail first and bulk mail last (D-028), resuming where the \
+            last run stopped. Once nothing is left to download it compares archived mail with the mailbox: flags, labels, \
+            and messages marked as spam or deleted there (kept in the archive either way). The background sync \
+            (`stowmail daemon install`) does the same for every account without being asked.
+            """
     )
 
     @Argument(help: "Account ID, ID prefix, address or name.")
@@ -53,11 +71,11 @@ struct Sync: AsyncParsableCommand {
     @Option(name: .long, help: "Stop after this many messages.")
     var limit: Int?
 
-    @Option(name: .long, help: "Development store folder (default: \(DevStoreProtection.defaultRoot.path)). Must end in .noindex.")
-    var out: String?
-
     @Option(name: .long, help: "Messages per batch.")
     var batchSize: Int = 100
+
+    @Option(name: .long, help: "Compare archived mail with the mailbox afterwards: skip, quick (changed flags only) or full.")
+    var check: ChangeCheckArgument = .full
 
     func validate() throws {
         if let limit, limit <= 0 { throw ValidationError("--limit must be at least 1.") }
@@ -66,98 +84,101 @@ struct Sync: AsyncParsableCommand {
 
     func run() async throws {
         CLI.bootstrapLogging()
-        let record = try CLI.registry().find(account)
-        if record.needsSignIn { throw SyncError.needsSignIn(record.account.id) }
-
-        // Brief step 8: protect the folder, then refuse unless every protection holds.
-        let root = CLI.storeRoot(out)
-        let protection = DevStoreProtection()
-        try protection.protect(root)
-        try protection.requireProtected(root)
-        try protection.protectStateDirectory(DevStoreProtection.defaultStateDirectory)
-
-        let profile = ProviderProfile.forProvider(record.account.provider)
-        let store = try FileRawMessageStore(root: root)
-        let budget = ByteBudget(
-            limit: profile.dailyByteLimit,
-            fileURL: DevStoreProtection.defaultStateDirectory.appendingPathComponent("\(record.account.id).budget.json")
-        )
-        let factory = SessionFactory(account: record.account, endpoint: profile.endpoint, tokens: try CLI.tokenProvider())
-        let syncer = AccountSyncer(
-            account: record.account,
-            openSession: { try await factory.open() },
-            sink: store,
-            checkpoints: store,
-            budget: budget,
-            unfetchable: UnfetchableLedger(
-                fileURL: UnfetchableLedger.fileURL(stateDirectory: DevStoreProtection.defaultStateDirectory, accountID: record.account.id)
-            )
-        )
-
-        print("Syncing \(record.account.email) into \(root.path)")
-        let started = Date()
-        let report = try await syncer.run(SyncOptions(limit: limit, batches: BatchPlanner(maxMessages: batchSize))) { event in
-            switch event {
-            case .connected(let attempt):
-                if attempt > 1 { print("Reconnected.") }
-            case .folderPlanned(let toSync, let skipped):
-                print("\(toSync) folder(s) to sync, \(skipped) skipped (see `stowmail folders`).")
-            case .folderStarted(let index, let total, let newMessages):
-                print("Folder \(index + 1) of \(total): \(newMessages) new message(s).")
-            case .uidValidityChanged(let index, let old, let new):
-                print("Folder \(index + 1): UIDVALIDITY changed from \(old) to \(new); downloading it again.")
-            case .batchWritten(let messages, let bytes, let highestUID):
-                print("  wrote \(messages) message(s), \(CLI.megabytes(bytes)), up to UID \(highestUID)")
-            case .folderStopped(let index, let count):
-                print("Folder \(index + 1): the server would not return \(count) listed message(s). Stopped this folder before them; after \(UnfetchableLedger.defaultThreshold) runs like this they are recorded and passed (D-115).")
-            case .unfetchableRecorded(let index, let count):
-                print("Folder \(index + 1): \(count) message(s) could not be fetched on \(UnfetchableLedger.defaultThreshold) separate runs and were recorded; moving past them.")
-            case .retrying(let delay, let attempt, let reason):
-                print("Interrupted (\(reason)). Retry \(attempt) in \(Int(delay)) s.")
-            }
+        let (archive, lock) = try CLIArchive.openForWriting()
+        defer { lock.release() }
+        let accounts = CLIArchive.accounts(archive)
+        let record = try accounts.find(account)
+        guard record.isConnected else {
+            throw ValidationError("That account is disconnected. Add it again with `stowmail account add` to reconnect it.")
         }
+        if record.needsSignIn { throw SyncError.needsSignIn(record.account.id) }
+        let syncer = try EngineSync(archive: archive, tokens: try CLI.tokenProvider(accounts: accounts)).syncer(for: record.account)
+
+        print("Syncing \(record.account.email) into the encrypted archive at \(archive.location.root.path)")
+        let started = Date()
+        let report: SyncReport
+        do {
+            report = try await syncer.run(SyncOptions(limit: limit, batches: BatchPlanner(maxMessages: batchSize), checkChanges: check.check)) { event in
+                Self.describe(event)
+            }
+        } catch {
+            try? accounts.recordSync(record.account.id, at: Date(), error: Redact.scrub(String(describing: error)))
+            throw error
+        }
+        try accounts.recordSync(record.account.id, at: Date(), error: nil)
+        let coverage = try? StowStore.Coverage.compute(archive, account: record.account.id)
+
         let seconds = Int(Date().timeIntervalSince(started))
         print("Done in \(seconds) s: \(report.messagesWritten) message(s), \(CLI.megabytes(report.bytesWritten)).")
         switch report.outcome {
-        case .complete: print(report.notDownloaded.isEmpty ? "Everything is downloaded." : "Finished, but some folders are incomplete (below).")
-        case .limitReached: print("Stopped at --limit. Run again to continue.")
+        case .complete, .yielded:
+            print(report.remaining.queued == 0 ? "Everything listed is downloaded." : "\(report.remaining.queued) message(s) still queued (\(CLI.megabytes(report.remaining.queuedBytes))); run again to continue.")
+        case .limitReached: print("Stopped at --limit. \(report.remaining.queued) message(s) still queued; run again to continue.")
         case .budgetExhausted(let used, let limit):
-            print("Stopped: today's download budget is used (\(CLI.megabytes(used)) of \(CLI.megabytes(limit))). Run again tomorrow to continue.")
+            print("Stopped: today's download budget is used (\(CLI.megabytes(used)) of \(CLI.megabytes(limit))). It frees up over the next 24 hours; run again then.")
         }
         if report.uidValidityResets > 0 {
-            print("\(report.uidValidityResets) folder(s) had a UIDVALIDITY change and were downloaded again.")
+            print("\(report.uidValidityResets) folder(s) had a UIDVALIDITY change and were listed again.")
         }
-        let recorded = report.recordedUnfetchable.values.reduce(0, +)
-        if recorded > 0 {
-            print("\(recorded) message(s) could not be fetched and were recorded (see `stowmail doctor`).")
+        if report.remaining.unfetchable > 0 {
+            print("\(report.remaining.unfetchable) message(s) were listed but never returned on 3 separate runs, and were recorded (see `stowmail status`).")
         }
-        if !report.notDownloaded.isEmpty {
-            throw SyncError.messagesNotDownloaded(folders: report.notDownloaded.count, messages: report.notDownloaded.values.reduce(0, +))
+        if !report.sourceChanges.isEmpty {
+            let parts = report.sourceChanges.sorted { $0.key.rawValue < $1.key.rawValue }.map { "\($0.value) \($0.key.rawValue)" }
+            print("Changed in the mailbox since download (kept in the archive): \(parts.joined(separator: ", ")).")
+        }
+        if let date = coverage?.coverageDate {
+            print("Everything before \(CLI.day(date)) is archived and verified.")
+        }
+    }
+
+    static func describe(_ event: SyncEvent) {
+        switch event {
+        case .connected(let attempt):
+            if attempt > 1 { Swift.print("Reconnected.") }
+        case .folderPlanned(let toSync, let skipped):
+            Swift.print("\(toSync) folder(s) to sync, \(skipped) skipped (see `stowmail folders`).")
+        case .folderListed(let index, let total, let newMessages):
+            Swift.print("Folder \(index + 1) of \(total): \(newMessages) new message(s) queued.")
+        case .uidValidityChanged(let index, let old, let new):
+            Swift.print("Folder \(index + 1): UIDVALIDITY changed from \(old) to \(new); listing it again.")
+        case .downloading(let queued, let bytes):
+            Swift.print("Downloading \(queued) message(s), about \(CLI.megabytes(bytes)), personal mail first.")
+        case .batchWritten(let messages, let bytes):
+            Swift.print("  archived \(messages) message(s), \(CLI.megabytes(bytes))")
+        case .notDownloaded(let count):
+            Swift.print("The server would not return \(count) listed message(s). They stay queued and are tried again next run; after \(AccountSyncer.defaultUnfetchableThreshold) runs like this they are recorded and passed (D-115).")
+        case .unfetchableRecorded(let count):
+            Swift.print("\(count) message(s) could not be fetched on \(AccountSyncer.defaultUnfetchableThreshold) separate runs and were recorded.")
+        case .changesChecked(let flags, let removed):
+            Swift.print("Compared with the mailbox: \(flags) flag or label update(s), \(removed) message(s) no longer there.")
+        case .retrying(let delay, let attempt, let reason):
+            Swift.print("Interrupted (\(reason)). Retry \(attempt) in \(Int(delay)) s.")
         }
     }
 }
 
 struct Verify: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
-        abstract: "Re-fetch stored messages read-only and check they match the server byte for byte.",
+        abstract: "Check the archive: every message rebuilds byte for byte, every attachment and the search index are intact.",
         discussion: """
-        Picks a random sample of the account's stored messages, downloads them again into memory \
-        (never to disk), and compares SHA-256s with the stored files. Reports problems by folder \
-        number, UIDVALIDITY and UID only; never prints content, subjects or addresses (D-121). \
-        Exits with status 1 if any message differs.
-        """
+            Without --server, reads the archive only (D-042). With --server <account>, also downloads a random sample (or \
+            all, with --all) of that account's messages again into memory and compares them with the archive, read-only \
+            (D-121). Reports problems by number only; never prints content, subjects or addresses. Exits with status 1 if \
+            anything differs.
+            """
     )
 
-    @Argument(help: "Account ID, ID prefix, address or name.")
-    var account: String
+    @Option(name: .long, help: "Compare an account's archived messages with the server.")
+    var server: String?
 
-    @Option(name: .long, help: "How many stored messages to check.")
+    @Option(name: .long, help: "With --server: how many messages to compare.")
     var sample: Int = 100
 
-    @Flag(name: .long, help: "Check every stored message instead of a sample.")
+    @Flag(name: .long, help: "With --server: compare every message.")
     var all = false
 
-    @Option(name: .long, help: "Development store folder (default: \(DevStoreProtection.defaultRoot.path)).")
+    @Option(name: .long, help: "With --server: compare the Phase 1 development store in this folder instead of the archive.")
     var out: String?
 
     func validate() throws {
@@ -166,35 +187,83 @@ struct Verify: AsyncParsableCommand {
 
     func run() async throws {
         CLI.bootstrapLogging()
-        let record = try CLI.registry().find(account)
-        if record.needsSignIn { throw SyncError.needsSignIn(record.account.id) }
-        let root = CLI.storeRoot(out)
-        guard FileManager.default.fileExists(atPath: root.path) else {
-            throw ValidationError("No development store at \(root.path).")
+        if let server { return try await compareWithServer(server) }
+        let archive = try CLIArchive.open()
+        print("Checking every message, attachment and the search index...")
+        let report = try ArchiveVerifier(archive: archive).run { done, total in
+            Swift.print("  \(done) of \(total) messages")
         }
+        print("Messages: \(report.messages), rebuilt byte for byte: \(report.rebuilt).")
+        print("Attachments: \(report.attachments), intact: \(report.attachments - report.failedAttachments.count).")
+        for id in report.failedMessages { print("  MESSAGE DID NOT REBUILD: message \(id)") }
+        for id in report.failedAttachments { print("  ATTACHMENT DAMAGED: attachment \(id)") }
+        print("Search index: \(report.searchIndexConsistent ? "matches the stored text" : "DOES NOT MATCH")")
+        print("Database: \(report.databaseIntegrity)\(report.foreignKeyProblems > 0 ? ", \(report.foreignKeyProblems) broken references" : "")")
+        if report.unusedMessageFiles + report.unusedAttachmentFiles > 0 {
+            print("Unused files left by an interrupted removal: \(report.unusedMessageFiles + report.unusedAttachmentFiles) (harmless; deleted by the next `stowmail remove`).")
+        }
+        guard report.isClean else {
+            FileHandle.standardError.write(Data("Verification failed.\n".utf8))
+            throw ExitCode(1)
+        }
+        print("The archive is intact.")
+    }
+
+    func compareWithServer(_ query: String) async throws {
+        let archive = try CLIArchive.open()
+        let accounts = CLIArchive.accounts(archive)
+        let record = try accounts.find(query)
+        if record.needsSignIn { throw SyncError.needsSignIn(record.account.id) }
         let profile = ProviderProfile.forProvider(record.account.provider)
-        let factory = SessionFactory(account: record.account, endpoint: profile.endpoint, tokens: try CLI.tokenProvider())
+        let factory = SessionFactory(account: record.account, endpoint: profile.endpoint, tokens: try CLI.tokenProvider(accounts: accounts))
+        let source: RawMessageSource
+        if let out {
+            source = try FileRawMessageStore(root: CLI.storeRoot(out))
+        } else {
+            source = ArchiveRawSource(archive: archive, account: record.account.id)
+        }
         let verifier = StoreVerifier(
             account: record.account,
             openSession: { try await factory.open() },
-            source: try FileRawMessageStore(root: root),
-            budget: ByteBudget(
-                limit: profile.dailyByteLimit,
-                fileURL: DevStoreProtection.defaultStateDirectory.appendingPathComponent("\(record.account.id).budget.json")
-            )
+            source: source,
+            budget: ByteBudget(limit: profile.dailyByteLimit, store: ArchiveSyncStore(archive: archive), account: record.account.id)
         )
         let report = try await verifier.run(sample: all ? nil : sample)
-        print("Stored messages for this account: \(report.storedMessages). Checked: \(report.sampled).")
+        print("Archived messages for this account: \(report.storedMessages). Checked: \(report.sampled).")
         print("Compared with the server: \(report.compared). Identical: \(report.identical).")
         for item in report.mismatched { print("  MISMATCH: \(item)") }
         if !report.goneFromServer.isEmpty { print("Deleted on the server since sync (not compared): \(report.goneFromServer.count)") }
         for item in report.notCompared { print("  not compared (still on the server but not returned): \(item)") }
         for (index, reason) in report.skippedFolders.sorted(by: { $0.key < $1.key }) { print("Folder \(index + 1) skipped: \(reason)") }
         guard report.isClean else {
-            // A plain failure exit, without ArgumentParser's usage text.
-            FileHandle.standardError.write(Data("Verification failed: \(report.mismatched.count) stored message(s) differ from the server.\n".utf8))
+            FileHandle.standardError.write(Data("Verification failed: \(report.mismatched.count) archived message(s) differ from the server.\n".utf8))
             throw ExitCode(1)
         }
         print(report.notCompared.isEmpty && report.skippedFolders.isEmpty ? "All checked messages match." : "No mismatches among the messages compared.")
+    }
+}
+
+struct Export: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        abstract: "Write an account's archived mail to an mbox file, exactly as downloaded.",
+        discussion: "The file is unencrypted (permissions 0600): keep it somewhere safe, and delete it when done."
+    )
+
+    @Argument(help: "Account ID, ID prefix, address or name.")
+    var account: String
+
+    @Option(name: .long, help: "The mbox file to create. It must not exist yet.")
+    var mbox: String
+
+    func run() async throws {
+        CLI.bootstrapLogging()
+        let archive = try CLIArchive.open(readOnly: true)
+        let record = try CLIArchive.accounts(archive).find(account)
+        let url = URL(fileURLWithPath: (mbox as NSString).expandingTildeInPath)
+        let result = try MboxExport.export(archive, account: record.account.id, to: url) { done, total in
+            Swift.print("  \(done) of \(total)")
+        }
+        print("Wrote \(result.messages) message(s), \(CLI.megabytes(result.bytes)), to \(url.path).")
+        print("This file is not encrypted. Keep it safe and delete it when you no longer need it.")
     }
 }

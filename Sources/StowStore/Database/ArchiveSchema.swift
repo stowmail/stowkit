@@ -7,6 +7,8 @@ import GRDB
 /// Migrations are registered in order with GRDB's `DatabaseMigrator`, which
 /// records each one in `grdb_migrations` and runs only those not yet applied.
 /// A migration that has shipped is never edited: changes go in a new one.
+/// v1 was revised in Phase 2 before any real mail was imported (D-025); it is
+/// frozen from the first real import onwards.
 public enum ArchiveSchema {
     /// Every migration identifier, oldest first. Tests use this to step through versions.
     public static let migrationIdentifiers = ["v1"]
@@ -26,14 +28,28 @@ public enum ArchiveSchema {
 
     static func v1(_ db: Database) throws {
         try db.execute(sql: """
+            CREATE TABLE archive_meta (
+                key TEXT PRIMARY KEY NOT NULL,
+                value TEXT NOT NULL
+            ) STRICT;
+
             CREATE TABLE accounts (
                 id TEXT PRIMARY KEY NOT NULL,
-                provider TEXT NOT NULL CHECK (provider IN ('gmail', 'microsoft')),
+                -- No CHECK: new providers (Build 2 proposals B2-01, B2-02) must not need a table rebuild (D-025).
+                provider TEXT NOT NULL,
                 email TEXT NOT NULL,
                 display_name TEXT NOT NULL,
                 created_at INTEGER NOT NULL,
                 needs_reauth INTEGER NOT NULL DEFAULT 0,
+                disconnected_at INTEGER,
                 mcp_enabled INTEGER NOT NULL DEFAULT 0,
+                retention_months INTEGER,
+                coverage_date INTEGER,
+                coverage_computed_at INTEGER,
+                last_sync_at INTEGER,
+                last_success_at INTEGER,
+                last_error TEXT,
+                last_error_at INTEGER,
                 UNIQUE (provider, email)
             ) STRICT;
 
@@ -46,6 +62,7 @@ public enum ArchiveSchema {
                 special_use TEXT,
                 uid_validity INTEGER,
                 is_selectable INTEGER NOT NULL DEFAULT 1,
+                skipped_reason TEXT,
                 UNIQUE (account_id, kind, name)
             ) STRICT;
 
@@ -71,12 +88,18 @@ public enum ArchiveSchema {
                 from_address_id INTEGER REFERENCES addresses(id),
                 size INTEGER NOT NULL,
                 has_attachments INTEGER NOT NULL DEFAULT 0,
-                raw_state TEXT NOT NULL DEFAULT 'full' CHECK (raw_state IN ('full', 'skeleton')),
+                raw_state TEXT NOT NULL CHECK (raw_state IN ('full', 'skeleton')),
                 raw_stored_size INTEGER NOT NULL,
-                raw_compacted_at INTEGER,
+                raw_inline_attachments INTEGER NOT NULL DEFAULT 0,
                 parse_status TEXT NOT NULL CHECK (parse_status IN ('ok', 'degraded', 'failed')),
                 parse_warnings TEXT,
                 parser_version INTEGER NOT NULL,
+                source_state TEXT NOT NULL DEFAULT 'present'
+                    CHECK (source_state IN ('present', 'spam', 'trashed', 'gone')),
+                source_state_at INTEGER,
+                rule_suggestion TEXT CHECK (rule_suggestion IN ('keep', 'deprioritise', 'consider_deleting')),
+                rule_score INTEGER,
+                rule_signals TEXT,
                 imported_at INTEGER NOT NULL,
                 UNIQUE (account_id, raw_hash)
             ) STRICT;
@@ -85,6 +108,10 @@ public enum ArchiveSchema {
             CREATE INDEX messages_gmail_msgid ON messages(account_id, gmail_msgid);
             CREATE INDEX messages_thread ON messages(thread_key);
             CREATE INDEX messages_rfc822_id ON messages(rfc822_message_id);
+            CREATE INDEX messages_raw_hash ON messages(raw_hash);
+            CREATE INDEX messages_source_state ON messages(account_id, source_state);
+            CREATE INDEX messages_rule_suggestion ON messages(account_id, rule_suggestion);
+            CREATE INDEX messages_spam ON messages(id) WHERE source_state = 'spam';
 
             CREATE TABLE message_bodies (
                 message_id INTEGER PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE,
@@ -97,11 +124,13 @@ public enum ArchiveSchema {
                 folder_id INTEGER NOT NULL REFERENCES folders(id) ON DELETE CASCADE,
                 uid_validity INTEGER,
                 uid INTEGER,
+                flags TEXT,
                 last_seen_at INTEGER NOT NULL,
                 removed_from_server_at INTEGER,
                 PRIMARY KEY (message_id, folder_id),
                 UNIQUE (folder_id, uid_validity, uid)
             ) STRICT;
+            CREATE INDEX message_folders_folder ON message_folders(folder_id, uid_validity, removed_from_server_at);
 
             CREATE TABLE message_addresses (
                 message_id INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
@@ -148,29 +177,126 @@ public enum ArchiveSchema {
             CREATE TABLE sync_state (
                 folder_id INTEGER PRIMARY KEY REFERENCES folders(id) ON DELETE CASCADE,
                 uid_validity INTEGER NOT NULL,
-                highest_uid INTEGER NOT NULL,
+                listed_through_uid INTEGER NOT NULL DEFAULT 0,
+                highest_modseq INTEGER,
+                server_exists INTEGER,
                 last_sync_at INTEGER,
                 last_full_sync_at INTEGER,
+                first_sync_completed_at INTEGER,
                 status TEXT NOT NULL DEFAULT 'idle' CHECK (status IN ('idle', 'syncing', 'error')),
                 last_error TEXT
             ) STRICT;
 
+            CREATE TABLE download_queue (
+                folder_id INTEGER NOT NULL REFERENCES folders(id) ON DELETE CASCADE,
+                uid_validity INTEGER NOT NULL,
+                uid INTEGER NOT NULL,
+                size INTEGER NOT NULL,
+                internal_date INTEGER,
+                priority INTEGER NOT NULL DEFAULT 0,
+                gmail_msgid INTEGER,
+                state TEXT NOT NULL DEFAULT 'queued' CHECK (state IN ('queued', 'unfetchable')),
+                restore INTEGER NOT NULL DEFAULT 0,
+                attempts INTEGER NOT NULL DEFAULT 0,
+                last_run_id TEXT,
+                first_failed_at INTEGER,
+                last_failed_at INTEGER,
+                flags TEXT,
+                recorded_at INTEGER,
+                queued_at INTEGER NOT NULL,
+                PRIMARY KEY (folder_id, uid_validity, uid)
+            ) STRICT;
+            CREATE INDEX download_queue_order ON download_queue(state, priority, folder_id, uid);
+
+            CREATE TABLE byte_budget (
+                account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+                at INTEGER NOT NULL,
+                bytes INTEGER NOT NULL
+            ) STRICT;
+            CREATE INDEX byte_budget_account ON byte_budget(account_id, at);
+
+            CREATE TABLE sync_events (
+                id INTEGER PRIMARY KEY,
+                account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+                folder_id INTEGER REFERENCES folders(id) ON DELETE SET NULL,
+                kind TEXT NOT NULL,
+                old_value TEXT,
+                new_value TEXT,
+                at INTEGER NOT NULL
+            ) STRICT;
+            CREATE INDEX sync_events_account ON sync_events(account_id, at);
+
+            CREATE TABLE tombstones (
+                id INTEGER PRIMARY KEY,
+                account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+                raw_hash BLOB NOT NULL,
+                gmail_msgid INTEGER,
+                rfc822_message_id TEXT,
+                internal_date INTEGER NOT NULL,
+                size INTEGER NOT NULL,
+                sender TEXT,
+                reason TEXT NOT NULL,
+                removed_at INTEGER NOT NULL,
+                restore_requested_at INTEGER,
+                UNIQUE (account_id, raw_hash)
+            ) STRICT;
+            CREATE INDEX tombstones_gmail_msgid ON tombstones(account_id, gmail_msgid);
+
+            CREATE TABLE tombstone_copies (
+                tombstone_id INTEGER NOT NULL REFERENCES tombstones(id) ON DELETE CASCADE,
+                folder_id INTEGER NOT NULL REFERENCES folders(id) ON DELETE CASCADE,
+                uid_validity INTEGER NOT NULL,
+                uid INTEGER NOT NULL,
+                PRIMARY KEY (tombstone_id, folder_id, uid_validity, uid)
+            ) STRICT;
+            CREATE INDEX tombstone_copies_location ON tombstone_copies(folder_id, uid_validity, uid);
+
             CREATE TABLE rule_overrides (
                 id INTEGER PRIMARY KEY,
                 account_id TEXT REFERENCES accounts(id) ON DELETE CASCADE,
-                scope TEXT NOT NULL CHECK (scope IN ('address', 'domain')),
-                pattern TEXT NOT NULL,
-                rule_id TEXT,
-                action TEXT NOT NULL CHECK (action IN ('never_flag', 'always_keep', 'always_deprioritise')),
-                created_at INTEGER NOT NULL,
-                UNIQUE (account_id, scope, pattern, rule_id)
+                match TEXT NOT NULL,
+                suggestion TEXT NOT NULL CHECK (suggestion IN ('keep', 'deprioritise', 'consider_deleting')),
+                created_at INTEGER NOT NULL
             ) STRICT;
+            CREATE UNIQUE INDEX rule_overrides_match ON rule_overrides(coalesce(account_id, ''), match);
+            """)
+
+        // The full-text index stores no copy of the text it indexes (D-030): its
+        // content comes from this view over the tables above, so FTS5 reads it
+        // back from there for snippets. Every change to that text must remove the
+        // message's index entry first and add it again afterwards (SearchIndexWriter).
+        try db.execute(sql: """
+            CREATE VIEW messages_fts_content AS
+            SELECT m.id AS id,
+                m.subject AS subject,
+                (SELECT group_concat(\(addressText), ', ' ORDER BY ma.role, ma.position)
+                    FROM message_addresses ma JOIN addresses a ON a.id = ma.address_id
+                    WHERE ma.message_id = m.id AND ma.role IN ('from', 'sender', 'reply_to')) AS from_text,
+                (SELECT group_concat(\(addressText), ', ' ORDER BY ma.role, ma.position)
+                    FROM message_addresses ma JOIN addresses a ON a.id = ma.address_id
+                    WHERE ma.message_id = m.id AND ma.role = 'to') AS to_text,
+                (SELECT group_concat(\(addressText), ', ' ORDER BY ma.role, ma.position)
+                    FROM message_addresses ma JOIN addresses a ON a.id = ma.address_id
+                    WHERE ma.message_id = m.id AND ma.role IN ('cc', 'bcc')) AS cc_text,
+                (SELECT coalesce(b.text_plain, b.text_from_html) FROM message_bodies b WHERE b.message_id = m.id) AS body,
+                (SELECT group_concat(x.filename, char(10) ORDER BY x.part_path)
+                    FROM message_attachments x WHERE x.message_id = m.id AND x.filename IS NOT NULL) AS attachment_names,
+                (SELECT group_concat(t.text, char(10, 10) ORDER BY t.first_part)
+                    FROM (SELECT at.text AS text, min(x.part_path) AS first_part
+                          FROM message_attachments x JOIN attachment_text at ON at.attachment_id = x.attachment_id
+                          WHERE x.message_id = m.id GROUP BY x.attachment_id) t) AS attachment_text
+            FROM messages m;
 
             CREATE VIRTUAL TABLE messages_fts USING fts5(
                 subject, from_text, to_text, cc_text, body, attachment_names, attachment_text,
+                content = 'messages_fts_content',
+                content_rowid = 'id',
                 tokenize = 'porter unicode61 remove_diacritics 2',
                 prefix = '2 3'
             );
             """)
     }
+
+    /// "Name address", or just the address when there is no display name.
+    private static let addressText = "CASE WHEN ma.display_name IS NULL THEN a.address ELSE ma.display_name || ' ' || a.address END"
 }

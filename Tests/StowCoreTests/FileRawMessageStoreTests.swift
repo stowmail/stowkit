@@ -101,20 +101,24 @@ import Testing
         }
     }
 
-    @Test func checkpointsRoundTrip() async throws {
+    @Test func flagsRoundTripAndPhase1FilesStillRead() async throws {
         defer { try? FileManager.default.removeItem(at: root) }
         let store = try FileRawMessageStore(root: root)
-        let account = AccountID(rawValue: "acct-1")
-        #expect(try await store.checkpoint(accountID: account, folder: "INBOX") == nil)
+        var flagged = message(uid: 4)
+        flagged.flags = ["\\Seen", "\\Flagged"]
+        try await store.write(flagged)
+        #expect(try await store.read(flagged.key).flags == ["\\Seen", "\\Flagged"])
 
-        var checkpoint = SyncCheckpoint(accountID: account, folder: "INBOX", uidValidity: 5, highestUID: 100,
-                                        updatedAt: Date(timeIntervalSince1970: 1_000))
-        try await store.save(checkpoint)
-        checkpoint.highestUID = 200
-        try await store.save(checkpoint)
+        // A Phase 1 metadata file has no "flags" key; it reads as no flags.
+        let json = try #require(FileManager.default.enumerator(at: root, includingPropertiesForKeys: nil)?
+            .compactMap { $0 as? URL }.first { $0.pathExtension == "json" })
+        var object = try #require(try JSONSerialization.jsonObject(with: Data(contentsOf: json)) as? [String: Any])
+        object["flags"] = nil
+        try JSONSerialization.data(withJSONObject: object).write(to: json)
+        #expect(try await store.read(flagged.key).flags == [])
 
-        #expect(try await store.checkpoint(accountID: account, folder: "INBOX") == checkpoint)
-        // Checkpoint files are not mistaken for messages.
-        #expect(try await store.listKeys().isEmpty)
+        // A Phase 1 checkpoint file left in a folder is not mistaken for a message.
+        try Data("{}".utf8).write(to: json.deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent("checkpoint.json"))
+        #expect(try await store.listKeys() == [flagged.key])
     }
 }

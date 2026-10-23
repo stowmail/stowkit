@@ -11,14 +11,14 @@ import StowSecrets
 /// - An account already marked is refused at once, without touching the network.
 public actor TokenProvider {
     let tokenStore: TokenStore
-    let registry: AccountRegistry
+    let registry: any AccountDirectory
     let clientFor: @Sendable (Provider) throws -> OAuthClient
     let now: @Sendable () -> Date
     private let logger = Logger(label: "uk.getstow.sync.tokens")
 
     public init(
         tokenStore: TokenStore,
-        registry: AccountRegistry,
+        registry: any AccountDirectory,
         clientFor: @escaping @Sendable (Provider) throws -> OAuthClient,
         now: @escaping @Sendable () -> Date = { Date() }
     ) {
@@ -32,7 +32,7 @@ public actor TokenProvider {
     /// current one looks fresh, for when the server has just rejected it.
     public func accessToken(for accountID: AccountID, forceRefresh: Bool = false) async throws -> String {
         guard let record = try registry.record(accountID) else {
-            throw AccountRegistryError.notFound(accountID.rawValue)
+            throw AccountDirectoryError.notFound(accountID.rawValue)
         }
         guard !record.needsSignIn else { throw SyncError.needsSignIn(accountID) }
         guard let tokens = try tokenStore.tokens(for: accountID) else {

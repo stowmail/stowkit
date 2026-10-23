@@ -86,12 +86,14 @@ public actor IMAPSession {
         return folders
     }
 
-    /// Opens a folder read-only. Refuses to continue unless the server confirms READ-ONLY.
-    public func examine(_ folder: IMAPFolder) async throws -> FolderStatus {
+    /// Opens a folder read-only. Refuses to continue unless the server confirms
+    /// READ-ONLY. With `condstore`, also asks for HIGHESTMODSEQ (D-038).
+    public func examine(_ folder: IMAPFolder, condstore: Bool = false) async throws -> FolderStatus {
         var uidValidity: UInt32?
         var uidNext: UInt32?
+        var highestModSeq: UInt64?
         var exists = 0
-        let text = try await run(.examine(rawName: folder.rawName)) { response in
+        let text = try await run(.examine(rawName: folder.rawName, condstore: condstore)) { response in
             switch response {
             case .untagged(.mailboxData(.exists(let count))):
                 exists = count
@@ -99,6 +101,7 @@ public actor IMAPSession {
                 switch text.code {
                 case .uidValidity(let value)?: uidValidity = UInt32(value)
                 case .uidNext(let uid)?: uidNext = uid.rawValue
+                case .highestModificationSequence(let value)?: highestModSeq = UInt64(value)
                 default: break
                 }
             default:
@@ -112,16 +115,20 @@ public actor IMAPSession {
         guard let uidValidity else {
             throw SyncError.protocolViolation("EXAMINE gave no UIDVALIDITY")
         }
-        return FolderStatus(uidValidity: uidValidity, uidNext: uidNext, exists: exists)
+        return FolderStatus(uidValidity: uidValidity, uidNext: uidNext, exists: exists, highestModSeq: highestModSeq)
     }
 
-    /// UIDs and sizes of the messages whose UID is in `range`, in UID order.
-    /// Downloads no message content.
-    public func fetchUIDs(_ range: ClosedRange<UInt32>) async throws -> [MessageSummary] {
+    /// UIDs, sizes, arrival dates and (for Gmail) message IDs of the messages
+    /// whose UID is in `range`, in UID order. Downloads no message content.
+    public func fetchUIDs(_ range: ClosedRange<UInt32>, gmail: Bool = false) async throws -> [MessageSummary] {
         var builder = FetchAssembler()
-        _ = try await run(.fetchSummaries(range)) { try builder.consume($0) }
+        _ = try await run(.fetchSummaries(range, gmail: gmail)) { try builder.consume($0) }
         return builder.finished
-            .compactMap { message in message.uid.map { MessageSummary(uid: $0, size: message.size ?? 0) } }
+            .compactMap { message in
+                message.uid.map {
+                    MessageSummary(uid: $0, size: message.size ?? 0, internalDate: message.internalDate, gmailMessageID: message.gmailMessageID)
+                }
+            }
             .filter { range.contains($0.uid) } // "n:hi" can return the last message even if below n.
             .sorted { $0.uid < $1.uid }
     }
@@ -138,6 +145,48 @@ public actor IMAPSession {
             }
             .filter { wanted.contains($0.uid) }
             .sorted { $0.uid < $1.uid }
+    }
+
+    /// The named header fields of each message, by UID (`BODY.PEEK[HEADER.FIELDS (...)]`).
+    /// Read only, and only those fields.
+    public func fetchHeaderFields(uids: [UInt32], fields: [String]) async throws -> [UInt32: Data] {
+        guard !uids.isEmpty else { return [:] }
+        return try await headerFields(.list(uids), fields: fields)
+    }
+
+    /// Like `fetchHeaderFields(uids:fields:)`, for every message in a UID range.
+    public func fetchHeaderFields(_ range: ClosedRange<UInt32>, fields: [String]) async throws -> [UInt32: Data] {
+        try await headerFields(.range(range), fields: fields)
+    }
+
+    private func headerFields(_ selection: UIDSelection, fields: [String]) async throws -> [UInt32: Data] {
+        var builder = FetchAssembler()
+        _ = try await run(.fetchHeaderFields(selection, fields: fields)) { try builder.consume($0) }
+        var result: [UInt32: Data] = [:]
+        for message in builder.finished {
+            if let uid = message.uid { result[uid] = message.headerFields ?? Data() }
+        }
+        return result
+    }
+
+    /// Flags (and Gmail labels) of the messages in `range`: all of them, or with
+    /// `changedSince` only those whose CONDSTORE mod-sequence is higher (D-038).
+    public func fetchStates(_ range: ClosedRange<UInt32>, gmail: Bool, changedSince: UInt64? = nil) async throws -> [CopyState] {
+        var builder = FetchAssembler()
+        _ = try await run(.fetchStates(range, gmail: gmail, changedSince: changedSince)) { try builder.consume($0) }
+        return builder.finished
+            .compactMap { message in
+                message.uid.map { CopyState(uid: $0, flags: message.flags, labels: gmail ? message.labels : nil) }
+            }
+            .filter { range.contains($0.uid) }
+            .sorted { $0.uid < $1.uid }
+    }
+
+    /// The Gmail message IDs in the open folder's `range` (D-039). Identifiers only.
+    public func fetchGmailIDs(_ range: ClosedRange<UInt32>) async throws -> Set<UInt64> {
+        var builder = FetchAssembler()
+        _ = try await run(.fetchGmailIDs(range)) { try builder.consume($0) }
+        return Set(builder.finished.compactMap(\.gmailMessageID))
     }
 
     /// Downloads complete messages with BODY.PEEK[]. Messages deleted on the
@@ -200,6 +249,7 @@ public actor IMAPSession {
                 gmailMessageID: partial.gmailMessageID,
                 gmailThreadID: partial.gmailThreadID,
                 labels: partial.labels,
+                flags: partial.flags,
                 bytes: bytes
             )
         }.sorted { $0.uid < $1.uid }
@@ -373,14 +423,23 @@ struct FetchAssembler {
         var gmailThreadID: UInt64?
         var labels: [String] = []
         var flags: [String] = []
+        var modSeq: UInt64?
         var body: Data?
         /// The literal length the server announced for the body.
         var announcedBodyLength: Int?
+        /// `BODY[HEADER.FIELDS (...)]`, when that was asked for.
+        var headerFields: Data?
+    }
+
+    private enum Streaming {
+        case none
+        case body
+        case headerFields
     }
 
     private(set) var finished: [Partial] = []
     private var current: Partial?
-    private var streamingBody = false
+    private var streaming = Streaming.none
 
     mutating func consume(_ response: Response) throws {
         guard case .fetch(let part) = response else { return }
@@ -397,28 +456,43 @@ struct FetchAssembler {
             case .gmailThreadID(let id): current?.gmailThreadID = id
             case .gmailLabels(let labels): current?.labels = labels.map { $0.makeDisplayString() }
             case .flags(let flags): current?.flags = flags.map { String($0) }
+            case .fetchModificationSequence(let value): current?.modSeq = UInt64(value)
+            case .nilBody(.body(section: let section, offset: nil)) where Self.isHeaderFields(section):
+                current?.headerFields = Data()
             default: break
             }
         case .streamingBegin(let kind, let byteCount):
             switch kind {
             case .body(section: let section, offset: nil) where section == .complete:
-                streamingBody = true
+                streaming = .body
                 current?.body = Data(capacity: byteCount)
                 current?.announcedBodyLength = byteCount
+            case .body(section: let section, offset: nil) where Self.isHeaderFields(section):
+                streaming = .headerFields
+                current?.headerFields = Data(capacity: byteCount)
             case .rfc822:
-                streamingBody = true
+                streaming = .body
                 current?.body = Data(capacity: byteCount)
                 current?.announcedBodyLength = byteCount
             default:
-                streamingBody = false
+                streaming = .none
             }
         case .streamingBytes(let buffer):
-            if streamingBody { current?.body?.append(contentsOf: buffer.readableBytesView) }
+            switch streaming {
+            case .body: current?.body?.append(contentsOf: buffer.readableBytesView)
+            case .headerFields: current?.headerFields?.append(contentsOf: buffer.readableBytesView)
+            case .none: break
+            }
         case .streamingEnd:
-            streamingBody = false
+            streaming = .none
         case .finish:
             if let current { finished.append(current) }
             current = nil
         }
+    }
+
+    static func isHeaderFields(_ section: SectionSpecifier) -> Bool {
+        guard [Int](section.part).isEmpty, case .headerFields = section.kind else { return false }
+        return true
     }
 }

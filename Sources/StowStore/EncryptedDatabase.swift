@@ -30,6 +30,8 @@ public enum EncryptedDatabase {
         guard key.count == 32 else { throw EncryptedDatabaseError.invalidKeyLength(key.count) }
         var configuration = Configuration()
         configuration.readonly = readOnly
+        // The daemon and a CLI command can write at the same time; wait rather than fail at once.
+        configuration.busyMode = .timeout(30)
         configuration.prepareDatabase { db in
             try applyKey(key, to: db)
         }

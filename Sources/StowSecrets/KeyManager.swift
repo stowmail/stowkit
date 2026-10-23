@@ -105,6 +105,21 @@ public struct KeyManager: Sendable {
         return keys
     }
 
+    /// Saves keys recovered from the recovery bundle (D-031). Refuses if any
+    /// Stow key is already in the Keychain: recovery never overwrites keys.
+    public func installRecovered(_ keys: ArchiveKeys) throws {
+        guard try keychain.get(Self.databaseKeyItem) == nil,
+              try keychain.get(Self.fileKeyItem) == nil
+        else { throw KeyManagerError.keysAlreadyExist }
+        try keychain.set(keys.databaseKeyData, for: Self.databaseKeyItem)
+        do {
+            try keychain.set(keys.fileKey.withUnsafeBytes { Data($0) }, for: Self.fileKeyItem)
+        } catch {
+            try? keychain.delete(Self.databaseKeyItem)
+            throw error
+        }
+    }
+
     /// Loads both keys. Never creates them.
     public func loadKeys() throws -> ArchiveKeys {
         let database = try keychain.get(Self.databaseKeyItem)

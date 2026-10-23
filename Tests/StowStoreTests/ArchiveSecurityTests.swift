@@ -178,7 +178,7 @@ import Testing
         let sql = try test.archive.database.read { db in
             try String.fetchAll(db, sql: "SELECT sql FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'messages_fts%' AND name NOT LIKE 'grdb_%' AND name NOT LIKE 'sqlite_%'")
         }
-        #expect(sql.count == 12)
+        #expect(sql.count == 18)
         for statement in sql { #expect(statement.hasSuffix("STRICT"), "\(statement.prefix(40))") }
     }
 }
@@ -195,10 +195,10 @@ enum SampleRows {
                 try db.execute(sql: "INSERT INTO addresses (address, domain) VALUES (?, 'example.com') ON CONFLICT DO NOTHING",
                                arguments: ["a-\(account)@example.com"])
                 try db.execute(sql: """
-                    INSERT INTO messages (account_id, raw_hash, internal_date, size, raw_stored_size, parse_status, parser_version, imported_at)
-                    VALUES (?, randomblob(32), 0, 1, 1, 'ok', 1, 0)
+                    INSERT INTO messages (account_id, raw_hash, internal_date, size, raw_state, raw_stored_size, parse_status, parser_version, imported_at)
+                    VALUES (?, randomblob(32), 0, 1, 'full', 1, 'ok', 1, 0)
                     """, arguments: [account])
-                try db.execute(sql: "INSERT INTO messages_fts (rowid, subject) VALUES (?, 'sample')", arguments: [db.lastInsertedRowID])
+                try SearchIndexWriter.index(db, messageID: db.lastInsertedRowID)
             default:
                 Issue.record("Add sample rows for migration \(version)")
             }

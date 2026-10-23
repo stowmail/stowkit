@@ -9,6 +9,8 @@ import StowCore
 /// - `has:attachment` and `-has:attachment`
 /// - `account:<account id>` (repeatable)
 /// - `after:` / `since:` (inclusive) and `before:` (exclusive), as `YYYY-MM-DD` in UTC
+/// - `in:spam` (only mail marked as spam at the provider) and `in:anywhere`
+///   (spam too); by default spam is left out (D-022)
 ///
 /// Everything else is free text: words, `"quoted phrases"`, `prefix*`, `OR`
 /// and `-excluded` words (see `FTSExpression`). Unknown `name:value` words are
@@ -37,6 +39,8 @@ public enum QueryParser {
                     case "to": query.to = append(query.to, value); continue
                     case "subject": query.subject = append(query.subject, value); continue
                     case "account": query.accounts.append(AccountID(rawValue: value)); continue
+                    case "in" where value.lowercased() == "spam": query.spam = .only; continue
+                    case "in" where value.lowercased() == "anywhere": query.spam = .include; continue
                     case "after", "since":
                         if let date = day(value) { query.since = date; continue }
                     case "before":

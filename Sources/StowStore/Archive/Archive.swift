@@ -25,6 +25,13 @@ public final class Archive: Sendable {
         let database = try EncryptedDatabase.open(at: location.databaseURL, key: keys.databaseKeyData, readOnly: readOnly)
         if !readOnly {
             try ArchiveSchema.migrate(database)
+            try database.write { db in
+                let now = String(Int(Date().timeIntervalSince1970))
+                try db.execute(sql: "INSERT INTO archive_meta (key, value) VALUES ('archive_id', ?) ON CONFLICT DO NOTHING",
+                               arguments: [UUID().uuidString.lowercased()])
+                try db.execute(sql: "INSERT INTO archive_meta (key, value) VALUES ('created_at', ?) ON CONFLICT DO NOTHING",
+                               arguments: [now])
+            }
             secureDatabaseFiles(location)
         }
         return Archive(location: location, database: database, keys: keys)
@@ -36,6 +43,31 @@ public final class Archive: Sendable {
             let path = location.databaseURL.path + suffix
             if FileManager.default.fileExists(atPath: path) {
                 try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: path)
+            }
+        }
+    }
+
+    // MARK: - Archive facts
+
+    /// A random ID given to the archive when it was created. The recovery
+    /// bundle carries it, so a bundle can only unlock its own archive (D-031).
+    public func archiveID() throws -> String {
+        guard let id = try meta("archive_id") else { throw ArchiveError.missingArchiveID }
+        return id
+    }
+
+    public func meta(_ key: String) throws -> String? {
+        try database.read { db in try String.fetchOne(db, sql: "SELECT value FROM archive_meta WHERE key = ?", arguments: [key]) }
+    }
+
+    public func setMeta(_ key: String, _ value: String?) throws {
+        try database.write { db in
+            if let value {
+                try db.execute(sql: """
+                    INSERT INTO archive_meta (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value
+                    """, arguments: [key, value])
+            } else {
+                try db.execute(sql: "DELETE FROM archive_meta WHERE key = ?", arguments: [key])
             }
         }
     }
@@ -61,17 +93,44 @@ public final class Archive: Sendable {
         }
     }
 
-    /// The decrypted original bytes of a stored message (expanded first if it was compacted).
+    // MARK: - Messages
+
+    /// The original bytes of a stored message, rebuilt from its skeleton and
+    /// attachment files when it was stored as a skeleton.
     public func rawMessage(_ id: StoredMessageID) throws -> Data? {
         let row = try database.read { db in
             try Row.fetchOne(db, sql: "SELECT raw_hash, raw_state FROM messages WHERE id = ?", arguments: [id])
         }
         guard let row else { return nil }
-        let hash: Data = row["raw_hash"]
+        return try rawMessage(hash: row["raw_hash"], state: row["raw_state"])
+    }
+
+    func rawMessage(hash: Data, state: String) throws -> Data {
         let stored = try rawFiles.read(hash)
-        if row["raw_state"] as String == "skeleton" {
-            return try RawCompaction.expand(stored, attachments: attachmentFiles)
+        guard state == "skeleton" else { return stored }
+        return try RawCompaction.expand(stored, attachments: attachmentFiles)
+    }
+
+    /// The header block of a stored message, without touching its attachments.
+    public func headerBlock(_ id: StoredMessageID) throws -> Data? {
+        let row = try database.read { db in
+            try Row.fetchOne(db, sql: "SELECT raw_hash, raw_state FROM messages WHERE id = ?", arguments: [id])
         }
-        return stored
+        guard let row else { return nil }
+        let stored = try rawFiles.read(row["raw_hash"])
+        if row["raw_state"] as String == "skeleton" { return try RawCompaction.headerBlock(ofSkeleton: stored) }
+        return RawCompaction.headerBlock(of: stored)
+    }
+}
+
+public enum ArchiveError: Error, Equatable, CustomStringConvertible {
+    case missingArchiveID
+    case unknownAccount(String)
+
+    public var description: String {
+        switch self {
+        case .missingArchiveID: "The archive has no archive ID; it was not opened for writing yet"
+        case .unknownAccount: "No account in the archive matches that. See `stowmail account list`."
+        }
     }
 }

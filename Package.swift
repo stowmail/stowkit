@@ -14,6 +14,7 @@ let package = Package(
         .library(name: "StowSearch", targets: ["StowSearch"]),
         .library(name: "StowRules", targets: ["StowRules"]),
         .library(name: "StowMCP", targets: ["StowMCP"]),
+        .library(name: "StowEngine", targets: ["StowEngine"]),
         .executable(name: "stowmail", targets: ["stowmail"]),
     ],
     dependencies: [
@@ -67,6 +68,20 @@ let package = Package(
             resources: [.copy("Resources/rules-data.json")]
         ),
         .target(name: "StowMCP", dependencies: ["StowCore", "StowSecrets"]),
+        // Joins sync, storage and rules: the scheduler, the daemon and everything
+        // the CLI and the app both drive. Like the CLI, it may depend on every module (D-026).
+        .target(
+            name: "StowEngine",
+            dependencies: [
+                "StowCore",
+                "StowSecrets",
+                "StowSync",
+                "StowStore",
+                "StowRules",
+                .product(name: "GRDB", package: "GRDB"),
+                .product(name: "Logging", package: "swift-log"),
+            ]
+        ),
         .executableTarget(
             name: "stowmail",
             dependencies: [
@@ -77,10 +92,13 @@ let package = Package(
                 "StowSearch",
                 "StowRules",
                 "StowMCP",
+                "StowEngine",
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
                 .product(name: "Logging", package: "swift-log"),
             ]
         ),
+        // Test helpers shared by several test targets: the fake IMAP server and fixtures. Never shipped.
+        .target(name: "StowTestSupport", dependencies: ["StowCore"], path: "Tests/StowTestSupport"),
         .testTarget(name: "StowCoreTests", dependencies: ["StowCore"]),
         .testTarget(name: "StowSecretsTests", dependencies: ["StowSecrets"]),
         .testTarget(
@@ -89,6 +107,7 @@ let package = Package(
                 "StowSync",
                 "StowCore",
                 "StowSecrets",
+                "StowTestSupport",
                 .product(name: "NIOIMAP", package: "swift-nio-imap"),
                 .product(name: "NIOCore", package: "swift-nio"),
             ]
@@ -97,6 +116,13 @@ let package = Package(
         .testTarget(name: "StowSearchTests", dependencies: ["StowSearch", "StowStore", "StowSecrets", .product(name: "GRDB", package: "GRDB")]),
         .testTarget(name: "StowRulesTests", dependencies: ["StowRules"]),
         .testTarget(name: "StowMCPTests", dependencies: ["StowMCP"]),
+        .testTarget(
+            name: "StowEngineTests",
+            dependencies: [
+                "StowEngine", "StowSync", "StowStore", "StowSearch", "StowRules", "StowSecrets", "StowCore", "StowTestSupport",
+                .product(name: "GRDB", package: "GRDB"),
+            ]
+        ),
     ],
     swiftLanguageModes: [.v6]
 )

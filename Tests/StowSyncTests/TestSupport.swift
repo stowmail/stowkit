@@ -1,6 +1,7 @@
 import Foundation
 import StowCore
 import StowSecrets
+@_exported import StowTestSupport
 @testable import StowSync
 
 /// Synthetic `.eml` fixtures made by scripts/make-fixtures (D-018).
@@ -72,13 +73,3 @@ let testAppConfig = try! AppConfig.load(
     ],
     currentDirectory: FileManager.default.temporaryDirectory.appendingPathComponent("stow-no-env-\(UUID().uuidString)")
 )
-
-/// A sync clock and sleeper that never really waits.
-final class RecordedSleeps: @unchecked Sendable {
-    private let lock = NSLock()
-    private var _delays: [TimeInterval] = []
-    var delays: [TimeInterval] { lock.withLock { _delays } }
-    func sleep(_ delay: TimeInterval) async throws {
-        lock.withLock { _delays.append(delay) }
-    }
-}

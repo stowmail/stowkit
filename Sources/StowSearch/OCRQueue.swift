@@ -90,21 +90,25 @@ public final class OCRQueue: Sendable {
 
         try archive.database.write { db in
             let now = Int(Date().timeIntervalSince1970)
-            if let text {
-                let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-                if !trimmed.isEmpty {
-                    try db.execute(sql: """
-                        INSERT INTO attachment_text (attachment_id, text, method, extractor_version, extracted_at)
-                        VALUES (?, ?, 'ocr', ?, ?)
-                        ON CONFLICT (attachment_id) DO UPDATE SET text = excluded.text, method = 'ocr',
-                            extractor_version = excluded.extractor_version, extracted_at = excluded.extracted_at
-                        """, arguments: [id, String(trimmed.prefix(TextExtractor.maximumCharacters)), Self.version, now])
+            // The index is built from the attachment text, so every message
+            // containing it is taken out of the index and put back (D-030).
+            let messages = try SearchIndexWriter.messages(containing: id, db)
+            try SearchIndexWriter.updating(db, messageIDs: messages) {
+                if let text {
+                    let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if !trimmed.isEmpty {
+                        try db.execute(sql: """
+                            INSERT INTO attachment_text (attachment_id, text, method, extractor_version, extracted_at)
+                            VALUES (?, ?, 'ocr', ?, ?)
+                            ON CONFLICT (attachment_id) DO UPDATE SET text = excluded.text, method = 'ocr',
+                                extractor_version = excluded.extractor_version, extracted_at = excluded.extracted_at
+                            """, arguments: [id, String(trimmed.prefix(TextExtractor.maximumCharacters)), Self.version, now])
+                    }
+                    try db.execute(sql: "UPDATE attachments SET text_status = 'ocr_done' WHERE id = ?", arguments: [id])
+                } else {
+                    try db.execute(sql: "UPDATE attachments SET text_status = 'ocr_failed' WHERE id = ?", arguments: [id])
                 }
-                try db.execute(sql: "UPDATE attachments SET text_status = 'ocr_done' WHERE id = ?", arguments: [id])
-            } else {
-                try db.execute(sql: "UPDATE attachments SET text_status = 'ocr_failed' WHERE id = ?", arguments: [id])
             }
-            try SearchIndexWriter.reindex(db, attachmentID: id)
         }
         return true
     }

@@ -1,6 +1,7 @@
 import ArgumentParser
 import Foundation
 import StowCore
+import StowEngine
 import StowSecrets
 import StowStore
 import StowSync
@@ -12,8 +13,9 @@ struct Stowmail: AsyncParsableCommand {
         abstract: "Stow: a local, encrypted, searchable email archive.",
         version: StowVersion.current,
         subcommands: [
-            Doctor.self, AccountCommand.self, Folders.self, Sync.self, Verify.self,
-            Rules.self, Init.self, Import.self, Stats.self, Search.self, OCR.self,
+            Doctor.self, Status.self, Init.self, RecoveryKeyCommand.self, Recover.self, AccountCommand.self, Folders.self,
+            Sync.self, Daemon.self, Verify.self, Export.self, Rules.self, Remove.self, Removed.self, Restore.self,
+            Coverage.self, ArchiveLocationCommand.self, ArchiveMove.self, Import.self, Stats.self, Search.self, OCR.self,
         ]
     )
 }
@@ -21,11 +23,8 @@ struct Stowmail: AsyncParsableCommand {
 /// Checks the local setup without revealing any secret.
 struct Doctor: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
-        abstract: "Check SQLCipher, the Keychain backend, app configuration and the development store. Prints no secret values."
+        abstract: "Check SQLCipher, the Keychain, app configuration, the archive and the background sync. Prints no secret values."
     )
-
-    @Option(name: .long, help: "Development store folder to check (default: \(DevStoreProtection.defaultRoot.path)).")
-    var out: String?
 
     func run() async throws {
         CLI.bootstrapLogging()
@@ -47,30 +46,37 @@ struct Doctor: AsyncParsableCommand {
             print("  \(error)")
         }
 
-        let root = CLI.storeRoot(out)
-        let status = DevStoreProtection().status(of: root)
-        print("Development store (unencrypted, D-015): \(root.path)")
-        print("  exists: \(status.exists ? "yes" : "no (created and protected by the first sync)")")
-        print("  excluded from Time Machine: \(status.excludedFromTimeMachine ? "yes" : "NO")")
-        print("  Spotlight: \(DevStoreProtection.spotlightMarker) \(status.spotlightMarkerPresent ? "present" : "MISSING"), .noindex name \(status.noindexSuffix ? "yes" : "NO")")
-        print("  outside git repositories: \(status.insideGitRepository ? "NO" : "yes")")
-        print("  outside iCloud Drive: \(status.insideICloudDrive ? "NO" : "yes")")
-        if status.exists {
-            print("  sync may write here: \(status.isProtected ? "yes" : "NO (\(status.problems.joined(separator: "; ")))")")
+        let location = CLIArchive.location()
+        print("Archive: \(location.root.path)")
+        let volume = ArchiveLocation.checkVolume(location.root)
+        switch volume.verdict {
+        case .suitable: print("  disk: \(volume.fileSystem), suitable")
+        case .warning(let caution): print("  disk: \(volume.fileSystem). Caution: \(caution).")
+        case .refused(let reason): print("  disk: \(volume.fileSystem). NOT SUITABLE: \(reason).")
+        }
+        if location.exists {
+            print("  database: present\(RecoveryBundle.exists(in: location.root) ? ", recovery bundle present" : ", NO recovery bundle")")
+            if let archive = try? CLIArchive.open(readOnly: true) {
+                print("  recovery key confirmed: \(ArchiveSetup.isConfirmed(archive) ? "yes" : "NO (run `stowmail recovery-key rotate`)")")
+            } else {
+                print("  could not open it with this Mac's keys")
+            }
+        } else if ArchiveSettings().chosenFolder != nil {
+            print("  OFFLINE: the chosen folder is not available (is its disk connected?)")
+        } else {
+            print("  not created yet (run `stowmail init`)")
         }
 
-        // D-115: messages servers list but never return.
-        let state = DevStoreProtection.defaultStateDirectory
-        print("Sync state folder: \(state.path)")
-        print("  excluded from Time Machine: \(DevStoreProtection().isStateDirectoryExcluded(state) ? "yes" : "NO (sync excludes it before writing)")")
-        let ledgers = ((try? FileManager.default.contentsOfDirectory(at: state, includingPropertiesForKeys: nil)) ?? [])
-            .filter { $0.lastPathComponent.hasSuffix(".unfetchable.json") }
-        var recorded = 0, pending = 0
-        for file in ledgers {
-            let totals = await UnfetchableLedger(fileURL: file).totals()
-            recorded += totals.recorded
-            pending += totals.pending
+        print("Background sync: \(LaunchAgent.isInstalled ? (LaunchAgent.isLoaded() ? "installed and running" : "installed, not running") : "not installed (`stowmail daemon install`)")")
+        print("Logs: \(LaunchAgent.logDirectory.path)")
+        print("Power: \(PowerState.current().pauseReason.map { "sync would pause now (\($0))" } ?? "sync may run")")
+
+        let root = DevStoreProtection.defaultRoot
+        if FileManager.default.fileExists(atPath: root.path) {
+            let status = DevStoreProtection().status(of: root)
+            print("Phase 1 development store (unencrypted, D-015): \(root.path)")
+            print("  protected: \(status.isProtected ? "yes" : "NO (\(status.problems.joined(separator: "; ")))")")
+            print("  It is deleted once real mail is in the encrypted archive and verified.")
         }
-        print("Unfetchable messages (listed by the server, never returned, D-115): \(recorded) recorded and passed, \(pending) still being retried")
     }
 }

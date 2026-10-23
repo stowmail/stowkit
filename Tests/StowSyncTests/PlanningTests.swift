@@ -91,11 +91,11 @@ import Testing
         let file = temporaryDirectory().appendingPathComponent("budget.json")
         defer { try? FileManager.default.removeItem(at: file.deletingLastPathComponent()) }
         let budget = ByteBudget(limit: 1_000, fileURL: file, now: { clock.now })
-        #expect(await budget.allows(1_000))
+        #expect(try await budget.allows(1_000))
         try await budget.record(600)
-        #expect(await budget.used() == 600)
-        #expect(await budget.allows(400))
-        #expect(!(await budget.allows(401)))
+        #expect(try await budget.used() == 600)
+        #expect(try await budget.allows(400))
+        #expect(!(try await budget.allows(401)))
 
         let attributes = try FileManager.default.attributesOfItem(atPath: file.path)
         #expect((attributes[.posixPermissions] as? Int) == 0o600)
@@ -103,15 +103,15 @@ import Testing
         clock.now = clock.now.addingTimeInterval(23 * 3600)
         try await budget.record(300)
         let reloaded = ByteBudget(limit: 1_000, fileURL: file, now: { clock.now })
-        #expect(await reloaded.used() == 900)
+        #expect(try await reloaded.used() == 900)
 
         clock.now = clock.now.addingTimeInterval(2 * 3600) // the first spend is now over 24 hours old
-        #expect(await reloaded.used() == 300)
+        #expect(try await reloaded.used() == 300)
     }
 
-    @Test func noLimitAlwaysAllows() async {
+    @Test func noLimitAlwaysAllows() async throws {
         let budget = ByteBudget(limit: nil, fileURL: nil)
-        #expect(await budget.allows(Int64.max / 2))
+        #expect(try await budget.allows(Int64.max / 2))
     }
 
     @Test func gmailLimitStaysUnderGooglesCap() {
@@ -139,17 +139,30 @@ import Testing
     @Test func everyCommandIsReadOnly() {
         let all: [ReadOnlyCommand] = [
             .capability, .authenticateXOAUTH2(user: "u@example.com", accessToken: "t"), .listAll,
-            .examine(rawName: Array("INBOX".utf8)), .fetchSummaries(1...10), .fetchSummariesOf(uids: [4, 9]), .fetchMessages(uids: [1, 2, 5], gmail: true), .logout,
+            .examine(rawName: Array("INBOX".utf8), condstore: false), .examine(rawName: Array("INBOX".utf8), condstore: true),
+            .fetchSummaries(1...10, gmail: false), .fetchSummaries(1...10, gmail: true), .fetchSummariesOf(uids: [4, 9]),
+            .fetchHeaderFields(.list([3, 4]), fields: ["From", "List-Unsubscribe"]), .fetchHeaderFields(.range(1...9), fields: ["Message-ID"]),
+            .fetchMessages(uids: [1, 2, 5], gmail: true), .fetchStates(1...10, gmail: true, changedSince: nil),
+            .fetchStates(1...10, gmail: false, changedSince: 42), .fetchGmailIDs(1...10), .logout,
         ]
         for command in all {
             switch command.command {
-            case .capability, .authenticate, .list, .examine, .logout:
+            case .capability, .authenticate, .list, .logout:
                 break
-            case .uidFetch(_, let attributes, _):
+            case .examine(_, let parameters):
+                // CONDSTORE only asks for mod-sequences; EXAMINE stays read-only.
+                #expect(parameters.allSatisfy { $0 == .condStore })
+            case .uidFetch(_, let attributes, let modifiers):
                 for attribute in attributes {
                     if case .bodySection(let peek, _, _) = attribute { #expect(peek, "body fetch without PEEK") }
-                    #expect(attribute != .rfc822 && attribute != .rfc822Text, "RFC822 fetch sets \\Seen")
+                    #expect(attribute != .rfc822 && attribute != .rfc822Text && attribute != .rfc822Header, "RFC822 fetch sets \\Seen")
                     if case .binary(let peek, _, _) = attribute { #expect(peek) }
+                }
+                for modifier in modifiers {
+                    guard case .changedSince = modifier else {
+                        Issue.record("Unexpected FETCH modifier")
+                        continue
+                    }
                 }
             default:
                 Issue.record("Command outside the read-only list: \(command.verb)")

@@ -1,5 +1,6 @@
 import Foundation
 import NIOIMAPCore
+import StowCore
 
 /// Where to connect. TLS is mandatory except on the loopback address, which
 /// only the test server uses.
@@ -74,6 +75,12 @@ public struct IMAPFolder: Sendable, Hashable, CustomStringConvertible {
         return known.first { attributes.contains($0) }
     }
 
+    /// The folder as the sync state records it.
+    public func syncFolder(skippedReason: String?) -> SyncFolder {
+        SyncFolder(name: name, delimiter: separator.map(String.init), specialUse: specialUse,
+                   isSelectable: isSelectable, skippedReason: skippedReason)
+    }
+
     /// Folder names can be personal, so they are not printed by default.
     public var description: String {
         "IMAPFolder(\(attributes.sorted().joined(separator: " ")))"
@@ -85,15 +92,19 @@ public struct FolderStatus: Sendable, Equatable {
     public var uidValidity: UInt32
     public var uidNext: UInt32?
     public var exists: Int
+    /// HIGHESTMODSEQ, when the server supports CONDSTORE and it was asked for.
+    public var highestModSeq: UInt64? = nil
 }
 
 /// A message's UID and size, from a cheap listing fetch.
 public struct MessageSummary: Sendable, Equatable {
     public var uid: UInt32
     public var size: Int
-    /// Only filled in by the re-listing of specific UIDs.
     public var internalDate: Date? = nil
+    /// Only filled in by the re-listing of specific UIDs.
     public var flags: [String] = []
+    /// Gmail's permanent message ID, when listed from a Gmail account.
+    public var gmailMessageID: UInt64? = nil
 }
 
 /// One message as fetched, before it is turned into a `RawMessage`.
@@ -106,6 +117,7 @@ public struct FetchedMessage: Sendable, Equatable {
     public var gmailMessageID: UInt64?
     public var gmailThreadID: UInt64?
     public var labels: [String]
+    public var flags: [String] = []
     /// The complete message from BODY.PEEK[]. Never log it.
     public var bytes: Data
 }

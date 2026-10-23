@@ -3,19 +3,22 @@ import ArgumentParser
 import Foundation
 import Logging
 import StowCore
+import StowEngine
 import StowSecrets
+import StowStore
 import StowSync
 
 /// Shared plumbing for the commands.
 enum CLI {
-    /// Logs go to standard error. Level from STOW_LOG_LEVEL (trace, debug,
-    /// info, notice, warning, error), default notice. Never logs secrets (D-014).
+    /// Logs go to standard error and to `~/Library/Logs/Stow/stowmail.log`
+    /// (D-040). Level from STOW_LOG_LEVEL (trace, debug, info, notice,
+    /// warning, error), default notice. Never logs secrets (D-014).
     private static let loggingBootstrapped: Bool = {
         let level = ProcessInfo.processInfo.environment["STOW_LOG_LEVEL"].flatMap(Logger.Level.init(rawValue:)) ?? .notice
         LoggingSystem.bootstrap { label in
-            var handler = StreamLogHandler.standardError(label: label)
-            handler.logLevel = level
-            return handler
+            var console = StreamLogHandler.standardError(label: label)
+            console.logLevel = level
+            return MultiplexLogHandler([console, FileLogHandler(label: label, level: level)])
         }
         return true
     }()
@@ -29,13 +32,22 @@ enum CLI {
         return URL(fileURLWithPath: (out as NSString).expandingTildeInPath, isDirectory: true).standardizedFileURL
     }
 
-    static func keychain() -> KeychainStore { KeychainStore() }
-    static func registry() -> AccountRegistry { AccountRegistry(keychain: keychain()) }
-    static func tokenStore() -> TokenStore { TokenStore(keychain: keychain()) }
+    /// The Keychain under `STOW_KEYCHAIN_SERVICE` if set, so development and
+    /// tests keep their keys and tokens apart from the real ones (D-208).
+    static func keychain() -> KeychainStore {
+        let service = ProcessInfo.processInfo.environment["STOW_KEYCHAIN_SERVICE"].flatMap { $0.isEmpty ? nil : $0 }
+            ?? KeychainStore.defaultService
+        return KeychainStore(service: service)
+    }
 
-    static func tokenProvider() throws -> TokenProvider {
+    /// Phase 1's account list in the Keychain; only read to move it into the archive (D-032).
+    static func keychainRegistry() -> AccountRegistry { AccountRegistry(keychain: keychain()) }
+    static func tokenStore() -> TokenStore { TokenStore(keychain: keychain()) }
+    static func keyManager() -> KeyManager { KeyManager(keychain: keychain()) }
+
+    static func tokenProvider(accounts: any AccountDirectory) throws -> TokenProvider {
         let config = try AppConfig.load()
-        return TokenProvider(tokenStore: tokenStore(), registry: registry()) { provider in
+        return TokenProvider(tokenStore: tokenStore(), registry: accounts) { provider in
             OAuthClient(config: OAuthProviderConfig.forProvider(provider, config: config))
         }
     }
@@ -49,12 +61,93 @@ enum CLI {
     }
 
     static func describe(_ record: AccountRecord) -> String {
-        let flag = record.needsSignIn ? "  NEEDS SIGN-IN" : ""
+        let flag = !record.isConnected ? "  DISCONNECTED (mail kept)" : record.needsSignIn ? "  NEEDS SIGN-IN" : ""
         return "\(record.account.id)  \(record.account.provider.rawValue)  \(record.account.email)  \"\(record.account.displayName)\"\(flag)"
     }
 
+    /// A size the way Finder writes it, for example "48 KB" or "9.8 GB".
     static func megabytes(_ bytes: Int64) -> String {
-        String(format: "%.1f MB", Double(bytes) / 1_000_000)
+        ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)
+    }
+
+    static func megabytes(_ bytes: Int) -> String {
+        megabytes(Int64(bytes))
+    }
+
+    static func day(_ date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_GB")
+        formatter.dateFormat = "d MMM yyyy"
+        return formatter.string(from: date)
+    }
+
+    static func time(_ date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_GB")
+        formatter.dateFormat = "d MMM yyyy HH:mm"
+        return formatter.string(from: date)
+    }
+
+    /// Asks a question on the terminal; nil at end of input.
+    static func ask(_ prompt: String) -> String? {
+        print(prompt, terminator: "")
+        fflush(stdout)
+        return readLine()?.trimmingCharacters(in: .whitespaces)
+    }
+
+    static func confirm(_ prompt: String) -> Bool {
+        guard let answer = ask(prompt + " [y/N] ") else { return false }
+        return ["y", "yes"].contains(answer.lowercased())
+    }
+
+    /// Reads a secret without showing it as it is typed.
+    static func askSecret(_ prompt: String) -> String? {
+        var buffer = [CChar](repeating: 0, count: 256)
+        guard let result = readpassphrase(prompt, &buffer, buffer.count, RPP_ECHO_OFF) else { return nil }
+        let text = String(cString: result)
+        buffer.withUnsafeMutableBufferPointer { $0.update(repeating: 0) }
+        return text
+    }
+}
+
+/// Opening the archive from the CLI: location from `STOW_ARCHIVE_DIR`, else
+/// the folder chosen with `stowmail archive-location`, else
+/// `~/Library/Application Support/Stow/`; keys from the Keychain (D-208, D-035).
+enum CLIArchive {
+    static func location() -> ArchiveLocation {
+        ArchiveLocation.fromEnvironment()
+    }
+
+    /// Opens an existing archive. Never creates one: a missing archive at a
+    /// chosen folder is "offline" (a disconnected disk), not a reason to start afresh.
+    static func open(readOnly: Bool = false) throws -> Archive {
+        let location = location()
+        guard location.exists else {
+            if ArchiveSettings().chosenFolder != nil, ProcessInfo.processInfo.environment["STOW_ARCHIVE_DIR"] == nil {
+                throw ArchiveLocationError.offline(location.root.path)
+            }
+            throw ValidationError("No archive at \(location.root.path). Run `stowmail init` first.")
+        }
+        return try Archive.open(location, keys: try CLI.keyManager().loadKeys(), readOnly: readOnly)
+    }
+
+    /// Opens the archive for writing and takes the writer lock, waiting up to
+    /// ten minutes for the background sync to finish its round (D-035).
+    static func openForWriting(requireRecovery: Bool = true) throws -> (Archive, ArchiveLock) {
+        let archive = try open()
+        if requireRecovery { try ArchiveSetup.requireConfirmed(archive) }
+        let lock = try ArchiveLock.acquire(archive.location, wait: 600) {
+            print("Waiting for the background sync to finish its current turn...")
+        }
+        return (archive, lock)
+    }
+
+    static func accounts(_ archive: Archive) -> ArchiveAccounts {
+        ArchiveAccounts(archive: archive)
+    }
+
+    static func megabytes(_ bytes: Int) -> String {
+        CLI.megabytes(Int64(bytes))
     }
 }
 

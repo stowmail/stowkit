@@ -1,10 +1,12 @@
 import Foundation
 import StowCore
 import StowSecrets
+import StowTestSupport
 import Testing
 @testable import StowSync
 
-/// Runs `AccountSyncer` against the fake server and a real `FileRawMessageStore`.
+/// Runs `AccountSyncer` against the fake server, a real `FileRawMessageStore`
+/// and an in-memory sync state that lasts across runs, like a database would.
 struct SyncHarness {
     let server: FakeIMAPServer
     let port: UInt16
@@ -12,6 +14,7 @@ struct SyncHarness {
     let store: FileRawMessageStore
     let account: Account
     let sleeps = RecordedSleeps()
+    let state = MemorySyncState()
 
     init(server: FakeIMAPServer, provider: Provider = .gmail) async throws {
         self.server = server
@@ -24,7 +27,7 @@ struct SyncHarness {
     func syncer(
         sink: RawMessageSink? = nil,
         budget: ByteBudget = ByteBudget(limit: nil, fileURL: nil),
-        unfetchable: UnfetchableLedger = UnfetchableLedger(fileURL: nil),
+        prioritiser: DownloadPrioritiser? = nil,
         token: String = "good-token"
     ) -> AccountSyncer {
         let port = Int(self.port)
@@ -37,9 +40,9 @@ struct SyncHarness {
                 return session
             },
             sink: sink ?? store,
-            checkpoints: store,
+            state: state,
             budget: budget,
-            unfetchable: unfetchable,
+            prioritiser: prioritiser,
             sleep: { try await sleeps.sleep($0) }
         )
     }
@@ -51,6 +54,10 @@ struct SyncHarness {
 
     func storedUIDs() async throws -> [UInt32] {
         try await store.listKeys().map(\.uid)
+    }
+
+    func queued(_ folder: String) async throws -> [UInt32] {
+        try await state.queuedUIDs(account.id, folder: folder, uidValidity: state.folderState(account.id, folder: folder)?.uidValidity ?? 0)
     }
 }
 
@@ -97,9 +104,10 @@ actor CrashingSink: RawMessageSink {
             #expect(stored.gmailMessageID == 1_800_000_000_000 + UInt64(index))
             #expect(stored.labels == (index % 2 == 0 ? ["\\Inbox", "Receipts"] : ["\\Important"]))
         }
-        let checkpoint = try await harness.store.checkpoint(accountID: harness.account.id, folder: "[Gmail]/Tous les messages")
-        #expect(checkpoint?.highestUID == keys.map(\.uid).max())
-        #expect(checkpoint?.uidValidity == 7)
+        let folderState = await harness.state.folderState(harness.account.id, folder: "[Gmail]/Tous les messages")
+        #expect(folderState?.listedThroughUID == keys.map(\.uid).max())
+        #expect(folderState?.uidValidity == 7)
+        #expect(folderState?.firstSyncCompletedAt != nil)
 
         let log = harness.server.commandLog
         assertReadOnly(log)
@@ -162,9 +170,8 @@ actor CrashingSink: RawMessageSink {
         await #expect(throws: CocoaError.self) {
             _ = try await harness.syncer(sink: crashing).run(SyncOptions(batches: BatchPlanner(maxMessages: 4)))
         }
-        // Batches 1 and 2 are checkpointed; batch 3 was written but not checkpointed.
-        let checkpoint = try await harness.store.checkpoint(accountID: harness.account.id, folder: "[Gmail]/Tous les messages")
-        #expect(checkpoint?.highestUID == 17) // the 8th message: UID 8*2+1
+        // Batches 1 and 2 left the queue; batch 3 was written but is still queued.
+        #expect(try await harness.queued("[Gmail]/Tous les messages").count == fixtures.count - 8)
 
         // A fresh run (a new process) repeats batch 3 and finishes.
         let report = try await harness.syncer().run(SyncOptions(batches: BatchPlanner(maxMessages: 4)))
@@ -214,8 +221,8 @@ actor CrashingSink: RawMessageSink {
         let keys = try await harness.store.listKeys()
         #expect(keys.filter { $0.uidValidity == 8 }.count == fixtures.count)
         #expect(keys.filter { $0.uidValidity == 7 }.count == fixtures.count) // the old copies are kept
-        let checkpoint = try await harness.store.checkpoint(accountID: harness.account.id, folder: "[Gmail]/Tous les messages")
-        #expect(checkpoint?.uidValidity == 8)
+        #expect(await harness.state.folderState(harness.account.id, folder: "[Gmail]/Tous les messages")?.uidValidity == 8)
+        #expect(await harness.state.events.map(\.kind) == ["uidvalidity_changed"])
     }
 
     @Test func limitStopsAndTheNextRunContinues() async throws {
@@ -248,7 +255,7 @@ actor CrashingSink: RawMessageSink {
 
         // A new process sees the same spend and downloads nothing more today.
         let reloaded = ByteBudget(limit: firstTwo + 10, fileURL: budgetFile)
-        #expect(await reloaded.used() == firstTwo)
+        #expect(try await reloaded.used() == firstTwo)
         let again = try await harness.syncer(budget: reloaded).run(SyncOptions(batches: BatchPlanner(maxMessages: 2)))
         #expect(again.messagesWritten == 0)
     }
@@ -369,35 +376,41 @@ actor CrashingSink: RawMessageSink {
     }
 }
 
-/// Fixes from part 2 (orchestrator, 2026-10-23).
+/// Messages listed but not returned (D-113, D-115, D-118), under the Phase 2 queue (D-027).
 @Suite struct MissingMessageTests {
     static let allMail = "[Gmail]/Tous les messages"
 
     /// The Microsoft 365 bug: the server lists UIDs but returns no FETCH data.
-    /// The checkpoint must not pass them, and nothing after them may be skipped.
-    @Test func listedButNotReturnedNeverAdvancesPastThem() async throws {
+    /// The message stays queued and is tried again; everything else downloads.
+    @Test func listedButNotReturnedStaysQueuedAndBlocksNothing() async throws {
         let fixtures = try Fixtures.small()
         let server = gmailServer(fixtures) // UIDs 3, 5, 7, 9, ...
         server.bodylessUIDs = [9]
         let harness = try await SyncHarness(server: server)
         defer { harness.cleanUp() }
+        let everything = (0..<fixtures.count).map { UInt32($0 * 2 + 3) }
 
         let first = try await harness.syncer().run(SyncOptions(batches: BatchPlanner(maxMessages: 6)))
-        #expect(first.notDownloaded == [0: 1])
-        #expect(try await harness.store.checkpoint(accountID: harness.account.id, folder: Self.allMail)?.highestUID == 7)
-        // A rerun stops at the same place: still incomplete, never silently skipped.
+        #expect(first.notDownloaded == 1)
+        #expect(first.outcome == .complete)
+        #expect(try await harness.storedUIDs() == everything.filter { $0 != 9 })
+        #expect(try await harness.queued(Self.allMail) == [9])
+        #expect(await harness.state.folderState(harness.account.id, folder: Self.allMail)?.firstSyncCompletedAt == nil)
+        // A rerun tries it again: still queued, never silently skipped.
         let second = try await harness.syncer().run(SyncOptions(batches: BatchPlanner(maxMessages: 6)))
-        #expect(second.notDownloaded == [0: 1])
-        #expect(try await harness.store.checkpoint(accountID: harness.account.id, folder: Self.allMail)?.highestUID == 7)
+        #expect(second.notDownloaded == 1)
+        #expect(try await harness.queued(Self.allMail) == [9])
 
-        // Once the server returns it, the next run fills the gap and finishes.
+        // Once the server returns it, the next run fills the gap and the first sync is complete.
         server.bodylessUIDs = []
         let third = try await harness.syncer().run()
-        #expect(third.notDownloaded.isEmpty)
-        #expect(try await harness.storedUIDs() == (0..<fixtures.count).map { UInt32($0 * 2 + 3) })
+        #expect(third.notDownloaded == 0)
+        #expect(third.messagesWritten == 1)
+        #expect(try await harness.storedUIDs() == everything)
+        #expect(await harness.state.folderState(harness.account.id, folder: Self.allMail)?.firstSyncCompletedAt != nil)
     }
 
-    @Test func messagesDeletedBetweenListingAndFetchAreConfirmedGoneThenPassed() async throws {
+    @Test func messagesDeletedBetweenListingAndFetchAreConfirmedGoneThenDropped() async throws {
         let fixtures = try Fixtures.small()
         let server = gmailServer(fixtures)
         server.expungeOnBodyFetch = [9, 11]
@@ -405,17 +418,17 @@ actor CrashingSink: RawMessageSink {
         defer { harness.cleanUp() }
 
         let report = try await harness.syncer().run(SyncOptions(batches: BatchPlanner(maxMessages: 6)))
-        #expect(report.notDownloaded.isEmpty)
+        #expect(report.notDownloaded == 0)
         #expect(report.outcome == .complete)
         let expected = (0..<fixtures.count).map { UInt32($0 * 2 + 3) }.filter { $0 != 9 && $0 != 11 }
         #expect(try await harness.storedUIDs() == expected)
-        #expect(try await harness.store.checkpoint(accountID: harness.account.id, folder: Self.allMail)?.highestUID == expected.last)
+        #expect(try await harness.queued(Self.allMail).isEmpty)
         // The re-list was a UID FETCH of just the missing UIDs, without bodies.
         #expect(harness.server.commandLog.contains { $0.contains("UID FETCH 9,11 (UID RFC822.SIZE FLAGS INTERNALDATE)") })
     }
 
-    /// A whole folder of non-mail items (a calendar the name rules miss) stops
-    /// that folder, reports it, and the other folders still sync.
+    /// A whole folder of non-mail items (a calendar the name rules miss) is
+    /// reported, and the other folders sync in the same run.
     @Test func unfetchableFolderIsReportedAndOthersContinue() async throws {
         let fixtures = try Fixtures.small()
         let server = FakeIMAPServer(mailboxes: [
@@ -428,22 +441,22 @@ actor CrashingSink: RawMessageSink {
         defer { harness.cleanUp() }
 
         let report = try await harness.syncer().run()
-        #expect(report.notDownloaded == [0: 5])
+        #expect(report.notDownloaded == 5)
         #expect(report.messagesWritten == 3)
-        #expect(try await harness.store.checkpoint(accountID: harness.account.id, folder: "Gym")?.highestUID == 0)
+        #expect(try await harness.queued("Gym") == [1, 2, 3, 4, 5])
         #expect(try await harness.storedUIDs() == [11, 12, 13])
-        #expect(SyncError.messagesNotDownloaded(folders: 1, messages: 5).description.contains("nothing after them was skipped"))
+        #expect(report.remaining.queued == 5)
     }
 
-    /// Cosmetic fix: the announced count covers the whole folder even when the
-    /// first listing window is empty (Gmail UIDs are sparse).
+    /// The announced count covers the whole folder even when the first
+    /// listing window is empty (Gmail UIDs are sparse).
     @Test func announcedCountIsRightWhenTheFirstWindowIsEmpty() async throws {
         let fixtures = try Fixtures.small()
         let harness = try await SyncHarness(server: gmailServer(fixtures)) // first UID is 3
         defer { harness.cleanUp() }
         let counts = AnnouncedCounts()
         _ = try await harness.syncer().run(SyncOptions(listWindow: 2)) { event in
-            if case .folderStarted(_, _, let count) = event { counts.add(count) }
+            if case .folderListed(_, _, let count) = event { counts.add(count) }
         }
         #expect(counts.values == [fixtures.count])
     }
@@ -460,67 +473,38 @@ final class AnnouncedCounts: @unchecked Sendable {
 @Suite struct UnfetchableTests {
     static let allMail = "[Gmail]/Tous les messages"
 
-    @Test func ledgerCountsOncePerRunAndRecordsAtTheThreshold() async throws {
-        let file = temporaryDirectory().appendingPathComponent("acct.unfetchable.json")
-        defer { try? FileManager.default.removeItem(at: file.deletingLastPathComponent()) }
-        let ledger = UnfetchableLedger(fileURL: file, threshold: 3)
-        let stuck = [MessageSummary(uid: 9, size: 1234, internalDate: Date(timeIntervalSince1970: 1_700_000_000), flags: ["\\Seen"])]
-
-        #expect(try await ledger.recordAttempt(folder: "F", uidValidity: 1, runID: "a", stuck: stuck).isEmpty)
-        #expect(try await ledger.recordAttempt(folder: "F", uidValidity: 1, runID: "a", stuck: stuck).isEmpty) // same run
-        #expect(try await ledger.recordAttempt(folder: "F", uidValidity: 1, runID: "b", stuck: stuck).isEmpty)
-        #expect(try await ledger.recordAttempt(folder: "F", uidValidity: 1, runID: "c", stuck: stuck) == [9])
-
-        let reloaded = UnfetchableLedger(fileURL: file, threshold: 3)
-        let entry = try #require(await reloaded.entries(folder: "F").first)
-        #expect(entry.attempts == 3 && entry.size == 1234 && entry.flags == ["\\Seen"] && entry.recordedAt != nil)
-        #expect(entry.internalDate == Date(timeIntervalSince1970: 1_700_000_000))
-        #expect(await reloaded.totals() == (1, 0))
-        let permissions = try FileManager.default.attributesOfItem(atPath: file.path)[.posixPermissions] as? Int
-        #expect(permissions == 0o600)
-
-        // A UIDVALIDITY change starts the count again.
-        #expect(try await reloaded.recordAttempt(folder: "F", uidValidity: 2, runID: "d", stuck: stuck).isEmpty)
-        // A message that later downloads is forgotten.
-        try await reloaded.resolve(folder: "F", uidValidity: 2, uids: [9])
-        #expect(await reloaded.entries(folder: "F").isEmpty)
-    }
-
-    /// The Deleted Items case: the folder stops on runs 1 and 2, then on run 3
-    /// the stuck messages are recorded and everything after them syncs.
-    @Test func stuckMessagesAreRecordedOnTheThirdRunAndSyncContinues() async throws {
+    /// The Deleted Items case: on runs 1 and 2 the stuck messages stay queued
+    /// (everything else is downloaded on run 1); on run 3 they are recorded and passed.
+    @Test func stuckMessagesAreRecordedOnTheThirdRun() async throws {
         let fixtures = try Fixtures.small()
         let server = gmailServer(fixtures) // UIDs 3, 5, 7, 9, 11, ...
         server.bodylessUIDs = [9, 11]
         let harness = try await SyncHarness(server: server)
         defer { harness.cleanUp() }
-        let ledgerFile = harness.root.deletingLastPathComponent().appendingPathComponent("\(UUID().uuidString).unfetchable.json")
-        defer { try? FileManager.default.removeItem(at: ledgerFile) }
         func run() async throws -> SyncReport {
-            try await harness.syncer(unfetchable: UnfetchableLedger(fileURL: ledgerFile)).run(SyncOptions(batches: BatchPlanner(maxMessages: 6)))
+            try await harness.syncer().run(SyncOptions(batches: BatchPlanner(maxMessages: 6)))
         }
+        let expected = (0..<fixtures.count).map { UInt32($0 * 2 + 3) }.filter { $0 != 9 && $0 != 11 }
 
-        for _ in 1...2 {
+        for attempt in 1...2 {
             let report = try await run()
-            #expect(report.notDownloaded == [0: 2])
-            #expect(report.recordedUnfetchable.isEmpty)
-            #expect(try await harness.store.checkpoint(accountID: harness.account.id, folder: Self.allMail)?.highestUID == 7)
+            #expect(report.notDownloaded == 2)
+            #expect(report.recordedUnfetchable == 0)
+            #expect(report.messagesWritten == (attempt == 1 ? expected.count : 0))
+            #expect(await harness.state.entry(Self.allMail, uid: 9)?.attempts == attempt)
         }
         let third = try await run()
-        #expect(third.notDownloaded.isEmpty)
-        #expect(third.recordedUnfetchable == [0: 2])
+        #expect(third.notDownloaded == 0)
+        #expect(third.recordedUnfetchable == 2)
         #expect(third.outcome == .complete)
-        let expected = (0..<fixtures.count).map { UInt32($0 * 2 + 3) }.filter { $0 != 9 && $0 != 11 }
+        #expect(third.remaining == QueueTotals(queued: 0, queuedBytes: 0, unfetchable: 2))
         #expect(try await harness.storedUIDs() == expected)
-        #expect(try await harness.store.checkpoint(accountID: harness.account.id, folder: Self.allMail)?.highestUID == expected.last)
-
-        let entries = await UnfetchableLedger(fileURL: ledgerFile).entries(folder: Self.allMail)
-        #expect(entries.map(\.uid) == [9, 11])
-        #expect(entries.allSatisfy { $0.attempts == 3 && $0.size > 0 && $0.internalDate != nil })
+        // Recorded messages count as passed: the folder's first sync is complete.
+        #expect(await harness.state.folderState(harness.account.id, folder: Self.allMail)?.firstSyncCompletedAt != nil)
 
         // A fourth run has nothing left to do and reports nothing new.
         let fourth = try await run()
-        #expect(fourth.messagesWritten == 0 && fourth.recordedUnfetchable.isEmpty && fourth.notDownloaded.isEmpty)
+        #expect(fourth.messagesWritten == 0 && fourth.recordedUnfetchable == 0 && fourth.notDownloaded == 0)
     }
 
     /// Reconnects inside one run do not count as extra attempts.
@@ -531,14 +515,15 @@ final class AnnouncedCounts: @unchecked Sendable {
             .init(name: "INBOX", attributes: [], uidValidity: 32, messages: (1...4).map { .init(uid: UInt32($0), bytes: fixtures[$0].bytes) }),
         ])
         server.capabilities = ["IMAP4rev1", "AUTH=XOAUTH2", "SASL-IR"]
-        server.bodylessUIDs = [2] // Deleted Items UID 2 is never returned (fetch 1), so that folder stops
-        server.dropOnBodyFetchNumber = 2 // then the first INBOX fetch drops; the run reconnects and redoes Deleted Items
+        server.bodylessUIDs = [2] // UID 2 is never returned, in both folders
+        server.dropOnBodyFetchNumber = 4 // fetch 1 and its two retries are Deleted Items; the INBOX fetch drops and the run reconnects
         let harness = try await SyncHarness(server: server, provider: .microsoft)
         defer { harness.cleanUp() }
-        let ledger = UnfetchableLedger(fileURL: nil)
-        _ = try? await harness.syncer(unfetchable: ledger).run()
+        let report = try await harness.syncer().run()
         #expect(harness.server.connectionCount == 2) // one reconnect within the run
-        #expect(await ledger.entries(folder: "Deleted Items").first?.attempts == 1)
+        #expect(await harness.state.entry("Deleted Items", uid: 2)?.attempts == 1)
+        #expect(await harness.state.entry("INBOX", uid: 2)?.attempts == 1)
+        #expect(report.messagesWritten == 5)
     }
 }
 
@@ -592,14 +577,12 @@ final class AnnouncedCounts: @unchecked Sendable {
         server.refusals = [9: 1, 13: 1]
         let harness = try await SyncHarness(server: server)
         defer { harness.cleanUp() }
-        let ledger = UnfetchableLedger(fileURL: nil)
-
-        let report = try await harness.syncer(unfetchable: ledger).run(SyncOptions(batches: BatchPlanner(maxMessages: 6)))
-        #expect(report.notDownloaded.isEmpty)
+        let report = try await harness.syncer().run(SyncOptions(batches: BatchPlanner(maxMessages: 6)))
+        #expect(report.notDownloaded == 0)
         #expect(report.outcome == .complete)
         #expect(try await harness.storedUIDs() == (0..<fixtures.count).map { UInt32($0 * 2 + 3) })
         #expect(harness.sleeps.delays == [2]) // one short pause, no reconnect
-        #expect(await ledger.totals() == (0, 0))
+        #expect(report.remaining == QueueTotals())
         // The retry asked for just the missing UIDs.
         #expect(harness.server.commandLog.contains { $0.contains("UID FETCH 9,13 (") })
     }
@@ -612,7 +595,7 @@ final class AnnouncedCounts: @unchecked Sendable {
         defer { harness.cleanUp() }
 
         let report = try await harness.syncer().run(SyncOptions(batches: BatchPlanner(maxMessages: 6)))
-        #expect(report.notDownloaded.isEmpty)
+        #expect(report.notDownloaded == 0)
         #expect(harness.sleeps.delays == [2, 5])
         let log = harness.server.commandLog
         #expect(log.contains { $0.contains("UID FETCH 9 (") } && log.contains { $0.contains("UID FETCH 13 (") })
@@ -627,11 +610,11 @@ final class AnnouncedCounts: @unchecked Sendable {
         defer { harness.cleanUp() }
 
         let first = try await harness.syncer().run(SyncOptions(batches: BatchPlanner(maxMessages: 6)))
-        #expect(first.notDownloaded == [0: 1])
-        #expect(try await harness.store.checkpoint(accountID: harness.account.id, folder: Self.allMail)?.highestUID == 7)
+        #expect(first.notDownloaded == 1)
+        #expect(try await harness.queued(Self.allMail) == [9])
         // Transient: the next run gets it, and the folder completes.
         let second = try await harness.syncer().run()
-        #expect(second.notDownloaded.isEmpty)
+        #expect(second.notDownloaded == 0)
         #expect(try await harness.storedUIDs().count == fixtures.count)
     }
 
@@ -648,7 +631,7 @@ final class AnnouncedCounts: @unchecked Sendable {
         defer { harness.cleanUp() }
 
         let report = try await harness.syncer().run(SyncOptions(batches: BatchPlanner(maxMessages: 6)))
-        #expect(report.notDownloaded.isEmpty)
+        #expect(report.notDownloaded == 0)
         #expect(try await harness.storedUIDs().count == fixtures.count)
 
         let lines = CapturedLogs.shared.all.filter { $0.contains("Partial FETCH reply") && $0.contains("\(harness.account.id)") }

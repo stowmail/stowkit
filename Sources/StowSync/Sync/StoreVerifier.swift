@@ -93,8 +93,8 @@ public struct StoreVerifier: Sendable {
             stored[key] = SHA256.hash(data: message.bytes)
             plannedBytes += Int64(message.bytes.count)
         }
-        guard await budget.allows(plannedBytes) else {
-            throw SyncError.budgetExhausted(usedBytes: await budget.used(), limitBytes: budget.limit ?? 0)
+        guard try await budget.allows(plannedBytes) else {
+            throw SyncError.budgetExhausted(usedBytes: try await budget.used(), limitBytes: budget.limit ?? 0)
         }
 
         let session = try await openSession()

@@ -118,7 +118,7 @@ func literalBoundaryCuts(_ reply: Data) -> [Int] {
         defer { harness.cleanUp() }
 
         let report = try await harness.syncer().run(SyncOptions(batches: BatchPlanner(maxMessages: 4)))
-        #expect(report.notDownloaded.isEmpty)
+        #expect(report.notDownloaded == 0)
         let keys = try await harness.store.listKeys().sorted { $0.uid < $1.uid }
         #expect(keys.count == fixtures.count)
         for (index, key) in keys.enumerated() {
@@ -136,7 +136,7 @@ func literalBoundaryCuts(_ reply: Data) -> [Int] {
         defer { harness.cleanUp() }
 
         let report = try await harness.syncer().run(SyncOptions(batches: BatchPlanner(maxMessages: 6)))
-        #expect(report.notDownloaded.isEmpty)
+        #expect(report.notDownloaded == 0)
         #expect(harness.sleeps.delays == [2, 5])
         let keys = try await harness.store.listKeys().sorted { $0.uid < $1.uid }
         #expect(keys.count == fixtures.count)
@@ -161,7 +161,7 @@ func literalBoundaryCuts(_ reply: Data) -> [Int] {
         defer { harness.cleanUp() }
 
         let report = try await harness.syncer().run(SyncOptions(batches: BatchPlanner(maxMessages: 6)))
-        #expect(report.notDownloaded.isEmpty && report.outcome == .complete)
+        #expect(report.notDownloaded == 0 && report.outcome == .complete)
         #expect(harness.sleeps.delays.isEmpty) // nothing was treated as missing
         let keys = try await harness.store.listKeys().sorted { $0.uid < $1.uid }
         #expect(keys.count == fixtures.count)

@@ -1,0 +1,117 @@
+import ArgumentParser
+import Foundation
+import StowCore
+import StowEngine
+import StowStore
+import StowSync
+
+struct Daemon: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        abstract: "The background sync: run it, or install it to start at login.",
+        subcommands: [Run.self, Install.self, Uninstall.self],
+        defaultSubcommand: Run.self
+    )
+
+    struct Run: AsyncParsableCommand {
+        static let configuration = CommandConfiguration(
+            abstract: "Sync every account in turn, at low priority, until stopped. launchd runs this after `daemon install`.",
+            discussion: """
+                Pauses on battery below 20 per cent, in Low Power Mode, while the archive's disk is disconnected, and until \
+                the recovery key is confirmed. Checks for new mail every five minutes once caught up.
+                """
+        )
+
+        func run() async throws {
+            CLI.bootstrapLogging()
+            LaunchAgent.lowerPriority()
+            print("Stow background sync started. Logs: \(LaunchAgent.logDirectory.path)")
+            let scheduler = Scheduler(
+                openArchive: { try CLIArchive.open() },
+                makeSync: { archive in EngineSync(archive: archive, tokens: try CLI.tokenProvider(accounts: ArchiveAccounts(archive: archive))) }
+            )
+            await Task(priority: .background) { await scheduler.run() }.value
+        }
+    }
+
+    struct Install: AsyncParsableCommand {
+        static let configuration = CommandConfiguration(
+            abstract: "Install the background sync as a launchd agent that starts now and at every login.",
+            discussion: "The agent's file holds no secrets: only this program's path and a few settings, such as where the .env file is."
+        )
+
+        func run() async throws {
+            let executable = (Bundle.main.executableURL ?? URL(fileURLWithPath: CommandLine.arguments[0])).resolvingSymlinksInPath()
+            var environment = ProcessInfo.processInfo.environment.filter { LaunchAgent.allowedEnvironment.contains($0.key) }
+            if environment["STOW_ENV_FILE"] == nil {
+                let local = URL(fileURLWithPath: FileManager.default.currentDirectoryPath).appendingPathComponent(".env")
+                if FileManager.default.fileExists(atPath: local.path) { environment["STOW_ENV_FILE"] = local.path }
+            }
+            try LaunchAgent.install(executable: executable, environment: environment)
+            print("Installed \(LaunchAgent.plistURL.path).")
+            print("The background sync runs now and at every login, at low priority. `stowmail status` shows how it is doing.")
+            if executable.path.contains("/.build/") {
+                print("Note: it runs \(executable.path); rebuilding replaces that file, which is fine.")
+            }
+        }
+    }
+
+    struct Uninstall: AsyncParsableCommand {
+        static let configuration = CommandConfiguration(abstract: "Stop the background sync and remove its launchd agent. The archive is kept.")
+
+        func run() async throws {
+            try LaunchAgent.uninstall()
+            print("The background sync is stopped and will not start at login. Your archive is untouched.")
+        }
+    }
+}
+
+/// Per account: last sync, progress, downloads today, last error (step 8).
+struct Status: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(abstract: "Show how each account's sync is going, and the background sync.")
+
+    func run() async throws {
+        let location = CLIArchive.location()
+        let archive: Archive
+        do {
+            archive = try CLIArchive.open(readOnly: true)
+        } catch let error as ArchiveLocationError {
+            print(error.description)
+            return
+        }
+        let now = Date()
+        let statuses = try ArchiveStatus.collect(archive, now: now)
+        if statuses.isEmpty { print("No accounts yet. Add one with `stowmail account add gmail` or `stowmail account add microsoft`.") }
+        for status in statuses {
+            let record = status.account
+            print("\(record.account.email) (\(record.account.provider.rawValue), \(record.account.id.rawValue.prefix(8)))")
+            if !record.isConnected { print("  Disconnected: no longer syncs. Its \(status.archivedMessages) archived messages are kept.") }
+            if record.needsSignIn { print("  Needs sign-in: run `stowmail account signin \(record.account.id.rawValue.prefix(8))`.") }
+            print("  Last sync: \(status.lastSyncAt.map(CLI.time) ?? "never")\(status.lastError == nil ? "" : " (failed)")")
+            if let error = status.lastError { print("  Last error: \(error)") }
+            print("  Archived: \(status.archivedMessages) messages, \(CLI.megabytes(status.archivedBytes))")
+            if status.queue.queued > 0 {
+                print(String(format: "  Downloading: %d to go (%@), %.0f%% done%@", status.queue.queued, CLI.megabytes(status.queue.queuedBytes),
+                             status.progress * 100, status.firstSyncComplete ? "" : ", first sync in progress"))
+            } else if status.firstSyncComplete {
+                print("  Up to date.")
+            }
+            if status.queue.unfetchable > 0 {
+                print("  Could not download: \(status.queue.unfetchable) message(s) the server lists but never returns (recorded after 3 runs).")
+            }
+            let profile = ProviderProfile.forProvider(record.account.provider)
+            print("  Downloaded in the last 24 hours: \(CLI.megabytes(status.bytesLast24Hours))\(profile.dailyByteLimit.map { " of \(CLI.megabytes($0)) allowed" } ?? "")")
+            if let coverage = status.coverageDate { print("  Everything before \(CLI.day(coverage)) is archived and verified.") }
+            if !status.sourceStates.isEmpty {
+                let parts = status.sourceStates.sorted { $0.key.rawValue < $1.key.rawValue }.map { "\($0.value) \($0.key.rawValue)" }
+                print("  Changed in the mailbox (kept here): \(parts.joined(separator: ", ")). Spam is hidden from search.")
+            }
+            for error in status.folderErrors { print("  Folder problem: \(error)") }
+            if status.removed > 0 { print("  Removed from the archive: \(status.removed) (`stowmail removed`).") }
+        }
+        let heartbeat = (try? archive.meta("daemon_heartbeat")).flatMap { $0 }.flatMap(Int.init).map { Date(timeIntervalSince1970: TimeInterval($0)) }
+        let daemon = LaunchAgent.isInstalled ? (LaunchAgent.isLoaded() ? "running" : "installed but not running") : "not installed (`stowmail daemon install`)"
+        print("Background sync: \(daemon)\(heartbeat.map { ", last active \(CLI.time($0))" } ?? "")")
+        if let reason = PowerState.current().pauseReason { print("Sync is paused: \(reason).") }
+        print("Archive: \(location.root.path). Logs: \(LaunchAgent.logDirectory.path)")
+    }
+}

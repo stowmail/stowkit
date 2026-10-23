@@ -50,6 +50,9 @@ public struct RawMessage: Sendable, Codable, Equatable {
     public var internalDate: Date
     /// RFC822.SIZE as reported by the server, in bytes.
     public var size: Int
+    /// IMAP flags of this copy when it was downloaded, as the server wrote them
+    /// (for example `\Seen`, `\Flagged`). Read only: fetching them changes nothing.
+    public var flags: [String]
     /// The complete message. Never log it.
     public var bytes: Data
 
@@ -60,6 +63,7 @@ public struct RawMessage: Sendable, Codable, Equatable {
         gmailThreadID: UInt64? = nil,
         internalDate: Date,
         size: Int,
+        flags: [String] = [],
         bytes: Data
     ) {
         self.key = key
@@ -68,7 +72,25 @@ public struct RawMessage: Sendable, Codable, Equatable {
         self.gmailThreadID = gmailThreadID
         self.internalDate = internalDate
         self.size = size
+        self.flags = flags
         self.bytes = bytes
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case key, labels, gmailMessageID, gmailThreadID, internalDate, size, flags, bytes
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        key = try container.decode(RawMessageKey.self, forKey: .key)
+        labels = try container.decode([String].self, forKey: .labels)
+        gmailMessageID = try container.decodeIfPresent(UInt64.self, forKey: .gmailMessageID)
+        gmailThreadID = try container.decodeIfPresent(UInt64.self, forKey: .gmailThreadID)
+        internalDate = try container.decode(Date.self, forKey: .internalDate)
+        size = try container.decode(Int.self, forKey: .size)
+        // Phase 1 files were written before flags were kept.
+        flags = try container.decodeIfPresent([String].self, forKey: .flags) ?? []
+        bytes = try container.decode(Data.self, forKey: .bytes)
     }
 }
 
@@ -77,9 +99,9 @@ public struct RawMessage: Sendable, Codable, Equatable {
 /// Rules every implementation follows:
 /// - `write` is idempotent by `RawMessageKey`: writing the same key again succeeds and
 ///   leaves one copy.
-/// - A message is only durable once `flush()` returns. Sync saves its
-///   `SyncCheckpoint` after `flush()`, never before, so a crash can repeat a batch
-///   but never skip one.
+/// - A message is only durable once `flush()` returns. Sync tells its
+///   `SyncStateStore` a message is downloaded only after `flush()`, never before,
+///   so a crash can repeat a download but never lose one.
 public protocol RawMessageSink: Sendable {
     func write(_ message: RawMessage) async throws
     func flush() async throws
@@ -91,32 +113,4 @@ public protocol RawMessageSource: Sendable {
     /// messages are never listed.
     func listKeys() async throws -> [RawMessageKey]
     func read(_ key: RawMessageKey) async throws -> RawMessage
-}
-
-/// Progress marker for one folder of one account.
-///
-/// Sync resumes from `highestUID + 1`. If the server reports a different
-/// UIDVALIDITY, every UID in the folder has changed meaning, so the folder is
-/// synced again from the start (the sink tolerates the duplicates).
-public struct SyncCheckpoint: Hashable, Sendable, Codable {
-    public let accountID: AccountID
-    public let folder: String
-    public var uidValidity: UInt32
-    /// The highest UID written to the sink and flushed. Zero means nothing yet.
-    public var highestUID: UInt32
-    public var updatedAt: Date
-
-    public init(accountID: AccountID, folder: String, uidValidity: UInt32, highestUID: UInt32, updatedAt: Date = Date()) {
-        self.accountID = accountID
-        self.folder = folder
-        self.uidValidity = uidValidity
-        self.highestUID = highestUID
-        self.updatedAt = updatedAt
-    }
-}
-
-/// Where sync keeps its checkpoints. File-based until Phase 2, then the `sync_state` table.
-public protocol SyncCheckpointStore: Sendable {
-    func checkpoint(accountID: AccountID, folder: String) async throws -> SyncCheckpoint?
-    func save(_ checkpoint: SyncCheckpoint) async throws
 }

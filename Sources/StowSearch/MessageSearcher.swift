@@ -63,6 +63,15 @@ public final class MessageSearcher: MessageSearching, Sendable {
             filters.append("m.internal_date < ?")
             arguments.append(Int(before.timeIntervalSince1970))
         }
+        switch query.spam {
+        case .hide:
+            // Most archives hold no spam; then the filter is skipped, keeping the fastest query shape.
+            if try Bool.fetchOne(db, sql: "SELECT EXISTS (SELECT 1 FROM messages WHERE source_state = 'spam')") == true {
+                filters.append("m.source_state != 'spam'")
+            }
+        case .only: filters.append("m.source_state = 'spam'")
+        case .include: break
+        }
         let limit = max(0, min(query.limit, 1000))
         let offset = max(0, query.offset)
 
@@ -88,7 +97,8 @@ public final class MessageSearcher: MessageSearching, Sendable {
                     """, arguments: StatementArguments([match] + arguments + [limit, offset]))
             }
             ranked = rows.map { ($0["id"], $0["score"]) }
-        } else if query.hasAttachment != nil || !query.accounts.isEmpty || query.since != nil || query.before != nil {
+        } else if query.hasAttachment != nil || !query.accounts.isEmpty || query.since != nil || query.before != nil
+                    || query.spam == .only {
             // Filters only: newest first.
             let rows = try Row.fetchAll(db, sql: """
                 SELECT m.id FROM messages m WHERE \(filters.joined(separator: " AND "))

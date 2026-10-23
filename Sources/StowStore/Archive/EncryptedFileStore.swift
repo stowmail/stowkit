@@ -27,12 +27,14 @@ public enum EncryptedFileError: Error, Equatable, CustomStringConvertible {
 ///   under a two-character subfolder. Someone holding the folder cannot tell
 ///   whether a known document is present, which a plain SHA-256 would reveal.
 /// - **Format:** `STOW` magic, a version byte, a flags byte (bit 0: LZFSE
-///   compressed), then AES-256-GCM `nonce | ciphertext | tag`. The header and
-///   the file's own hash are authenticated data, so a file renamed or swapped
-///   with another fails to open rather than returning the wrong content.
+///   compressed; bit 1: a message skeleton, D-029), then AES-256-GCM
+///   `nonce | ciphertext | tag`. The header and the file's own hash are
+///   authenticated data, so a file renamed or swapped with another, or with
+///   its flags altered, fails to open rather than returning the wrong content.
 /// - **Writes** happen once: a file that already exists is left alone, which
 ///   is what makes attachments deduplicate. Written to a temporary name with
-///   permissions 0600, then renamed into place.
+///   permissions 0600, then renamed into place. Files are deleted only when
+///   the user removes mail from the archive and nothing else uses them (D-033).
 public struct EncryptedFileStore: Sendable {
     public enum Kind: Sendable {
         case raw
@@ -42,6 +44,7 @@ public struct EncryptedFileStore: Sendable {
     static let magic: [UInt8] = Array("STOW".utf8)
     static let version: UInt8 = 1
     static let flagCompressed: UInt8 = 1
+    static let flagSkeleton: UInt8 = 2
 
     public let directory: URL
     public let kind: Kind
@@ -70,24 +73,26 @@ public struct EncryptedFileStore: Sendable {
         FileManager.default.fileExists(atPath: url(for: hash).path)
     }
 
-    /// Stores `content` under `hash` unless it is already there.
+    /// Stores `content` under `hash` unless it is already there. `skeleton`
+    /// marks a raw message file whose attachments were cut out (D-029).
     /// Returns the size on disk, and whether this call wrote it.
     @discardableResult
-    public func write(_ content: Data, hash: Data) throws -> (storedSize: Int, written: Bool) {
+    public func write(_ content: Data, hash: Data, skeleton: Bool = false) throws -> (storedSize: Int, written: Bool) {
         let destination = url(for: hash)
         if let size = Self.fileSize(destination) { return (size, false) }
-        let file = try seal(content, hash: hash)
-        let written = try place(file, at: destination, overwrite: false)
+        let file = try seal(content, hash: hash, skeleton: skeleton)
+        let written = try place(file, at: destination)
         return (written ? file.count : Self.fileSize(destination) ?? file.count, written)
     }
 
-    func seal(_ content: Data, hash: Data) throws -> Data {
+    func seal(_ content: Data, hash: Data, skeleton: Bool = false) throws -> Data {
         var flags: UInt8 = 0
         var payload = content
         if kind == .raw {
             payload = try (content as NSData).compressed(using: .lzfse) as Data
             flags |= Self.flagCompressed
         }
+        if skeleton { flags |= Self.flagSkeleton }
         let header = Self.magic + [Self.version, flags]
         let sealed = try AES.GCM.seal(payload, using: encryptionKey, authenticating: Data(header) + hash)
         guard let combined = sealed.combined else { throw EncryptedFileError.authenticationFailed }
@@ -95,8 +100,8 @@ public struct EncryptedFileStore: Sendable {
     }
 
     /// Writes to a temporary file (0600) in the same folder, then renames it into place.
-    /// Without `overwrite`, an existing file wins and this returns false.
-    private func place(_ file: Data, at destination: URL, overwrite: Bool) throws -> Bool {
+    /// An existing file wins and this returns false.
+    private func place(_ file: Data, at destination: URL) throws -> Bool {
         let folder = destination.deletingLastPathComponent()
         try ArchiveLocation.makeDirectory(folder)
         let temporary = folder.appendingPathComponent(".tmp-\(UUID().uuidString)")
@@ -104,11 +109,6 @@ public struct EncryptedFileStore: Sendable {
             throw CocoaError(.fileWriteUnknown)
         }
         defer { try? FileManager.default.removeItem(at: temporary) }
-        if overwrite {
-            // rename(2) replaces the destination atomically: there is never a moment without a file.
-            guard Foundation.rename(temporary.path, destination.path) == 0 else { throw CocoaError(.fileWriteUnknown) }
-            return true
-        }
         do {
             try FileManager.default.moveItem(at: temporary, to: destination)
             return true
@@ -121,9 +121,15 @@ public struct EncryptedFileStore: Sendable {
 
     /// Reads, authenticates and (for raw messages) decompresses a stored file.
     public func read(_ hash: Data) throws -> Data {
+        try readFile(hash).content
+    }
+
+    /// Like `read`, plus whether the file is marked as a message skeleton.
+    public func readFile(_ hash: Data) throws -> (content: Data, isSkeleton: Bool) {
         let source = url(for: hash)
         guard let file = FileManager.default.contents(atPath: source.path) else { throw EncryptedFileError.missing }
-        return try open(file, hash: hash)
+        let content = try open(file, hash: hash)
+        return (content, file[file.startIndex + 5] & Self.flagSkeleton != 0)
     }
 
     func open(_ file: Data, hash: Data) throws -> Data {
@@ -147,15 +153,49 @@ public struct EncryptedFileStore: Sendable {
         }
     }
 
-    /// Replaces a stored file's content in place (used only by raw message
-    /// compaction, which keeps the file name of the original).
-    func replace(_ hash: Data, with content: Data) throws -> Int {
-        let file = try seal(content, hash: hash)
-        _ = try place(file, at: url(for: hash), overwrite: true)
-        return file.count
+    /// Deletes a stored file. Missing files are not an error. Only the tidy-up
+    /// calls this, after the database no longer refers to the file (D-033).
+    public func delete(_ hash: Data) throws {
+        do {
+            try FileManager.default.removeItem(at: url(for: hash))
+        } catch CocoaError.fileNoSuchFile {
+            return
+        }
+    }
+
+    /// The hash of every file in the store, for finding files the database no longer uses.
+    public func allHashes() -> [Data] {
+        guard let enumerator = FileManager.default.enumerator(at: directory, includingPropertiesForKeys: nil) else { return [] }
+        var hashes: [Data] = []
+        for case let url as URL in enumerator {
+            let name = url.lastPathComponent
+            guard name.count == 64, let hash = Data(hex: name) else { continue }
+            hashes.append(hash)
+        }
+        return hashes
     }
 
     static func fileSize(_ url: URL) -> Int? {
         (try? FileManager.default.attributesOfItem(atPath: url.path))?[.size] as? Int
     }
+}
+
+extension Data {
+    /// Bytes from a hex string, or nil if it is not valid hex.
+    init?(hex: String) {
+        guard hex.count.isMultiple(of: 2) else { return nil }
+        var bytes = [UInt8]()
+        bytes.reserveCapacity(hex.count / 2)
+        var index = hex.startIndex
+        while index < hex.endIndex {
+            let next = hex.index(index, offsetBy: 2)
+            guard let byte = UInt8(hex[index..<next], radix: 16) else { return nil }
+            bytes.append(byte)
+            index = next
+        }
+        self.init(bytes)
+    }
+
+    /// Lowercase hex.
+    var hex: String { map { String(format: "%02x", $0) }.joined() }
 }

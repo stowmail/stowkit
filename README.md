@@ -4,7 +4,7 @@ The engine behind Stow: a local, encrypted, searchable email archive for macOS.
 IMAP sync with OAuth, encrypted SQLite storage, full-text search, bulk-mail
 rules and a local MCP server. No UI code lives here.
 
-Status: Phase 0 (foundations). Private until the Phase 4 security review.
+Status: Phase 2 (integration: sync into the encrypted archive, scheduler, background sync). Private until the Phase 4 security review.
 
 ## Requirements
 
@@ -16,7 +16,8 @@ Status: Phase 0 (foundations). Private until the Phase 4 security review.
 ```sh
 scripts/install-hooks.sh     # gitleaks pre-commit hook (once per clone)
 scripts/check.sh             # fetches SQLCipher, makes fixtures, builds, tests, scans for secrets
-swift run stowmail doctor    # checks SQLCipher, Keychain backend and configuration
+swift run stowmail doctor    # checks SQLCipher, Keychain backend, configuration and the archive
+swift run stowmail init      # creates the encrypted archive and shows its recovery key once
 ```
 
 App configuration (OAuth client IDs) goes in `.env`, copied from `.env.example`.
@@ -27,13 +28,14 @@ the macOS Keychain only.
 
 | Module | Job |
 |---|---|
-| `StowCore` | Shared types and protocols: accounts, raw messages, sink and source, checkpoints, headers, search shapes, log redaction. A file-based raw message store. No package dependencies. |
-| `StowSecrets` | Keychain access, OAuth token storage, archive key management, app configuration. |
+| `StowCore` | Shared types and protocols: accounts and the account directory, raw messages, sink and source, sync state, headers, search shapes, log redaction. A file-based raw message store for tests and imports. No package dependencies. |
+| `StowSecrets` | Keychain access, OAuth token storage, archive key management, the recovery key and its bundle, app configuration. |
 | `StowSync` | IMAP sync and OAuth sign-in. Read-only by construction: commands only through `ReadOnlyCommand` (EXAMINE, `BODY.PEEK[]`). |
-| `StowStore` | MIME parsing, encrypted database, attachments and raw message files. |
+| `StowStore` | MIME parsing, encrypted database, skeletons and attachment files, the sync sink and state, accounts, tidy-up, coverage, verify, export, archive location. |
 | `StowSearch` | FTS5 search, text extraction and OCR. |
 | `StowRules` | Bulk-mail signals and rules, from headers only. |
 | `StowMCP` | Local, read-only MCP server. |
+| `StowEngine` | Joins sync, storage and rules: the scheduler and background sync, archive setup and recovery, rules over the archive, logs. Used by the CLI and the app. |
 | `stowmail` | The command-line tool. |
 
 ### Dependency rule
@@ -42,7 +44,7 @@ the macOS Keychain only.
 - `StowSearch` may also depend on `StowStore`.
 - Nothing else depends sideways. In particular `StowSync`, `StowStore` and
   `StowRules` never import each other, so they can be built in parallel.
-- `stowmail` (the CLI) may depend on everything.
+- `stowmail` (the CLI) and `StowEngine` may depend on everything.
 - `StowCore` has no package dependencies at all.
 
 If a module needs something from a sibling, the shared part moves into

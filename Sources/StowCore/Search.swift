@@ -33,8 +33,20 @@ public struct SearchQuery: Hashable, Sendable, Codable {
     public var since: Date?
     /// Exclusive upper bound on the message date.
     public var before: Date?
+    /// Which messages the user marked as spam at the provider to include (D-022):
+    /// by default they are hidden.
+    public var spam: SpamFilter
     public var limit: Int
     public var offset: Int
+
+    public enum SpamFilter: String, Hashable, Sendable, Codable {
+        /// Leave out messages marked as spam at the provider (the default).
+        case hide
+        /// Spam and everything else (`in:anywhere`).
+        case include
+        /// Only spam (`in:spam`).
+        case only
+    }
 
     public init(
         text: String,
@@ -45,6 +57,7 @@ public struct SearchQuery: Hashable, Sendable, Codable {
         accounts: [AccountID] = [],
         since: Date? = nil,
         before: Date? = nil,
+        spam: SpamFilter = .hide,
         limit: Int = 50,
         offset: Int = 0
     ) {
@@ -56,6 +69,7 @@ public struct SearchQuery: Hashable, Sendable, Codable {
         self.accounts = accounts
         self.since = since
         self.before = before
+        self.spam = spam
         self.limit = limit
         self.offset = offset
     }

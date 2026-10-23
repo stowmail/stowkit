@@ -1,27 +1,52 @@
 import NIOCore
 import NIOIMAPCore
 
+/// Which UIDs a command is about.
+enum UIDSelection: Sendable, Equatable {
+    case range(ClosedRange<UInt32>)
+    case list([UInt32])
+
+    var set: LastCommandSet<UID> {
+        switch self {
+        case .range(let range): .range(ReadOnlyCommand.uidRange(range))
+        case .list(let uids): .set(ReadOnlyCommand.uidSet(uids))
+        }
+    }
+}
+
 /// The complete list of IMAP commands Stow can send (D-109).
 ///
 /// This is the only way `IMAPSession` builds a command, and the connection
 /// only accepts values of this type, so a command that changes the mailbox
 /// (SELECT, STORE, EXPUNGE, MOVE, COPY, APPEND, DELETE, ...) cannot be sent:
 /// there is no case for it. Messages are opened with EXAMINE (read-only) and
-/// downloaded with BODY.PEEK[], which does not set the \Seen flag.
+/// downloaded with BODY.PEEK[], which does not set the \Seen flag. Fetching
+/// FLAGS, labels or MODSEQ only reads them.
 enum ReadOnlyCommand: Sendable {
     case capability
     case authenticateXOAUTH2(user: String, accessToken: String)
     /// `LIST "" "*"`: every mailbox.
     case listAll
-    case examine(rawName: [UInt8])
-    /// `UID FETCH lo:hi (UID RFC822.SIZE)`: what exists, and how big, without downloading.
-    case fetchSummaries(ClosedRange<UInt32>)
+    /// `EXAMINE <mailbox> [(CONDSTORE)]`: read-only; CONDSTORE asks for HIGHESTMODSEQ (D-038).
+    case examine(rawName: [UInt8], condstore: Bool)
+    /// `UID FETCH lo:hi (UID RFC822.SIZE INTERNALDATE [X-GM-MSGID])`: what exists, how big
+    /// and when it arrived, without downloading.
+    case fetchSummaries(ClosedRange<UInt32>, gmail: Bool)
     /// `UID FETCH <set> (UID RFC822.SIZE FLAGS INTERNALDATE)`: which of these
     /// UIDs still exist, with enough detail to record any that cannot be fetched.
-    /// Fetching FLAGS only reads them.
     case fetchSummariesOf(uids: [UInt32])
-    /// `UID FETCH <set> (UID RFC822.SIZE INTERNALDATE BODY.PEEK[] [X-GM-MSGID X-GM-THRID X-GM-LABELS])`.
+    /// `UID FETCH <set> (UID BODY.PEEK[HEADER.FIELDS (...)])`: just the named
+    /// header fields, to order downloads (D-028) or match by Message-ID (D-039).
+    case fetchHeaderFields(UIDSelection, fields: [String])
+    /// `UID FETCH <set> (UID RFC822.SIZE INTERNALDATE FLAGS BODY.PEEK[] [X-GM-MSGID X-GM-THRID X-GM-LABELS])`.
     case fetchMessages(uids: [UInt32], gmail: Bool)
+    /// `UID FETCH lo:hi (UID FLAGS [X-GM-LABELS]) [(CHANGEDSINCE n)]`: flags and
+    /// labels of messages already archived, all of them or only those changed
+    /// since a CONDSTORE mod-sequence (D-038).
+    case fetchStates(ClosedRange<UInt32>, gmail: Bool, changedSince: UInt64?)
+    /// `UID FETCH 1:* (UID X-GM-MSGID)`: the Gmail IDs in a folder such as Spam
+    /// or Bin, to classify messages that left All Mail. Identifiers only, never content (D-039).
+    case fetchGmailIDs(ClosedRange<UInt32>)
     case logout
 
     /// The command verb, for logs. Never includes arguments, which may hold a
@@ -32,7 +57,7 @@ enum ReadOnlyCommand: Sendable {
         case .authenticateXOAUTH2: "AUTHENTICATE XOAUTH2"
         case .listAll: "LIST"
         case .examine: "EXAMINE"
-        case .fetchSummaries, .fetchSummariesOf, .fetchMessages: "UID FETCH"
+        case .fetchSummaries, .fetchSummariesOf, .fetchHeaderFields, .fetchMessages, .fetchStates, .fetchGmailIDs: "UID FETCH"
         case .logout: "LOGOUT"
         }
     }
@@ -49,16 +74,29 @@ enum ReadOnlyCommand: Sendable {
             )
         case .listAll:
             return .list(nil, reference: MailboxName(Array("".utf8)), .mailbox(ByteBuffer(string: "*")), [])
-        case .examine(let rawName):
-            return .examine(MailboxName(rawName), [])
-        case .fetchSummaries(let range):
-            return .uidFetch(.range(Self.uidRange(range)), [.uid, .rfc822Size], [])
+        case .examine(let rawName, let condstore):
+            return .examine(MailboxName(rawName), condstore ? [.condStore] : [])
+        case .fetchSummaries(let range, let gmail):
+            var attributes: [FetchAttribute] = [.uid, .rfc822Size, .internalDate]
+            if gmail { attributes.append(.gmailMessageID) }
+            return .uidFetch(.range(Self.uidRange(range)), attributes, [])
         case .fetchSummariesOf(let uids):
             return .uidFetch(.set(Self.uidSet(uids)), [.uid, .rfc822Size, .flags, .internalDate], [])
+        case .fetchHeaderFields(let selection, let fields):
+            return .uidFetch(selection.set, [.uid, .bodySection(peek: true, SectionSpecifier(kind: .headerFields(fields)), nil)], [])
         case .fetchMessages(let uids, let gmail):
-            var attributes: [FetchAttribute] = [.uid, .rfc822Size, .internalDate, .bodySection(peek: true, .complete, nil)]
+            var attributes: [FetchAttribute] = [.uid, .rfc822Size, .internalDate, .flags, .bodySection(peek: true, .complete, nil)]
             if gmail { attributes += [.gmailMessageID, .gmailThreadID, .gmailLabels] }
             return .uidFetch(.set(Self.uidSet(uids)), attributes, [])
+        case .fetchStates(let range, let gmail, let changedSince):
+            var attributes: [FetchAttribute] = [.uid, .flags]
+            if gmail { attributes.append(.gmailLabels) }
+            let modifiers: [FetchModifier] = changedSince.map {
+                [.changedSince(ChangedSinceModifier(modificationSequence: ModificationSequenceValue($0)))]
+            } ?? []
+            return .uidFetch(.range(Self.uidRange(range)), attributes, modifiers)
+        case .fetchGmailIDs(let range):
+            return .uidFetch(.range(Self.uidRange(range)), [.uid, .gmailMessageID], [])
         case .logout:
             return .logout
         }

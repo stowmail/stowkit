@@ -7,66 +7,95 @@ import Network
 /// can check that nothing but read-only commands ever reaches a server.
 ///
 /// All state lives on `queue`; tests read it through the accessors.
-final class FakeIMAPServer: @unchecked Sendable {
-    struct Message {
-        var uid: UInt32
-        var bytes: Data
-        var labels: [String] = []
-        var gmailMessageID: UInt64 = 0
-        var gmailThreadID: UInt64 = 0
-        var internalDate = "17-Jul-2024 02:44:25 -0700"
-        var flags: [String] = []
+///
+/// Phase 2 additions: CONDSTORE (`EXAMINE ... (CONDSTORE)` answers
+/// HIGHESTMODSEQ, `(CHANGEDSINCE n)` filters by each message's `modSeq`),
+/// `BODY.PEEK[HEADER.FIELDS (...)]`, and FLAGS with downloads.
+public final class FakeIMAPServer: @unchecked Sendable {
+    public struct Message {
+        public var uid: UInt32
+        public var bytes: Data
+        public var labels: [String]
+        public var gmailMessageID: UInt64
+        public var gmailThreadID: UInt64
+        public var internalDate: String
+        public var flags: [String]
+        /// CONDSTORE mod-sequence: raise it whenever flags or labels change.
+        public var modSeq: UInt64
+
+        public init(uid: UInt32, bytes: Data, labels: [String] = [], gmailMessageID: UInt64 = 0, gmailThreadID: UInt64 = 0,
+                    internalDate: String = "17-Jul-2024 02:44:25 -0700", flags: [String] = [], modSeq: UInt64 = 1) {
+            self.uid = uid
+            self.bytes = bytes
+            self.labels = labels
+            self.gmailMessageID = gmailMessageID
+            self.gmailThreadID = gmailThreadID
+            self.internalDate = internalDate
+            self.flags = flags
+            self.modSeq = modSeq
+        }
     }
 
-    struct Mailbox {
-        var name: String
-        var attributes: [String]
-        var uidValidity: UInt32
-        var messages: [Message]
-        var uidNext: UInt32 { (messages.map(\.uid).max() ?? 0) + 1 }
+    public struct Mailbox {
+        public var name: String
+        public var attributes: [String]
+        public var uidValidity: UInt32
+        public var messages: [Message]
+        /// Set to keep UIDNEXT above the highest UID, as after a deletion.
+        public var uidNextOverride: UInt32?
+        public var uidNext: UInt32 { uidNextOverride ?? ((messages.map(\.uid).max() ?? 0) + 1) }
+        public var highestModSeq: UInt64 { messages.map(\.modSeq).max() ?? 1 }
+
+        public init(name: String, attributes: [String], uidValidity: UInt32, messages: [Message], uidNextOverride: UInt32? = nil) {
+            self.name = name
+            self.attributes = attributes
+            self.uidValidity = uidValidity
+            self.messages = messages
+            self.uidNextOverride = uidNextOverride
+        }
     }
 
     // Configuration (set before or between connections).
-    var mailboxes: [Mailbox] { get { sync { _mailboxes } } set { sync { _mailboxes = newValue } } }
-    var capabilities: [String] { get { sync { _capabilities } } set { sync { _capabilities = newValue } } }
-    var acceptedTokens: Set<String> { get { sync { _acceptedTokens } } set { sync { _acceptedTokens = newValue } } }
+    public var mailboxes: [Mailbox] { get { sync { _mailboxes } } set { sync { _mailboxes = newValue } } }
+    public var capabilities: [String] { get { sync { _capabilities } } set { sync { _capabilities = newValue } } }
+    public var acceptedTokens: Set<String> { get { sync { _acceptedTokens } } set { sync { _acceptedTokens = newValue } } }
     /// Drop the connection without replying when this many body fetches have been received (counted across connections).
-    var dropOnBodyFetchNumber: Int? { get { sync { _dropOn } } set { sync { _dropOn = newValue } } }
+    public var dropOnBodyFetchNumber: Int? { get { sync { _dropOn } } set { sync { _dropOn = newValue } } }
     /// Drop the connection on every body fetch.
-    var dropEveryBodyFetch: Bool { get { sync { _dropEvery } } set { sync { _dropEvery = newValue } } }
+    public var dropEveryBodyFetch: Bool { get { sync { _dropEvery } } set { sync { _dropEvery = newValue } } }
     /// Answer this body fetch (counted across connections) with BYE and close.
-    var byeOnBodyFetchNumber: (Int, String)? { get { sync { _byeOn } } set { sync { _byeOn = newValue } } }
+    public var byeOnBodyFetchNumber: (Int, String)? { get { sync { _byeOn } } set { sync { _byeOn = newValue } } }
     /// UIDs that are listed (and re-listed) but for which a body fetch returns no
     /// FETCH data at all, as Exchange does for calendar items.
-    var bodylessUIDs: Set<UInt32> { get { sync { _bodyless } } set { sync { _bodyless = newValue } } }
+    public var bodylessUIDs: Set<UInt32> { get { sync { _bodyless } } set { sync { _bodyless = newValue } } }
     /// UIDs deleted from the mailbox the moment a body fetch arrives, as if
     /// another client expunged them between listing and download.
-    var expungeOnBodyFetch: Set<UInt32> { get { sync { _expunge } } set { sync { _expunge = newValue } } }
+    public var expungeOnBodyFetch: Set<UInt32> { get { sync { _expunge } } set { sync { _expunge = newValue } } }
     /// How many body fetches leave each UID out before it is returned (transient
     /// partial replies, as seen on Microsoft 365).
-    var refusals: [UInt32: Int] { get { sync { _refusals } } set { sync { _refusals = newValue } } }
+    public var refusals: [UInt32: Int] { get { sync { _refusals } } set { sync { _refusals = newValue } } }
     /// When a body fetch leaves anything out: the tagged completion to send
     /// instead of OK (for example "NO [UNAVAILABLE] Try later"), and an untagged line to add.
-    var partialCompletion: String? { get { sync { _partialCompletion } } set { sync { _partialCompletion = newValue } } }
-    var partialUntagged: String? { get { sync { _partialUntagged } } set { sync { _partialUntagged = newValue } } }
+    public var partialCompletion: String? { get { sync { _partialCompletion } } set { sync { _partialCompletion = newValue } } }
+    public var partialUntagged: String? { get { sync { _partialUntagged } } set { sync { _partialUntagged = newValue } } }
     /// Splits each message FETCH reply into separate writes, paced so they
     /// arrive as separate reads, at the offsets this returns (D-120).
-    var splitFetchReply: (@Sendable (Data) -> [Int])? { get { sync { _split } } set { sync { _split = newValue } } }
+    public var splitFetchReply: (@Sendable (Data) -> [Int])? { get { sync { _split } } set { sync { _split = newValue } } }
     /// Reported RFC822.SIZE for a message of the given length, in every reply,
     /// as Exchange does with its estimates. The literal length is always exact.
-    var reportedSize: (@Sendable (Int) -> Int)? { get { sync { _reportedSize } } set { sync { _reportedSize = newValue } } }
+    public var reportedSize: (@Sendable (Int) -> Int)? { get { sync { _reportedSize } } set { sync { _reportedSize = newValue } } }
     /// Refuse every AUTHENTICATE at once with this text (no SASL challenge),
     /// as Exchange does for an account without a mailbox.
-    var authFailureText: String? { get { sync { _authFailure } } set { sync { _authFailure = newValue } } }
+    public var authFailureText: String? { get { sync { _authFailure } } set { sync { _authFailure = newValue } } }
     /// Answer EXAMINE with READ-WRITE, to test that the session refuses it.
-    var examineAnswersReadWrite: Bool { get { sync { _readWrite } } set { sync { _readWrite = newValue } } }
+    public var examineAnswersReadWrite: Bool { get { sync { _readWrite } } set { sync { _readWrite = newValue } } }
 
     // Observations.
-    var commandLog: [String] { sync { _log } }
-    var connectionCount: Int { sync { _connections } }
-    var bodyFetchCount: Int { sync { _bodyFetches } }
+    public var commandLog: [String] { sync { _log } }
+    public var connectionCount: Int { sync { _connections } }
+    public var bodyFetchCount: Int { sync { _bodyFetches } }
     /// How many times each UID's body was sent.
-    var bodiesServed: [UInt32: Int] { sync { _served } }
+    public var bodiesServed: [UInt32: Int] { sync { _served } }
 
     private let queue = DispatchQueue(label: "uk.getstow.tests.fake-imap")
     private var listener: NWListener?
@@ -89,15 +118,15 @@ final class FakeIMAPServer: @unchecked Sendable {
     private var _connections = 0
     private var _bodyFetches = 0
     private var _served: [UInt32: Int] = [:]
-    private(set) var port: UInt16 = 0
+    public private(set) var port: UInt16 = 0
 
     private func sync<T>(_ body: () -> T) -> T { queue.sync(execute: body) }
 
-    init(mailboxes: [Mailbox] = []) {
+    public init(mailboxes: [Mailbox] = []) {
         _mailboxes = mailboxes
     }
 
-    func start() async throws -> UInt16 {
+    public func start() async throws -> UInt16 {
         let parameters = NWParameters.tcp
         parameters.requiredLocalEndpoint = .hostPort(host: "127.0.0.1", port: .any)
         let listener = try NWListener(using: parameters)
@@ -120,7 +149,7 @@ final class FakeIMAPServer: @unchecked Sendable {
         return port
     }
 
-    func stop() {
+    public func stop() {
         queue.sync { listener?.cancel() }
     }
 
@@ -220,7 +249,13 @@ final class FakeIMAPServer: @unchecked Sendable {
             }
             send(out + "\(tag) OK LIST completed\r\n", to: client)
         case "EXAMINE":
-            let name = Self.unquote(rest)
+            var nameText = rest
+            var condstore = false
+            if rest.uppercased().hasSuffix(" (CONDSTORE)") {
+                nameText = String(rest.dropLast(" (CONDSTORE)".count))
+                condstore = true
+            }
+            let name = Self.unquote(nameText)
             let isInbox = name.uppercased() == "INBOX"
             guard let index = _mailboxes.firstIndex(where: { $0.name == name || (isInbox && $0.name.uppercased() == "INBOX") }) else {
                 send("\(tag) NO [NONEXISTENT] No such mailbox\r\n", to: client)
@@ -233,6 +268,7 @@ final class FakeIMAPServer: @unchecked Sendable {
             out += "* OK [UIDVALIDITY \(mailbox.uidValidity)] UIDs valid.\r\n"
             out += "* \(mailbox.messages.count) EXISTS\r\n* 0 RECENT\r\n"
             out += "* OK [UIDNEXT \(mailbox.uidNext)] Predicted next UID.\r\n"
+            if condstore { out += "* OK [HIGHESTMODSEQ \(mailbox.highestModSeq)] Highest\r\n" }
             out += "\(tag) OK [\(_readWrite ? "READ-WRITE" : "READ-ONLY")] EXAMINE completed\r\n"
             send(out, to: client)
         case "UID FETCH":
@@ -280,8 +316,11 @@ final class FakeIMAPServer: @unchecked Sendable {
             return
         }
         let set = String(rest[..<space])
-        let attributes = String(rest[rest.index(after: space)...]).uppercased()
+        let original = String(rest[rest.index(after: space)...])
+        let attributes = original.uppercased()
         let wantsBody = attributes.contains("BODY.PEEK[]")
+        let headerFields = Self.headerFieldList(original)
+        let changedSince = Self.changedSince(attributes)
         if attributes.contains("BODY[]") || attributes.contains("RFC822 ") || attributes.contains("RFC822)") {
             send("\(tag) BAD The fake server refuses non-PEEK body fetches\r\n", to: client)
             return
@@ -308,6 +347,7 @@ final class FakeIMAPServer: @unchecked Sendable {
         var out = Data()
         var omitted = false
         for (index, message) in mailbox.messages.enumerated() where wanted(message.uid) {
+            if let changedSince, message.modSeq <= changedSince { continue }
             if wantsBody, _bodyless.contains(message.uid) { omitted = true; continue }
             if wantsBody, let left = _refusals[message.uid], left > 0 {
                 _refusals[message.uid] = left - 1
@@ -315,7 +355,8 @@ final class FakeIMAPServer: @unchecked Sendable {
                 continue
             }
             let reportedSize = _reportedSize?(message.bytes.count) ?? message.bytes.count
-            var items = ["UID \(message.uid)", "RFC822.SIZE \(reportedSize)"]
+            var items = ["UID \(message.uid)"]
+            if attributes.contains("RFC822.SIZE") { items.append("RFC822.SIZE \(reportedSize)") }
             if attributes.contains(" FLAGS") {
                 items.append("FLAGS (\(message.flags.joined(separator: " ")))")
             }
@@ -326,7 +367,13 @@ final class FakeIMAPServer: @unchecked Sendable {
                 let labels = message.labels.map { $0.hasPrefix("\\") ? $0 : Self.quote($0) }.joined(separator: " ")
                 items.append("X-GM-LABELS (\(labels))")
             }
+            if changedSince != nil { items.append("MODSEQ (\(message.modSeq))") }
             out.append(Data("* \(index + 1) FETCH (\(items.joined(separator: " "))".utf8))
+            if let headerFields {
+                let fields = Self.headerFields(of: message.bytes, named: headerFields.names)
+                out.append(Data(" BODY[HEADER.FIELDS (\(headerFields.text))] {\(fields.count)}\r\n".utf8))
+                out.append(fields)
+            }
             if wantsBody {
                 out.append(Data(" BODY[] {\(message.bytes.count)}\r\n".utf8))
                 out.append(message.bytes)
@@ -347,6 +394,38 @@ final class FakeIMAPServer: @unchecked Sendable {
         }
     }
 
+    /// The field list of a `BODY.PEEK[HEADER.FIELDS (...)]` request, as sent and as names.
+    static func headerFieldList(_ attributes: String) -> (text: String, names: [String])? {
+        guard let start = attributes.range(of: "HEADER.FIELDS (", options: .caseInsensitive),
+              let end = attributes[start.upperBound...].firstIndex(of: ")") else { return nil }
+        let text = String(attributes[start.upperBound..<end])
+        return (text, text.split(separator: " ").map { $0.trimmingCharacters(in: CharacterSet(charactersIn: "\"")) })
+    }
+
+    static func changedSince(_ attributes: String) -> UInt64? {
+        guard let range = attributes.range(of: "CHANGEDSINCE ") else { return nil }
+        return UInt64(attributes[range.upperBound...].prefix { $0.isNumber })
+    }
+
+    /// The named header fields of a message, as raw lines, then a blank line (RFC 3501).
+    public static func headerFields(of message: Data, named names: [String]) -> Data {
+        let wanted = Set(names.map { $0.lowercased() })
+        let text = String(decoding: message, as: UTF8.self)
+        let header = text.components(separatedBy: "\r\n\r\n").first ?? text
+        var output = ""
+        var keeping = false
+        for line in header.components(separatedBy: "\r\n") {
+            if line.hasPrefix(" ") || line.hasPrefix("\t") {
+                if keeping { output += line + "\r\n" }
+                continue
+            }
+            let name = line.split(separator: ":", maxSplits: 1).first.map { $0.lowercased() } ?? ""
+            keeping = wanted.contains(name)
+            if keeping { output += line + "\r\n" }
+        }
+        return Data((output + "\r\n").utf8)
+    }
+
     /// Parses an IMAP sequence set such as `1:3,7,9:*` into a membership test.
     static func parseSet(_ text: String, maxUID: UInt32) -> (UInt32) -> Bool {
         func value(_ part: Substring) -> UInt32 {
@@ -363,7 +442,7 @@ final class FakeIMAPServer: @unchecked Sendable {
         return { uid in ranges.contains { $0.contains(uid) } }
     }
 
-    static func quote(_ text: String) -> String {
+    public static func quote(_ text: String) -> String {
         "\"" + text.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"") + "\""
     }
 
@@ -382,11 +461,13 @@ final class FakeIMAPServer: @unchecked Sendable {
 }
 
 /// Lets exactly one caller through, for resuming a continuation once.
-final class ResumeOnce: @unchecked Sendable {
+public final class ResumeOnce: @unchecked Sendable {
     private let lock = NSLock()
     private var done = false
 
-    func claim() -> Bool {
+    public init() {}
+
+    public func claim() -> Bool {
         lock.lock()
         defer { lock.unlock() }
         if done { return false }

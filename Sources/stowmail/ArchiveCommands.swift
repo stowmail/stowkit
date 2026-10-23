@@ -1,67 +1,19 @@
 import ArgumentParser
 import Foundation
 import StowCore
+import StowEngine
 import StowSearch
 import StowSecrets
 import StowStore
 
-/// Opening the archive from the CLI: location from `STOW_ARCHIVE_DIR` (else
-/// `~/Library/Application Support/Stow/`), keys from the Keychain (D-208).
-enum CLIArchive {
-    /// `STOW_KEYCHAIN_SERVICE` lets development and tests keep their keys apart
-    /// from the real archive's. Unset means the normal service.
-    static func keyManager() -> KeyManager {
-        let environment = ProcessInfo.processInfo.environment
-        let service = environment["STOW_KEYCHAIN_SERVICE"].flatMap { $0.isEmpty ? nil : $0 } ?? KeychainStore.defaultService
-        return KeyManager(keychain: KeychainStore(service: service))
-    }
-
-    static func open(readOnly: Bool = false) throws -> Archive {
-        let location = ArchiveLocation.fromEnvironment()
-        guard location.exists else {
-            throw ValidationError("No archive at \(location.root.path). Run `stowmail init` first.")
-        }
-        return try Archive.open(location, keys: try keyManager().loadKeys(), readOnly: readOnly)
-    }
-
-    static func megabytes(_ bytes: Int) -> String {
-        String(format: "%.1f MB", Double(bytes) / 1_048_576)
-    }
-}
-
-/// Creates the archive keys and an empty archive.
-struct Init: AsyncParsableCommand {
-    static let configuration = CommandConfiguration(
-        abstract: "Create the archive keys in the Keychain and an empty encrypted archive."
-    )
-
-    func run() async throws {
-        let location = ArchiveLocation.fromEnvironment()
-        let manager = CLIArchive.keyManager()
-        let keys: ArchiveKeys
-        if try manager.keysExist() {
-            keys = try manager.loadKeys()
-            print("Archive keys already in the Keychain; using them.")
-        } else {
-            if location.exists {
-                throw ValidationError("An archive exists at \(location.root.path) but its keys are not in the Keychain. Refusing to create new keys, which could never open it.")
-            }
-            keys = try manager.createKeys()
-            print("Created archive keys in the Keychain.")
-        }
-        let archive = try Archive.open(location, keys: keys)
-        print("Archive ready at \(archive.location.root.path)")
-    }
-}
-
-/// `stowmail import <dir>`: from a file sink (D-015), or a folder of .eml files with `--eml`.
+/// `stowmail import <dir>`: from a Phase 1 file store (D-015), or a folder of .eml files with `--eml`.
 struct Import: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         abstract: "Import raw messages into the encrypted archive.",
         discussion: """
-            <dir> is a FileRawMessageStore folder written by `stowmail sync`. Accounts not yet in the archive are \
-            added with a placeholder address until account registration lands (D-208). With --eml, <dir> is a \
-            folder of .eml files imported into one placeholder account.
+            <dir> is a development store written by Phase 1's `stowmail sync`; its accounts must be in the archive \
+            (`stowmail init` moves them in). Sync can then carry on from it without downloading those messages again. \
+            With --eml, <dir> is a folder of .eml files imported into one placeholder account, for development and benchmarks.
             """
     )
 
@@ -70,9 +22,12 @@ struct Import: AsyncParsableCommand {
     @Flag(help: "Skip attachment text extraction (for measuring import speed only).") var noExtraction = false
 
     func run() async throws {
-        let archive = try CLIArchive.open()
+        CLI.bootstrapLogging()
+        let (archive, lock) = try CLIArchive.openForWriting()
+        defer { lock.release() }
         let url = URL(fileURLWithPath: (directory as NSString).expandingTildeInPath, isDirectory: true)
-        let importer = Importer(archive: archive, extractText: !noExtraction)
+        let rules = try EngineRules.ruleSet(archive: archive, account: nil)
+        let importer = Importer(archive: archive, extractText: !noExtraction, classifier: EngineRules.classifier(rules))
         let progress: @Sendable (ImportSummary) -> Void = { summary in print("  \(summary)") }
 
         let summary: ImportSummary
@@ -82,11 +37,9 @@ struct Import: AsyncParsableCommand {
             summary = try await importer.importAll(from: try EMLDirectorySource(directory: url, accountID: account), progress: progress)
         } else {
             let store = try FileRawMessageStore(root: url)
-            for key in Set(try await store.listKeys().map(\.accountID)) where !(try archive.accountExists(key)) {
-                let sample = try await store.listKeys().first { $0.accountID == key }
-                let provider: Provider = sample?.folder.hasPrefix("[Gmail]") == true ? .gmail : .microsoft
-                try archive.register(PlaceholderAccount.make(key, provider: provider))
-                print("Registered account \(key) with a placeholder address (unregistered.invalid).")
+            let accounts = CLIArchive.accounts(archive)
+            for id in Set(try await store.listKeys().map(\.accountID)) where try accounts.record(id) == nil {
+                throw ValidationError("Account \(id) is not in the archive. Run `stowmail init` to move Phase 1 accounts in, or add it with `stowmail account add`.")
             }
             summary = try await importer.importAll(from: store, progress: progress)
         }
@@ -96,8 +49,8 @@ struct Import: AsyncParsableCommand {
     }
 }
 
-/// Until account registration exists in the archive (Phase 2), imported
-/// accounts get a clearly fake address in the reserved `.invalid` domain.
+/// Imports from a plain folder of .eml files go to one clearly fake account,
+/// in the reserved `.invalid` domain (D-208).
 enum PlaceholderAccount {
     static func make(_ id: AccountID, provider: Provider) -> Account {
         Account(id: id, provider: provider, email: "\(id.rawValue)@unregistered.invalid", displayName: "Imported")
@@ -105,19 +58,28 @@ enum PlaceholderAccount {
 }
 
 struct Stats: AsyncParsableCommand {
-    static let configuration = CommandConfiguration(abstract: "Show message, attachment, deduplication and size counts.")
+    static let configuration = CommandConfiguration(
+        abstract: "Show message, attachment, deduplication and size counts, and the archive's size against the provider's."
+    )
+
+    @Option(help: "One account only (ID, prefix, address or name).") var account: String?
 
     func run() async throws {
-        let stats = try ArchiveStats.collect(try CLIArchive.open(readOnly: true))
+        let archive = try CLIArchive.open(readOnly: true)
+        let id = try account.map { try CLIArchive.accounts(archive).find($0).account.id }
+        let stats = try ArchiveStats.collect(archive, account: id)
         let mb = CLIArchive.megabytes
         print("Accounts:            \(stats.accounts)")
         print("Messages:            \(stats.messages) (\(stats.degradedMessages) degraded, \(stats.failedMessages) failed to parse)")
-        print("Raw messages:        \(mb(stats.rawBytes)) original, \(mb(stats.rawStoredBytes)) stored")
+        print("Stored as:           \(stats.skeletonMessages) skeletons, \(stats.wholeMessages) whole; \(stats.attachmentsKeptInline) attachment(s) kept inline")
+        print("Provider's size:     \(mb(stats.rawBytes)) (what the server reports for these messages)")
+        print("Message files:       \(mb(stats.rawStoredBytes)) (skeletons and whole messages, compressed and encrypted)")
         print("Attachments:         \(stats.attachmentReferences) references, \(stats.distinctAttachments) distinct files")
         print("Attachment bytes:    \(mb(stats.attachmentBytesReferenced)) referenced, \(mb(stats.attachmentBytesDistinct)) stored once, \(mb(stats.dedupSavedBytes)) saved by dedup")
         print("Attachment files:    \(mb(stats.attachmentStoredBytes)) on disk")
+        print("Database:            \(mb(stats.databaseBytes))\(id == nil ? "" : " (whole archive)")")
+        print(String(format: "Archive total:       %@, %.2f times the provider's size", mb(stats.totalStoredBytes), stats.storedRatio))
         print("OCR pending:         \(stats.ocrPending)")
-        print("Database:            \(mb(stats.databaseBytes))")
     }
 }
 
@@ -126,7 +88,8 @@ struct Search: AsyncParsableCommand {
         abstract: "Search the archive.",
         discussion: """
             Free text with "phrases", prefix*, OR and -exclusions, plus filters: from: to: subject: \
-            has:attachment -has:attachment account:<id> after:YYYY-MM-DD before:YYYY-MM-DD.
+            has:attachment -has:attachment account:<id> after:YYYY-MM-DD before:YYYY-MM-DD. \
+            Mail marked as spam in the mailbox is left out; add in:spam for only that, or in:anywhere for everything.
             """
     )
 
@@ -170,7 +133,9 @@ struct OCR: AsyncParsableCommand {
         @Option(help: "Stop after this many items.") var limit: Int?
 
         func run() async throws {
-            let queue = OCRQueue(archive: try CLIArchive.open())
+            let (archive, lock) = try CLIArchive.openForWriting(requireRecovery: false)
+            defer { lock.release() }
+            let queue = OCRQueue(archive: archive)
             let start = Date()
             let processed = try await queue.run(limit: limit ?? .max)
             print(String(format: "Processed %d items in %.1f s. Queue: %@", processed, Date().timeIntervalSince(start),

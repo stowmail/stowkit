@@ -1,56 +1,67 @@
 import Foundation
 import GRDB
 
-/// Writes the full-text index row for a message (`messages_fts`, rowid =
-/// `messages.id`), built from what is already stored: subject, addresses with
-/// display names, body, attachment names and attachment text.
+/// Keeps the full-text index (`messages_fts`, rowid = `messages.id`) in step
+/// with the stored text it is built from: subject, addresses with display
+/// names, body, attachment names and attachment text.
+///
+/// The index is an FTS5 *external content* table over the view
+/// `messages_fts_content` (D-030): it holds the search index only, not a
+/// second copy of the text. FTS5 cannot see changes to that text by itself,
+/// and removing an entry needs exactly the text it was built from. So the rule
+/// is: `remove` a message's entry before changing any of its text, and `index`
+/// it again afterwards (`updating` does both). Import only ever adds.
 ///
 /// Lives in `StowStore` because the importer indexes inline, in the same
 /// transaction as the message, and the OCR runner re-indexes when new text
 /// arrives. `StowSearch` only reads the index.
 public enum SearchIndexWriter {
-    /// (Re)builds the index row for one message. Call inside a write transaction.
+    static let columns = "subject, from_text, to_text, cc_text, body, attachment_names, attachment_text"
+
+    /// Adds the index entry for a message from its stored text. Call inside a
+    /// write transaction, once the message's rows are in place.
     public static func index(_ db: Database, messageID: Int64) throws {
-        guard let subject = try Row.fetchOne(db, sql: "SELECT subject FROM messages WHERE id = ?", arguments: [messageID])
-        else { return }
-
-        func addresses(_ roles: [String]) throws -> String {
-            let rows = try Row.fetchAll(db, sql: """
-                SELECT ma.display_name, a.address FROM message_addresses ma JOIN addresses a ON a.id = ma.address_id
-                WHERE ma.message_id = ? AND ma.role IN (\(roles.map { "'\($0)'" }.joined(separator: ",")))
-                ORDER BY ma.role, ma.position
-                """, arguments: [messageID])
-            return rows.map { row in
-                [row["display_name"] as String?, row["address"] as String?].compactMap { $0 }.joined(separator: " ")
-            }.joined(separator: ", ")
-        }
-
-        let body = try String.fetchOne(db, sql: """
-            SELECT coalesce(text_plain, text_from_html) FROM message_bodies WHERE message_id = ?
-            """, arguments: [messageID])
-        let names = try String.fetchAll(db, sql: """
-            SELECT filename FROM message_attachments WHERE message_id = ? AND filename IS NOT NULL ORDER BY part_path
-            """, arguments: [messageID])
-        let texts = try String.fetchAll(db, sql: """
-            SELECT DISTINCT t.text FROM message_attachments ma JOIN attachment_text t ON t.attachment_id = ma.attachment_id
-            WHERE ma.message_id = ? ORDER BY ma.part_path
-            """, arguments: [messageID])
-
-        try db.execute(sql: "DELETE FROM messages_fts WHERE rowid = ?", arguments: [messageID])
         try db.execute(sql: """
-            INSERT INTO messages_fts (rowid, subject, from_text, to_text, cc_text, body, attachment_names, attachment_text)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """, arguments: [
-                messageID, subject["subject"] as String?, try addresses(["from", "sender", "reply_to"]),
-                try addresses(["to"]), try addresses(["cc", "bcc"]), body,
-                names.joined(separator: "\n"), texts.joined(separator: "\n\n"),
-            ])
+            INSERT INTO messages_fts (rowid, \(columns))
+            SELECT id, \(columns) FROM messages_fts_content WHERE id = ?
+            """, arguments: [messageID])
     }
 
-    /// Re-indexes every message that contains the given attachment, after its text changed (OCR).
-    public static func reindex(_ db: Database, attachmentID: Int64) throws {
-        let messages = try Int64.fetchAll(db, sql: "SELECT DISTINCT message_id FROM message_attachments WHERE attachment_id = ?",
-                                          arguments: [attachmentID])
-        for message in messages { try index(db, messageID: message) }
+    /// Removes a message's index entry, using its current stored text. Call
+    /// before that text changes or the message's rows are deleted.
+    public static func remove(_ db: Database, messageID: Int64) throws {
+        try db.execute(sql: """
+            INSERT INTO messages_fts (messages_fts, rowid, \(columns))
+            SELECT 'delete', id, \(columns) FROM messages_fts_content WHERE id = ?
+            """, arguments: [messageID])
+    }
+
+    /// Runs `change`, which alters text the given messages are indexed from,
+    /// with their entries removed before and added back after.
+    public static func updating(_ db: Database, messageIDs: [Int64], change: () throws -> Void) throws {
+        for id in messageIDs { try remove(db, messageID: id) }
+        try change()
+        for id in messageIDs { try index(db, messageID: id) }
+    }
+
+    /// The messages that contain an attachment, whose entries depend on its text.
+    public static func messages(containing attachmentID: Int64, _ db: Database) throws -> [Int64] {
+        try Int64.fetchAll(db, sql: "SELECT DISTINCT message_id FROM message_attachments WHERE attachment_id = ? ORDER BY message_id",
+                           arguments: [attachmentID])
+    }
+
+    /// FTS5's own check that the index matches the stored text exactly. True when it does.
+    public static func integrityCheck(_ db: Database) throws -> Bool {
+        do {
+            try db.execute(sql: "INSERT INTO messages_fts (messages_fts, rank) VALUES ('integrity-check', 1)")
+            return true
+        } catch let error as DatabaseError where error.resultCode == .SQLITE_CORRUPT {
+            return false
+        }
+    }
+
+    /// Rebuilds the whole index from the stored text. A repair tool, never needed in normal running.
+    public static func rebuild(_ db: Database) throws {
+        try db.execute(sql: "INSERT INTO messages_fts (messages_fts) VALUES ('rebuild')")
     }
 }

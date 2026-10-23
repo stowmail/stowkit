@@ -11,12 +11,14 @@ import Foundation
 ///
 ///     <root>/<account id>/<folder, percent-encoded>/<uidvalidity>/<uid>.eml
 ///     <root>/<account id>/<folder, percent-encoded>/<uidvalidity>/<uid>.json   (metadata)
-///     <root>/<account id>/<folder, percent-encoded>/checkpoint.json
+///
+/// Phase 1 also kept sync checkpoints here (`checkpoint.json`); Phase 2 keeps
+/// sync state in a `SyncStateStore` instead, and such files are ignored.
 ///
 /// The `.json` file is written after the `.eml`, and both are written to a
 /// temporary name and renamed into place, so a message only appears in
 /// `listKeys()` once it is complete.
-public actor FileRawMessageStore: RawMessageSink, RawMessageSource, SyncCheckpointStore {
+public actor FileRawMessageStore: RawMessageSink, RawMessageSource {
     public nonisolated let root: URL
     private let fileManager = FileManager.default
 
@@ -70,23 +72,6 @@ public actor FileRawMessageStore: RawMessageSink, RawMessageSource, SyncCheckpoi
         let metadata = try Self.decoder.decode(Metadata.self, from: Data(contentsOf: metadataURL))
         let bytes = try Data(contentsOf: emlURL(for: key))
         return metadata.message(bytes: bytes)
-    }
-
-    // MARK: SyncCheckpointStore
-
-    public func checkpoint(accountID: AccountID, folder: String) async throws -> SyncCheckpoint? {
-        let url = folderURL(accountID: accountID, folder: folder).appendingPathComponent(Self.checkpointFileName)
-        guard fileManager.fileExists(atPath: url.path) else { return nil }
-        return try Self.decoder.decode(SyncCheckpoint.self, from: Data(contentsOf: url))
-    }
-
-    public func save(_ checkpoint: SyncCheckpoint) async throws {
-        let directory = folderURL(accountID: checkpoint.accountID, folder: checkpoint.folder)
-        try Self.makeDirectory(directory)
-        try Self.writeAtomically(
-            try Self.encoder.encode(checkpoint),
-            to: directory.appendingPathComponent(Self.checkpointFileName)
-        )
     }
 
     // MARK: Paths
@@ -172,6 +157,8 @@ public actor FileRawMessageStore: RawMessageSink, RawMessageSource, SyncCheckpoi
         var gmailThreadID: UInt64?
         var internalDate: Date
         var size: Int
+        /// Absent in files written before Phase 2.
+        var flags: [String]?
 
         init(_ message: RawMessage) {
             key = message.key
@@ -180,6 +167,7 @@ public actor FileRawMessageStore: RawMessageSink, RawMessageSource, SyncCheckpoi
             gmailThreadID = message.gmailThreadID
             internalDate = message.internalDate
             size = message.size
+            flags = message.flags
         }
 
         func message(bytes: Data) -> RawMessage {
@@ -190,6 +178,7 @@ public actor FileRawMessageStore: RawMessageSink, RawMessageSource, SyncCheckpoi
                 gmailThreadID: gmailThreadID,
                 internalDate: internalDate,
                 size: size,
+                flags: flags ?? [],
                 bytes: bytes
             )
         }

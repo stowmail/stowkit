@@ -30,9 +30,6 @@ public enum SyncError: Error, Equatable, CustomStringConvertible {
     /// The development store is missing a protection (D-108). Lists what is missing.
     case devStoreUnprotected([String])
     case cancelled
-    /// The server listed messages it would not return. Those folders stopped
-    /// before them and will try again next run (D-113).
-    case messagesNotDownloaded(folders: Int, messages: Int)
 
     /// Whether reconnecting after a pause might help.
     public var isRetryable: Bool {
@@ -63,8 +60,6 @@ public enum SyncError: Error, Equatable, CustomStringConvertible {
         case .devStoreUnprotected(let missing):
             "Refusing to write to the development store: \(missing.joined(separator: "; ")). See `stowmail doctor`."
         case .cancelled: "Sync cancelled."
-        case .messagesNotDownloaded(let folders, let messages):
-            "Incomplete: the server listed \(messages) message(s) in \(folders) folder(s) but would not return them. Those folders stopped there and will be retried next run; nothing after them was skipped."
         }
     }
 }
