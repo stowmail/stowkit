@@ -344,16 +344,19 @@ public struct AccountSyncer: Sendable {
         return messages
     }
 
-    /// Drops messages whose byte count differs from RFC822.SIZE (D-120). They
-    /// are then treated as not returned: retried, and never written as they are.
+    /// Passes every message through. RFC822.SIZE is not an integrity check:
+    /// Exchange reports an estimate (D-120). The exact check, each body against
+    /// its literal's announced length, happens in `IMAPSession`. Disagreements
+    /// with RFC822.SIZE are only counted, at debug level, as a provider signal.
     private func checked(_ messages: [FetchedMessage], folderIndex: Int) -> [FetchedMessage] {
-        let bad = messages.filter { !$0.sizeMatches }
-        guard !bad.isEmpty else { return messages }
-        logger.warning("Message bytes differ from RFC822.SIZE; not written", metadata: [
-            "account": "\(account.id)", "folderIndex": "\(folderIndex)",
-            "uids": "\(bad.map(\.uid))", "differences": "\(bad.map { $0.bytes.count - $0.size })",
-        ])
-        return messages.filter(\.sizeMatches)
+        let differing = messages.filter { $0.bytes.count != $0.size }.count
+        if differing > 0 {
+            logger.debug("RFC822.SIZE differs from the downloaded length", metadata: [
+                "account": "\(account.id)", "folderIndex": "\(folderIndex)",
+                "messages": "\(messages.count)", "differing": "\(differing)",
+            ])
+        }
+        return messages
     }
 
     static func missing(_ uids: [UInt32], from messages: [FetchedMessage]) -> [UInt32] {

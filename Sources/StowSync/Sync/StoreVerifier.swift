@@ -22,8 +22,6 @@ public struct VerifyItem: Sendable, Hashable, Comparable, CustomStringConvertibl
 public struct VerifyReport: Sendable, Equatable {
     public var storedMessages = 0
     public var sampled = 0
-    /// Stored file length differs from the RFC822.SIZE saved with it.
-    public var localSizeMismatches: [VerifyItem] = []
     /// Re-fetched and compared.
     public var compared = 0
     public var identical = 0
@@ -31,12 +29,12 @@ public struct VerifyReport: Sendable, Equatable {
     public var mismatched: [VerifyItem] = []
     /// No longer on the server (deleted since it was synced).
     public var goneFromServer: [VerifyItem] = []
-    /// Still listed but not returned, or failed the size check, so not compared.
+    /// Still listed but not returned, so not compared.
     public var notCompared: [VerifyItem] = []
     /// Folders not checked, with why (folder gone, or UIDVALIDITY changed).
     public var skippedFolders: [Int: String] = [:]
 
-    public var isClean: Bool { mismatched.isEmpty && localSizeMismatches.isEmpty }
+    public var isClean: Bool { mismatched.isEmpty }
 }
 
 /// Re-fetches stored messages read-only and checks they are byte-for-byte what
@@ -87,15 +85,13 @@ public struct StoreVerifier: Sendable {
         report.sampled = chosen.count
         guard !chosen.isEmpty else { return report }
 
-        // Local check first: the file must be as long as the size saved with it.
         // Only the digest is kept, so checking every message never holds them all in memory.
         var stored: [RawMessageKey: SHA256.Digest] = [:]
         var plannedBytes: Int64 = 0
         for key in chosen {
             let message = try await source.read(key)
-            if message.bytes.count != message.size { report.localSizeMismatches.append(item(key)) }
             stored[key] = SHA256.hash(data: message.bytes)
-            plannedBytes += Int64(message.size)
+            plannedBytes += Int64(message.bytes.count)
         }
         guard await budget.allows(plannedBytes) else {
             throw SyncError.budgetExhausted(usedBytes: await budget.used(), limitBytes: budget.limit ?? 0)
@@ -129,7 +125,6 @@ public struct StoreVerifier: Sendable {
                             guard let key = byUID[message.uid] else { continue }
                             answered.insert(message.uid)
                             bytes += Int64(message.bytes.count)
-                            guard message.sizeMatches else { report.notCompared.append(item(key)); continue }
                             report.compared += 1
                             if SHA256.hash(data: message.bytes) == stored[key]! {
                                 report.identical += 1
@@ -158,12 +153,11 @@ public struct StoreVerifier: Sendable {
             throw error
         }
         report.mismatched.sort()
-        report.localSizeMismatches.sort()
         report.goneFromServer.sort()
         report.notCompared.sort()
         logger.notice("Verify finished", metadata: [
             "account": "\(account.id)", "sampled": "\(report.sampled)", "compared": "\(report.compared)",
-            "mismatched": "\(report.mismatched.count)", "localSizeMismatches": "\(report.localSizeMismatches.count)",
+            "mismatched": "\(report.mismatched.count)",
         ])
         return report
     }

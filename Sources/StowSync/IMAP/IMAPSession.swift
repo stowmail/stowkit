@@ -196,7 +196,6 @@ public actor IMAPSession {
             return FetchedMessage(
                 uid: uid,
                 size: partial.size ?? bytes.count,
-                sizeReported: partial.size != nil,
                 internalDate: internalDate,
                 gmailMessageID: partial.gmailMessageID,
                 gmailThreadID: partial.gmailThreadID,

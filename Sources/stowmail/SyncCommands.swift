@@ -142,9 +142,9 @@ struct Verify: AsyncParsableCommand {
         abstract: "Re-fetch stored messages read-only and check they match the server byte for byte.",
         discussion: """
         Picks a random sample of the account's stored messages, downloads them again into memory \
-        (never to disk), and compares SHA-256s with the stored files. Also checks each stored file is \
-        as long as the RFC822.SIZE saved with it. Reports problems by folder number, UIDVALIDITY and \
-        UID only; never prints content, subjects or addresses (D-121).
+        (never to disk), and compares SHA-256s with the stored files. Reports problems by folder \
+        number, UIDVALIDITY and UID only; never prints content, subjects or addresses (D-121). \
+        Exits with status 1 if any message differs.
         """
     )
 
@@ -187,12 +187,13 @@ struct Verify: AsyncParsableCommand {
         print("Stored messages for this account: \(report.storedMessages). Checked: \(report.sampled).")
         print("Compared with the server: \(report.compared). Identical: \(report.identical).")
         for item in report.mismatched { print("  MISMATCH: \(item)") }
-        for item in report.localSizeMismatches { print("  STORED FILE LENGTH DIFFERS FROM ITS RFC822.SIZE: \(item)") }
         if !report.goneFromServer.isEmpty { print("Deleted on the server since sync (not compared): \(report.goneFromServer.count)") }
-        for item in report.notCompared { print("  not compared (server did not return it intact): \(item)") }
+        for item in report.notCompared { print("  not compared (still on the server but not returned): \(item)") }
         for (index, reason) in report.skippedFolders.sorted(by: { $0.key < $1.key }) { print("Folder \(index + 1) skipped: \(reason)") }
         guard report.isClean else {
-            throw ValidationError("Verification found \(report.mismatched.count) mismatched and \(report.localSizeMismatches.count) wrong-length stored message(s).")
+            // A plain failure exit, without ArgumentParser's usage text.
+            FileHandle.standardError.write(Data("Verification failed: \(report.mismatched.count) stored message(s) differ from the server.\n".utf8))
+            throw ExitCode(1)
         }
         print(report.notCompared.isEmpty && report.skippedFolders.isEmpty ? "All checked messages match." : "No mismatches among the messages compared.")
     }

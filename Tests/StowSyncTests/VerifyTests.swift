@@ -46,7 +46,6 @@ import Testing
 
         let report = try await verifier(harness).run(sample: nil)
         #expect(report.mismatched == [VerifyItem(folderIndex: 0, uidValidity: 7, uid: 9), VerifyItem(folderIndex: 0, uidValidity: 7, uid: 11)])
-        #expect(report.localSizeMismatches == [VerifyItem(folderIndex: 0, uidValidity: 7, uid: 11)])
         #expect(report.identical == fixtures.count - 2)
         #expect(!report.isClean)
         #expect(report.mismatched[0].description == "folder 1, UIDVALIDITY 7, UID 9")

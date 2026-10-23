@@ -146,31 +146,41 @@ func literalBoundaryCuts(_ reply: Data) -> [Int] {
     }
 }
 
-/// D-120 integrity guard: bytes that differ in length from RFC822.SIZE are never written.
-@Suite struct SizeGuardTests {
-    @Test func wrongSizeOnceIsRetriedAndStoredCorrectly() async throws {
-        let fixtures = try Fixtures.small()
-        let server = gmailServer(fixtures)
-        server.wrongSizeFetches = [9: 1]
-        let harness = try await SyncHarness(server: server)
-        defer { harness.cleanUp() }
-        let report = try await harness.syncer().run(SyncOptions(batches: BatchPlanner(maxMessages: 6)))
-        #expect(report.notDownloaded.isEmpty)
-        #expect(harness.sleeps.delays == [2])
-        let key = try #require(try await harness.store.listKeys().first { $0.uid == 9 })
-        let stored = try await harness.store.read(key)
-        #expect(stored.bytes == fixtures[3].bytes && stored.size == fixtures[3].bytes.count)
-    }
+/// D-120: Exchange's RFC822.SIZE is an estimate, not the byte count. Sync and
+/// verify must work regardless; only the literal's announced length is exact.
+@Suite struct InexactSizeTests {
+    /// Sizes off in both directions, in listings and fetches alike.
+    static let estimate: @Sendable (Int) -> Int = { length in length % 2 == 0 ? length + 37 : max(1, length - 11) }
 
-    @Test func persistentlyWrongSizeIsNeverWrittenAndStopsTheFolder() async throws {
-        let fixtures = try Fixtures.small()
+    @Test func syncStoresExactBytesWhateverRFC822SizeSays() async throws {
+        let fixtures = try Fixtures.all()
         let server = gmailServer(fixtures)
-        server.wrongSizeFetches = [9: 100]
+        server.reportedSize = Self.estimate
+        server.splitFetchReply = { literalBoundaryCuts($0) }
         let harness = try await SyncHarness(server: server)
         defer { harness.cleanUp() }
+
         let report = try await harness.syncer().run(SyncOptions(batches: BatchPlanner(maxMessages: 6)))
-        #expect(report.notDownloaded == [0: 1])
-        #expect(!(try await harness.storedUIDs()).contains(9))
-        #expect(try await harness.store.checkpoint(accountID: harness.account.id, folder: "[Gmail]/Tous les messages")?.highestUID == 7)
+        #expect(report.notDownloaded.isEmpty && report.outcome == .complete)
+        #expect(harness.sleeps.delays.isEmpty) // nothing was treated as missing
+        let keys = try await harness.store.listKeys().sorted { $0.uid < $1.uid }
+        #expect(keys.count == fixtures.count)
+        for (index, key) in keys.enumerated() {
+            let stored = try await harness.store.read(key)
+            #expect(stored.bytes == fixtures[index].bytes)
+            #expect(stored.size == Self.estimate(fixtures[index].bytes.count)) // kept as metadata, as reported
+        }
+
+        let verify = try await StoreVerifier(
+            account: harness.account,
+            openSession: { [port = Int(harness.port)] in
+                let session = try await IMAPSession.connect(to: .plaintextLoopback(port: port))
+                try await session.authenticate(user: "sam@example.com", accessToken: "good-token")
+                return session
+            },
+            source: harness.store,
+            budget: ByteBudget(limit: nil, fileURL: nil)
+        ).run(sample: nil)
+        #expect(verify.isClean && verify.identical == fixtures.count && verify.notCompared.isEmpty)
     }
 }

@@ -52,8 +52,9 @@ final class FakeIMAPServer: @unchecked Sendable {
     /// Splits each message FETCH reply into separate writes, paced so they
     /// arrive as separate reads, at the offsets this returns (D-120).
     var splitFetchReply: (@Sendable (Data) -> [Int])? { get { sync { _split } } set { sync { _split = newValue } } }
-    /// For each UID, how many body fetches report an RFC822.SIZE one byte too big.
-    var wrongSizeFetches: [UInt32: Int] { get { sync { _wrongSize } } set { sync { _wrongSize = newValue } } }
+    /// Reported RFC822.SIZE for a message of the given length, in every reply,
+    /// as Exchange does with its estimates. The literal length is always exact.
+    var reportedSize: (@Sendable (Int) -> Int)? { get { sync { _reportedSize } } set { sync { _reportedSize = newValue } } }
     /// Refuse every AUTHENTICATE at once with this text (no SASL challenge),
     /// as Exchange does for an account without a mailbox.
     var authFailureText: String? { get { sync { _authFailure } } set { sync { _authFailure = newValue } } }
@@ -79,7 +80,7 @@ final class FakeIMAPServer: @unchecked Sendable {
     private var _authFailure: String?
     private var _refusals: [UInt32: Int] = [:]
     private var _split: (@Sendable (Data) -> [Int])?
-    private var _wrongSize: [UInt32: Int] = [:]
+    private var _reportedSize: (@Sendable (Int) -> Int)?
     private var _partialCompletion: String?
     private var _partialUntagged: String?
     private var _bodyless: Set<UInt32> = []
@@ -313,11 +314,7 @@ final class FakeIMAPServer: @unchecked Sendable {
                 omitted = true
                 continue
             }
-            var reportedSize = message.bytes.count
-            if wantsBody, let left = _wrongSize[message.uid], left > 0 {
-                _wrongSize[message.uid] = left - 1
-                reportedSize += 1
-            }
+            let reportedSize = _reportedSize?(message.bytes.count) ?? message.bytes.count
             var items = ["UID \(message.uid)", "RFC822.SIZE \(reportedSize)"]
             if attributes.contains(" FLAGS") {
                 items.append("FLAGS (\(message.flags.joined(separator: " ")))")
