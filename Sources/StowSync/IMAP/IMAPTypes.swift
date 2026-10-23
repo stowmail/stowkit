@@ -100,12 +100,18 @@ public struct MessageSummary: Sendable, Equatable {
 public struct FetchedMessage: Sendable, Equatable {
     public var uid: UInt32
     public var size: Int
+    /// Whether `size` came from the server's RFC822.SIZE (rather than the byte count).
+    public var sizeReported: Bool = true
     public var internalDate: Date
     public var gmailMessageID: UInt64?
     public var gmailThreadID: UInt64?
     public var labels: [String]
     /// The complete message from BODY.PEEK[]. Never log it.
     public var bytes: Data
+
+    /// The integrity guard (D-120): the bytes must be exactly as long as the
+    /// server's RFC822.SIZE. Nothing else is assumed about the content.
+    public var sizeMatches: Bool { !sizeReported || bytes.count == size }
 }
 
 extension ServerMessageDate {

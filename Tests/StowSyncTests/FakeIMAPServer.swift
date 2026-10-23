@@ -49,6 +49,11 @@ final class FakeIMAPServer: @unchecked Sendable {
     /// instead of OK (for example "NO [UNAVAILABLE] Try later"), and an untagged line to add.
     var partialCompletion: String? { get { sync { _partialCompletion } } set { sync { _partialCompletion = newValue } } }
     var partialUntagged: String? { get { sync { _partialUntagged } } set { sync { _partialUntagged = newValue } } }
+    /// Splits each message FETCH reply into separate writes, paced so they
+    /// arrive as separate reads, at the offsets this returns (D-120).
+    var splitFetchReply: (@Sendable (Data) -> [Int])? { get { sync { _split } } set { sync { _split = newValue } } }
+    /// For each UID, how many body fetches report an RFC822.SIZE one byte too big.
+    var wrongSizeFetches: [UInt32: Int] { get { sync { _wrongSize } } set { sync { _wrongSize = newValue } } }
     /// Refuse every AUTHENTICATE at once with this text (no SASL challenge),
     /// as Exchange does for an account without a mailbox.
     var authFailureText: String? { get { sync { _authFailure } } set { sync { _authFailure = newValue } } }
@@ -73,6 +78,8 @@ final class FakeIMAPServer: @unchecked Sendable {
     private var _dropEvery = false
     private var _authFailure: String?
     private var _refusals: [UInt32: Int] = [:]
+    private var _split: (@Sendable (Data) -> [Int])?
+    private var _wrongSize: [UInt32: Int] = [:]
     private var _partialCompletion: String?
     private var _partialUntagged: String?
     private var _bodyless: Set<UInt32> = []
@@ -162,6 +169,17 @@ final class FakeIMAPServer: @unchecked Sendable {
     private func send(_ data: Data, to client: Client) {
         guard !client.closed else { return }
         client.connection.send(content: data, completion: .contentProcessed { _ in })
+    }
+
+    /// Sends `data` cut at `cuts`, 15 ms apart, so each piece is its own read.
+    private func sendInPieces(_ data: Data, cuts: [Int], to client: Client) {
+        let bounds = ([0] + cuts.filter { $0 > 0 && $0 < data.count }.sorted() + [data.count])
+        var delay = 0.0
+        for index in 0..<(bounds.count - 1) where bounds[index] < bounds[index + 1] {
+            let piece = data.subdata(in: bounds[index]..<bounds[index + 1])
+            queue.asyncAfter(deadline: .now() + delay) { [weak self] in self?.send(piece, to: client) }
+            delay += 0.015
+        }
     }
 
     private func close(_ client: Client) {
@@ -295,7 +313,12 @@ final class FakeIMAPServer: @unchecked Sendable {
                 omitted = true
                 continue
             }
-            var items = ["UID \(message.uid)", "RFC822.SIZE \(message.bytes.count)"]
+            var reportedSize = message.bytes.count
+            if wantsBody, let left = _wrongSize[message.uid], left > 0 {
+                _wrongSize[message.uid] = left - 1
+                reportedSize += 1
+            }
+            var items = ["UID \(message.uid)", "RFC822.SIZE \(reportedSize)"]
             if attributes.contains(" FLAGS") {
                 items.append("FLAGS (\(message.flags.joined(separator: " ")))")
             }
@@ -320,7 +343,11 @@ final class FakeIMAPServer: @unchecked Sendable {
         } else {
             out.append(Data("\(tag) OK UID FETCH completed\r\n".utf8))
         }
-        send(out, to: client)
+        if wantsBody, let split = _split {
+            sendInPieces(out, cuts: split(out), to: client)
+        } else {
+            send(out, to: client)
+        }
     }
 
     /// Parses an IMAP sequence set such as `1:3,7,9:*` into a membership test.

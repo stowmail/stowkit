@@ -315,10 +315,10 @@ public struct AccountSyncer: Sendable {
     private func fetchRetryingPartial(_ uids: [UInt32], session: IMAPSession, options: SyncOptions, folderIndex: Int) async throws -> [FetchedMessage] {
         let gmail = account.provider == .gmail
         let first = try await session.fetchMessagesWithDiagnostics(uids: uids, gmail: gmail)
-        var messages = first.messages
+        var messages = checked(first.messages, folderIndex: folderIndex)
         var missing = Self.missing(uids, from: messages)
         guard !missing.isEmpty else { return messages }
-        logPartial(first.diagnostics, folderIndex: folderIndex, round: 0, asked: uids.count, returned: first.messages.count)
+        logPartial(first.diagnostics, folderIndex: folderIndex, round: 0, asked: uids.count, returned: messages.count)
 
         for (number, round) in options.partialRetry.enumerated() where !missing.isEmpty {
             do {
@@ -329,9 +329,10 @@ public struct AccountSyncer: Sendable {
             for start in stride(from: 0, to: missing.count, by: round.chunkSize) {
                 let chunk = Array(missing[start..<min(start + round.chunkSize, missing.count)])
                 let reply = try await session.fetchMessagesWithDiagnostics(uids: chunk, gmail: gmail)
-                messages += reply.messages
-                if reply.messages.count < chunk.count {
-                    logPartial(reply.diagnostics, folderIndex: folderIndex, round: number + 1, asked: chunk.count, returned: reply.messages.count)
+                let accepted = checked(reply.messages, folderIndex: folderIndex)
+                messages += accepted
+                if accepted.count < chunk.count {
+                    logPartial(reply.diagnostics, folderIndex: folderIndex, round: number + 1, asked: chunk.count, returned: accepted.count)
                 }
             }
             missing = Self.missing(uids, from: messages)
@@ -341,6 +342,18 @@ public struct AccountSyncer: Sendable {
             "returnedFirstTime": "\(first.messages.count)", "stillMissing": "\(missing.count)",
         ])
         return messages
+    }
+
+    /// Drops messages whose byte count differs from RFC822.SIZE (D-120). They
+    /// are then treated as not returned: retried, and never written as they are.
+    private func checked(_ messages: [FetchedMessage], folderIndex: Int) -> [FetchedMessage] {
+        let bad = messages.filter { !$0.sizeMatches }
+        guard !bad.isEmpty else { return messages }
+        logger.warning("Message bytes differ from RFC822.SIZE; not written", metadata: [
+            "account": "\(account.id)", "folderIndex": "\(folderIndex)",
+            "uids": "\(bad.map(\.uid))", "differences": "\(bad.map { $0.bytes.count - $0.size })",
+        ])
+        return messages.filter(\.sizeMatches)
     }
 
     static func missing(_ uids: [UInt32], from messages: [FetchedMessage]) -> [UInt32] {

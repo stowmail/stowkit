@@ -33,6 +33,8 @@ final class IMAPConnection: Sendable {
                 channel.eventLoop.makeCompletedFuture {
                     try channel.pipeline.syncOperations.addHandlers([
                         IdleStateHandler(readTimeout: readTimeout),
+                        // Never let the parser see a read ending in a lone CR (D-120).
+                        TrailingCRHandler(),
                         IMAPClientHandler(),
                         ResponseForwarder(continuation: continuation),
                     ])

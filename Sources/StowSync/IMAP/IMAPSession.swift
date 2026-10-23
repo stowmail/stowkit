@@ -187,12 +187,16 @@ public actor IMAPSession {
             guard let bytes = partial.body else {
                 throw SyncError.protocolViolation("FETCH reply for UID \(uid) had no message body")
             }
+            if let announced = partial.announcedBodyLength, announced != bytes.count {
+                throw SyncError.protocolViolation("FETCH body for UID \(uid) was \(bytes.count) bytes, announced \(announced)")
+            }
             guard let internalDate = partial.internalDate else {
                 throw SyncError.protocolViolation("FETCH reply for UID \(uid) had no INTERNALDATE")
             }
             return FetchedMessage(
                 uid: uid,
                 size: partial.size ?? bytes.count,
+                sizeReported: partial.size != nil,
                 internalDate: internalDate,
                 gmailMessageID: partial.gmailMessageID,
                 gmailThreadID: partial.gmailThreadID,
@@ -371,6 +375,8 @@ struct FetchAssembler {
         var labels: [String] = []
         var flags: [String] = []
         var body: Data?
+        /// The literal length the server announced for the body.
+        var announcedBodyLength: Int?
     }
 
     private(set) var finished: [Partial] = []
@@ -399,9 +405,11 @@ struct FetchAssembler {
             case .body(section: let section, offset: nil) where section == .complete:
                 streamingBody = true
                 current?.body = Data(capacity: byteCount)
+                current?.announcedBodyLength = byteCount
             case .rfc822:
                 streamingBody = true
                 current?.body = Data(capacity: byteCount)
+                current?.announcedBodyLength = byteCount
             default:
                 streamingBody = false
             }
