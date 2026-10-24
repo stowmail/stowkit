@@ -40,7 +40,13 @@ import Testing
         #expect(try harness.count("folders", "kind = 'label' AND name = '\\Inbox'") == 1)
         let state = try await ArchiveSyncStore(archive: harness.archive).folderState(harness.account.id, folder: allMail)
         #expect(state?.firstSyncCompletedAt != nil)
-        #expect(try Coverage.compute(harness.archive, account: harness.account.id).coverageDate != nil)
+        let coverage = try Coverage.compute(harness.archive, account: harness.account.id).coverageDate
+        #expect(coverage != nil)
+        // Status works the date out afresh, so a stale stored value never shows.
+        try await harness.archive.database.write { db in
+            try db.execute(sql: "UPDATE accounts SET coverage_date = 0")
+        }
+        #expect(try ArchiveStatus.collect(harness.archive).first?.coverageDate == coverage)
         #expect(try ArchiveVerifier(archive: harness.archive).run().isClean)
 
         // A second run downloads nothing.

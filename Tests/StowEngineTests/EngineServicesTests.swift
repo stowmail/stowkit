@@ -229,6 +229,28 @@ func testKeychain() -> KeychainStore {
         #expect(reason.contains("recovery key"))
     }
 
+    /// D-036: after the budget runs out, wait only until there is room again, never under the minimum.
+    @Test func aUsedUpBudgetWaitsOnlyUntilThereIsRoom() async throws {
+        let (archive, location, keys) = try confirmedArchive()
+        defer { try? FileManager.default.removeItem(at: location.root) }
+        let account = Account(id: .generate(), provider: .gmail, email: "sam@example.com", displayName: "G")
+        try ArchiveAccounts(archive: archive).add(AccountRecord(account: account))
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let store = ArchiveSyncStore(archive: archive)
+        try await store.recordDownload(account.id, bytes: 500, at: now.addingTimeInterval(-86_000))
+        try await store.recordDownload(account.id, bytes: 500, at: now.addingTimeInterval(-3_600))
+        let scheduler = Scheduler(openArchive: { try Archive.open(location, keys: keys) },
+                                  makeSync: { _ in throw CocoaError(.fileNoSuchFile) }, now: { now })
+        // The first 500 bytes age out in 400 seconds.
+        #expect(await scheduler.budgetWait(archive, account: account.id, mustFree: 200) == now.addingTimeInterval(400))
+        // The second only in almost a day.
+        #expect(await scheduler.budgetWait(archive, account: account.id, mustFree: 800) == now.addingTimeInterval(82_800))
+        // Never sooner than the minimum, and an hour if it can never fit.
+        try await store.recordDownload(account.id, bytes: 1, at: now.addingTimeInterval(-86_390))
+        #expect(await scheduler.budgetWait(archive, account: account.id, mustFree: 1) == now.addingTimeInterval(300))
+        #expect(await scheduler.budgetWait(archive, account: account.id, mustFree: 5_000) == now.addingTimeInterval(3600))
+    }
+
     /// Files from a batch killed before it was recorded are deleted when the daemon starts.
     @Test func theFirstRoundDeletesFilesLeftByAKilledSync() async throws {
         let (archive, location, keys) = try confirmedArchive()
@@ -247,6 +269,27 @@ func testKeychain() -> KeychainStore {
 }
 
 @Suite struct DaemonPieceTests {
+    /// The daemon runs a copy, so a rebuild never changes the binary macOS trusts; its log is private.
+    @Test func installCopiesTheBinaryAndKeepsTheLogPrivate() throws {
+        let root = TestFixtures.temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let build = root.appendingPathComponent(".build/stowmail")
+        try FileManager.default.createDirectory(at: build.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data("first build".utf8).write(to: build)
+        let installed = root.appendingPathComponent("bin/stowmail")
+        try LaunchAgent.copyExecutable(build, to: installed)
+        try Data("second build".utf8).write(to: build)
+        #expect(try Data(contentsOf: installed) == Data("first build".utf8))
+        try LaunchAgent.copyExecutable(build, to: installed)
+        #expect(try Data(contentsOf: installed) == Data("second build".utf8))
+        #expect(try FileManager.default.contentsOfDirectory(atPath: installed.deletingLastPathComponent().path) == ["stowmail"])
+
+        let log = root.appendingPathComponent("daemon.out.log")
+        FileManager.default.createFile(atPath: log.path, contents: nil, attributes: [.posixPermissions: 0o644])
+        try LaunchAgent.createPrivateFile(log)
+        #expect(try FileManager.default.attributesOfItem(atPath: log.path)[.posixPermissions] as? Int == 0o600)
+    }
+
     /// Security checklist: the launchd plist has no secrets in it.
     @Test func launchAgentPlistHoldsNoSecrets() throws {
         let environment = [

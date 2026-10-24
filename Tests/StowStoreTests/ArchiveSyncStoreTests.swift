@@ -210,4 +210,18 @@ import Testing
         try await store.recordDownload(account, bytes: 300, at: now)
         #expect(try await store.bytesDownloaded(account, since: now.addingTimeInterval(-86_400)) == 300)
     }
+
+    @Test func budgetFreesUpAsTheOldestDownloadsAgeOut() async throws {
+        let (test, store) = try setUp()
+        defer { test.remove() }
+        let account = test.account.id
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        try await store.recordDownload(account, bytes: 400, at: now.addingTimeInterval(-80_000))
+        try await store.recordDownload(account, bytes: 300, at: now.addingTimeInterval(-40_000))
+        try await store.recordDownload(account, bytes: 300, at: now.addingTimeInterval(-1_000))
+        // 100 bytes free once the first download is a day old; 600 needs the second as well.
+        #expect(try await store.budgetFreesUp(account, bytes: 100, now: now) == now.addingTimeInterval(-80_000 + 86_400))
+        #expect(try await store.budgetFreesUp(account, bytes: 600, now: now) == now.addingTimeInterval(-40_000 + 86_400))
+        #expect(try await store.budgetFreesUp(account, bytes: 2_000, now: now) == nil)
+    }
 }

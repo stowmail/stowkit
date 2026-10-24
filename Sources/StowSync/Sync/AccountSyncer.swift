@@ -89,7 +89,8 @@ public enum SyncEvent: Sendable {
 public enum SyncOutcome: Sendable, Equatable {
     case complete
     case limitReached
-    case budgetExhausted(usedBytes: Int64, limitBytes: Int64)
+    /// `neededBytes`: the batch that did not fit, so the scheduler can wait just long enough (D-036).
+    case budgetExhausted(usedBytes: Int64, limitBytes: Int64, neededBytes: Int64)
     /// The deadline passed; the scheduler will come back to this account (D-036).
     case yielded
 }
@@ -357,7 +358,7 @@ public struct AccountSyncer: Sendable {
 
             let planned = Int64(batch.reduce(0) { $0 + $1.size })
             guard try await budget.allows(planned) else {
-                return .budgetExhausted(usedBytes: try await budget.used(), limitBytes: budget.limit ?? 0)
+                return .budgetExhausted(usedBytes: try await budget.used(), limitBytes: budget.limit ?? 0, neededBytes: planned)
             }
             let messages = try await fetchRetryingPartial(uids, session: session, options: options, folderIndex: folder.index)
             var bytes: Int64 = 0

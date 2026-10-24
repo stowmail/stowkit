@@ -94,7 +94,9 @@ public enum ArchiveStatus {
                 status.lastSyncAt = date("last_sync_at")
                 status.lastSuccessAt = date("last_success_at")
                 status.lastError = account?["last_error"]
-                status.coverageDate = date("coverage_date")
+                var coverage = CoverageReport(account: record.account.id)
+                try Coverage.measure(db, into: &coverage)
+                status.coverageDate = coverage.coverageDate
                 let messages = try Row.fetchOne(db, sql: """
                     SELECT count(*) AS n, coalesce(sum(size), 0) AS bytes FROM messages WHERE account_id = ?
                     """, arguments: [id])!

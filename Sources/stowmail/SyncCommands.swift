@@ -114,7 +114,7 @@ struct Sync: AsyncParsableCommand {
         case .complete, .yielded:
             print(report.remaining.queued == 0 ? "Everything listed is downloaded." : "\(report.remaining.queued) message(s) still queued (\(CLI.megabytes(report.remaining.queuedBytes))); run again to continue.")
         case .limitReached: print("Stopped at --limit. \(report.remaining.queued) message(s) still queued; run again to continue.")
-        case .budgetExhausted(let used, let limit):
+        case .budgetExhausted(let used, let limit, _):
             print("Stopped: today's download budget is used (\(CLI.megabytes(used)) of \(CLI.megabytes(limit))). It frees up over the next 24 hours; run again then.")
         }
         if report.uidValidityResets > 0 {

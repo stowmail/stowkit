@@ -49,9 +49,8 @@ struct Daemon: AsyncParsableCommand {
             try LaunchAgent.install(executable: executable, environment: environment)
             print("Installed \(LaunchAgent.plistURL.path).")
             print("The background sync runs now and at every login, at low priority. `stowmail status` shows how it is doing.")
-            if executable.path.contains("/.build/") {
-                print("Note: it runs \(executable.path); rebuilding replaces that file, which is fine.")
-            }
+            print("It runs a copy of this program at \(LaunchAgent.installedExecutable.path), so rebuilding does not affect it.")
+            print("Run `stowmail daemon install` again to update it to a new build.")
         }
     }
 

@@ -34,6 +34,17 @@ public enum LaunchAgent {
         FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Logs/Stow", isDirectory: true)
     }
 
+    /// Where `install` puts the copy of `stowmail` that launchd runs. A build
+    /// replaces the file in `.build`, and with the file-based Keychain (D-012)
+    /// macOS trusts one exact binary, so running the build output would make
+    /// every rebuild ask for the login password again.
+    public static var installedExecutable: URL {
+        FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Application Support/ee.getstow.dev/bin/stowmail")
+    }
+
+    static var outputLog: URL { logDirectory.appendingPathComponent("daemon.out.log") }
+
     /// The plist's contents. Environment variables outside `allowedEnvironment` are dropped.
     public static func plist(executable: URL, environment: [String: String]) -> [String: Any] {
         let kept = environment.filter { allowedEnvironment.contains($0.key) && !$0.value.isEmpty }
@@ -47,8 +58,8 @@ public enum LaunchAgent {
             "LowPriorityIO": true,
             "LowPriorityBackgroundIO": true,
             "ThrottleInterval": 60,
-            "StandardOutPath": logDirectory.appendingPathComponent("daemon.out.log").path,
-            "StandardErrorPath": logDirectory.appendingPathComponent("daemon.out.log").path,
+            "StandardOutPath": outputLog.path,
+            "StandardErrorPath": outputLog.path,
         ]
         if !kept.isEmpty { plist["EnvironmentVariables"] = kept }
         return plist
@@ -58,21 +69,49 @@ public enum LaunchAgent {
         try PropertyListSerialization.data(fromPropertyList: plist(executable: executable, environment: environment), format: .xml, options: 0)
     }
 
-    /// Writes the plist (0644, as launchd expects) and loads it, replacing any earlier copy.
+    /// Copies `executable` to `installedExecutable`, writes the plist (0644, as
+    /// launchd expects) and loads it, replacing any earlier copy.
     public static func install(executable: URL, environment: [String: String]) throws {
         try FileManager.default.createDirectory(at: logDirectory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         try FileManager.default.createDirectory(at: plistURL.deletingLastPathComponent(), withIntermediateDirectories: true)
         if isLoaded() { _ = try? launchctl(["bootout", "gui/\(getuid())/\(label)"]) }
-        try encoded(executable: executable, environment: environment).write(to: plistURL, options: .atomic)
+        try copyExecutable(executable, to: installedExecutable)
+        try createPrivateFile(outputLog)
+        try encoded(executable: installedExecutable, environment: environment).write(to: plistURL, options: .atomic)
         try FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: plistURL.path)
         let (status, output) = try launchctl(["bootstrap", "gui/\(getuid())", plistURL.path])
         guard status == 0 else { throw LaunchAgentError.launchctlFailed(output) }
     }
 
-    /// Unloads the agent and deletes the plist. The archive is left exactly as it is.
+    /// Unloads the agent and deletes the plist and the copied binary. The archive is left exactly as it is.
     public static func uninstall() throws {
         if isLoaded() { _ = try launchctl(["bootout", "gui/\(getuid())/\(label)"]) }
         if FileManager.default.fileExists(atPath: plistURL.path) { try FileManager.default.removeItem(at: plistURL) }
+        if FileManager.default.fileExists(atPath: installedExecutable.path) { try FileManager.default.removeItem(at: installedExecutable) }
+    }
+
+    /// Copies the binary beside its destination, then moves it into place in one
+    /// step, so a running copy is never overwritten in place. Same bytes, same
+    /// code signature.
+    static func copyExecutable(_ source: URL, to destination: URL) throws {
+        let manager = FileManager.default
+        guard source.standardizedFileURL != destination.standardizedFileURL else { return }
+        try manager.createDirectory(at: destination.deletingLastPathComponent(), withIntermediateDirectories: true,
+                                    attributes: [.posixPermissions: 0o700])
+        let staging = destination.deletingLastPathComponent().appendingPathComponent(".\(destination.lastPathComponent).\(UUID().uuidString)")
+        try manager.copyItem(at: source, to: staging)
+        guard rename(staging.path, destination.path) == 0 else {
+            try? manager.removeItem(at: staging)
+            throw CocoaError(.fileWriteUnknown)
+        }
+    }
+
+    /// launchd appends to an existing file and keeps its mode, so create it 0600 first.
+    static func createPrivateFile(_ url: URL) throws {
+        if !FileManager.default.fileExists(atPath: url.path) {
+            FileManager.default.createFile(atPath: url.path, contents: nil)
+        }
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
     }
 
     public static var isInstalled: Bool { FileManager.default.fileExists(atPath: plistURL.path) }

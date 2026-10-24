@@ -14,13 +14,16 @@ public struct SchedulerSettings: Sendable {
     public var fullCheckInterval: TimeInterval
     /// Longest wait before retrying an account that keeps failing.
     public var maximumBackoff: TimeInterval
+    /// Shortest wait once the daily byte budget is used up, however soon it frees up (D-036).
+    public var budgetMinimumWait: TimeInterval
 
     public init(turn: TimeInterval = 120, idleInterval: TimeInterval = 300, fullCheckInterval: TimeInterval = 6 * 3600,
-                maximumBackoff: TimeInterval = 3600) {
+                maximumBackoff: TimeInterval = 3600, budgetMinimumWait: TimeInterval = 300) {
         self.turn = turn
         self.idleInterval = idleInterval
         self.fullCheckInterval = fullCheckInterval
         self.maximumBackoff = maximumBackoff
+        self.budgetMinimumWait = budgetMinimumWait
     }
 }
 
@@ -164,11 +167,17 @@ public actor Scheduler {
             do {
                 let report = try await sync.syncer(for: record.account).run(options)
                 try accounts.recordSync(id, at: now(), error: nil)
-                _ = try? Coverage.compute(archive, account: id, now: now())
+                do {
+                    _ = try Coverage.compute(archive, account: id, now: now())
+                } catch {
+                    logger.warning("Coverage date not updated", metadata: ["account": "\(id)", "error": "\(Self.plainWords(error))"])
+                }
                 failures[id] = 0
                 notBefore[id] = nil
                 if full, report.outcome == .complete, report.remaining.queued == 0 { lastFullCheck[id] = now() }
-                if case .budgetExhausted = report.outcome { notBefore[id] = now().addingTimeInterval(3600) }
+                if case .budgetExhausted(let used, let limit, let needed) = report.outcome {
+                    notBefore[id] = await budgetWait(archive, account: id, mustFree: used + needed - limit)
+                }
                 if report.messagesWritten > 0 || report.outcome == .yielded { worked = true }
                 outcomes[id] = .synced(report)
             } catch {
@@ -191,6 +200,17 @@ public actor Scheduler {
         }
         try? archive.setMeta("daemon_heartbeat", String(Int(now().timeIntervalSince1970)))
         return (worked ? .worked : .idle, outcomes)
+    }
+
+    /// When to try again after the byte budget ran out: as soon as enough of the
+    /// last 24 hours' downloads have aged out for the batch that did not fit, but
+    /// not sooner than `budgetMinimumWait`. An hour if that can never happen.
+    func budgetWait(_ archive: Archive, account: AccountID, mustFree bytes: Int64) async -> Date {
+        let earliest = now().addingTimeInterval(settings.budgetMinimumWait)
+        guard let freed = try? await ArchiveSyncStore(archive: archive).budgetFreesUp(account, bytes: max(1, bytes), now: now()) else {
+            return now().addingTimeInterval(3600)
+        }
+        return max(earliest, freed)
     }
 
     /// An error in plain words, scrubbed (D-014). Sync errors already read as sentences.

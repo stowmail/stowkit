@@ -250,7 +250,8 @@ actor CrashingSink: RawMessageSink {
         let firstTwo = Int64(fixtures.prefix(2).reduce(0) { $0 + $1.bytes.count })
         let budget = ByteBudget(limit: firstTwo + 10, fileURL: budgetFile)
         let report = try await harness.syncer(budget: budget).run(SyncOptions(batches: BatchPlanner(maxMessages: 2)))
-        #expect(report.outcome == .budgetExhausted(usedBytes: firstTwo, limitBytes: firstTwo + 10))
+        guard case .budgetExhausted(let used, let limit, let needed) = report.outcome else { Issue.record("should stop at the budget"); return }
+        #expect(used == firstTwo && limit == firstTwo + 10 && needed > 10)
         #expect(report.messagesWritten == 2)
 
         // A new process sees the same spend and downloads nothing more today.

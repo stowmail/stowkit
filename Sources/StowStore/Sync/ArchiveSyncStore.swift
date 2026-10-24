@@ -414,6 +414,21 @@ public final class ArchiveSyncStore: RawMessageSink, SyncStateStore, Sendable {
         }
     }
 
+    /// When at least `bytes` of the last 24 hours' downloads will have aged out
+    /// of the rolling window, or nil if fewer than that were downloaded (D-036).
+    public func budgetFreesUp(_ account: AccountID, bytes: Int64, now: Date) async throws -> Date? {
+        try await database.read { db in
+            let rows = try Row.fetchAll(db, sql: "SELECT at, bytes FROM byte_budget WHERE account_id = ? AND at > ? ORDER BY at",
+                                        arguments: [account.rawValue, Int(now.timeIntervalSince1970) - 86_400])
+            var freed: Int64 = 0
+            for row in rows {
+                freed += row["bytes"] as Int64
+                if freed >= bytes { return Date(timeIntervalSince1970: TimeInterval(row["at"] as Int64 + 86_400)) }
+            }
+            return nil
+        }
+    }
+
     public func recordDownload(_ account: AccountID, bytes: Int64, at date: Date) async throws {
         guard bytes > 0 else { return }
         try await database.write { db in
