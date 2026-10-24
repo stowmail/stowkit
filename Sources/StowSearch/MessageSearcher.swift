@@ -34,6 +34,18 @@ public final class MessageSearcher: MessageSearching, Sendable {
         try await database.read { db in try self.search(db, query) }
     }
 
+    public func count(_ query: SearchQuery) async throws -> Int {
+        try await database.read { db in try self.count(db, query) }
+    }
+
+    public func folders(accounts: [AccountID]) async throws -> [ArchiveFolder] {
+        try await database.read { db in try self.folders(db, accounts: accounts) }
+    }
+
+    public func thread(of message: StoredMessageID) async throws -> MessageThread? {
+        try await database.read { db in try self.thread(db, of: message) }
+    }
+
     /// The MATCH expression for a query, or nil if it has no text conditions.
     static func matchExpression(_ query: SearchQuery) -> String? {
         var parts: [String] = []
@@ -44,34 +56,123 @@ public final class MessageSearcher: MessageSearching, Sendable {
         return parts.isEmpty ? nil : parts.joined(separator: " AND ")
     }
 
-    func search(_ db: Database, _ query: SearchQuery) throws -> [SearchHit] {
+    /// The conditions on `messages m` a query adds besides its MATCH expression.
+    struct Conditions {
         var filters: [String] = []
         var arguments: [any DatabaseValueConvertible] = []
+        /// True when nothing can match, such as an `in:` name no folder has.
+        var matchesNothing = false
+        /// The place filter's folders. Its condition is always the last filter.
+        var placeIDs: [FolderID]?
+
+        var whereClause: String { filters.isEmpty ? "" : "WHERE \(filters.joined(separator: " AND "))" }
+    }
+
+    func conditions(_ db: Database, _ query: SearchQuery) throws -> Conditions {
+        var result = Conditions()
         if let has = query.hasAttachment {
-            filters.append("m.has_attachments = ?")
-            arguments.append(has)
+            result.filters.append("m.has_attachments = ?")
+            result.arguments.append(has)
         }
         if !query.accounts.isEmpty {
-            filters.append("m.account_id IN (\(Array(repeating: "?", count: query.accounts.count).joined(separator: ",")))")
-            arguments.append(contentsOf: query.accounts.map(\.rawValue))
+            result.filters.append("m.account_id IN (\(Self.placeholders(query.accounts.count)))")
+            result.arguments.append(contentsOf: query.accounts.map(\.rawValue))
         }
         if let since = query.since {
-            filters.append("m.internal_date >= ?")
-            arguments.append(Int(since.timeIntervalSince1970))
+            result.filters.append("m.internal_date >= ?")
+            result.arguments.append(Int(since.timeIntervalSince1970))
         }
         if let before = query.before {
-            filters.append("m.internal_date < ?")
-            arguments.append(Int(before.timeIntervalSince1970))
+            result.filters.append("m.internal_date < ?")
+            result.arguments.append(Int(before.timeIntervalSince1970))
         }
         switch query.spam {
         case .hide:
             // Most archives hold no spam; then the filter is skipped, keeping the fastest query shape.
             if try Bool.fetchOne(db, sql: "SELECT EXISTS (SELECT 1 FROM messages WHERE source_state = 'spam')") == true {
-                filters.append("m.source_state != 'spam'")
+                result.filters.append("m.source_state != 'spam'")
             }
-        case .only: filters.append("m.source_state = 'spam'")
+        case .only: result.filters.append("m.source_state = 'spam'")
         case .include: break
         }
+        if let place = query.place {
+            let ids = try placeIDs(db, place, accounts: query.accounts)
+            if ids.isEmpty {
+                result.matchesNothing = true
+            } else {
+                // EXISTS, not `m.id IN (subquery)`: the IN form is catastrophically slow beside FTS (D-206).
+                result.filters.append("""
+                    EXISTS (SELECT 1 FROM message_folders mf WHERE mf.message_id = m.id \
+                    AND mf.folder_id IN (\(Self.placeholders(ids.count))) AND mf.removed_from_server_at IS NULL)
+                    """)
+                result.arguments.append(contentsOf: ids)
+                result.placeIDs = ids
+            }
+        }
+        return result
+    }
+
+    /// The folders and labels a place filter means, within the given accounts (all if empty).
+    func placeIDs(_ db: Database, _ place: SearchQuery.PlaceFilter, accounts: [AccountID]) throws -> [FolderID] {
+        switch place {
+        case .folder(let id):
+            return [id]
+        case .named(let name):
+            let wanted = name.trimmingCharacters(in: .whitespaces)
+            guard !wanted.isEmpty else { return [] }
+            let rows = try Row.fetchAll(db, sql: """
+                SELECT id, account_id, name, special_use FROM folders
+                \(accounts.isEmpty ? "" : "WHERE account_id IN (\(Self.placeholders(accounts.count)))")
+                """, arguments: StatementArguments(accounts.map(\.rawValue)))
+            return rows.filter { row in
+                let folder: String = row["name"]
+                let specialUse: String? = row["special_use"]
+                return Self.sameName(folder, wanted) || Self.sameName(folder, "\\" + wanted)
+                    || specialUse.map { Self.sameName($0, "\\" + wanted) } == true
+            }.map { $0["id"] }
+        }
+    }
+
+    static func sameName(_ a: String, _ b: String) -> Bool {
+        a.compare(b, options: [.caseInsensitive]) == .orderedSame
+    }
+
+    static func placeholders(_ count: Int) -> String {
+        Array(repeating: "?", count: count).joined(separator: ",")
+    }
+
+    func count(_ db: Database, _ query: SearchQuery) throws -> Int {
+        let conditions = try conditions(db, query)
+        if conditions.matchesNothing { return 0 }
+        if let match = Self.matchExpression(query) {
+            if conditions.filters.isEmpty {
+                return try Int.fetchOne(db, sql: "SELECT count(*) FROM messages_fts WHERE messages_fts MATCH ?",
+                                        arguments: [match]) ?? 0
+            }
+            return try Int.fetchOne(db, sql: """
+                SELECT count(*) FROM messages_fts JOIN messages m ON m.id = messages_fts.rowid
+                WHERE messages_fts MATCH ? AND \(conditions.filters.joined(separator: " AND "))
+                """, arguments: StatementArguments([match] + conditions.arguments)) ?? 0
+        }
+        if let place = conditions.placeIDs {
+            // Counting every match: start from the folder's rows rather than test every message (D-079).
+            // A plain `IN` is safe here; only `rowid IN` beside FTS is slow (D-206).
+            let rest = conditions.filters.dropLast()
+            return try Int.fetchOne(db, sql: """
+                SELECT count(*) FROM messages m WHERE m.id IN (SELECT mf.message_id FROM message_folders mf
+                    WHERE mf.folder_id IN (\(Self.placeholders(place.count))) AND mf.removed_from_server_at IS NULL)
+                \(rest.map { "AND \($0)" }.joined(separator: " "))
+                """, arguments: StatementArguments(place + conditions.arguments.dropLast(place.count))) ?? 0
+        }
+        return try Int.fetchOne(db, sql: "SELECT count(*) FROM messages m \(conditions.whereClause)",
+                                arguments: StatementArguments(conditions.arguments)) ?? 0
+    }
+
+    func search(_ db: Database, _ query: SearchQuery) throws -> [SearchHit] {
+        let conditions = try conditions(db, query)
+        if conditions.matchesNothing { return [] }
+        let filters = conditions.filters
+        let arguments = conditions.arguments
         let limit = max(0, min(query.limit, 1000))
         let offset = max(0, query.offset)
 
@@ -97,16 +198,13 @@ public final class MessageSearcher: MessageSearching, Sendable {
                     """, arguments: StatementArguments([match] + arguments + [limit, offset]))
             }
             ranked = rows.map { ($0["id"], $0["score"]) }
-        } else if query.hasAttachment != nil || !query.accounts.isEmpty || query.since != nil || query.before != nil
-                    || query.spam == .only {
-            // Filters only: newest first.
+        } else {
+            // No text: newest first, with or without filters (D-052, D-079).
             let rows = try Row.fetchAll(db, sql: """
-                SELECT m.id FROM messages m WHERE \(filters.joined(separator: " AND "))
-                ORDER BY m.internal_date DESC LIMIT ? OFFSET ?
+                SELECT m.id FROM messages m \(conditions.whereClause)
+                ORDER BY m.internal_date DESC, m.id DESC LIMIT ? OFFSET ?
                 """, arguments: StatementArguments(arguments + [limit, offset]))
             ranked = rows.map { ($0["id"], 0) }
-        } else {
-            return []
         }
         guard !ranked.isEmpty else { return [] }
 
@@ -161,5 +259,74 @@ public final class MessageSearcher: MessageSearching, Sendable {
                 ocrPending: row["ocr_pending"]
             )
         }
+    }
+
+    // MARK: Folders and threads (D-079)
+
+    /// Folders sync downloads (every Microsoft folder it keeps, Gmail's All Mail)
+    /// and Gmail labels: the places a search can be limited to. Folders sync
+    /// leaves out (Gmail's label folders, Junk, `\Noselect`, gone) hold no
+    /// current copies, so they are not offered.
+    func folders(_ db: Database, accounts: [AccountID]) throws -> [ArchiveFolder] {
+        var filters = ["f.is_selectable = 1", "(f.kind = 'label' OR f.skipped_reason IS NULL)"]
+        if !accounts.isEmpty { filters.append("f.account_id IN (\(Self.placeholders(accounts.count)))") }
+        return try Row.fetchAll(db, sql: """
+            SELECT f.id, f.account_id, f.name, f.kind, f.special_use, f.delimiter FROM folders f
+            WHERE \(filters.joined(separator: " AND "))
+            ORDER BY f.account_id, f.kind, f.name COLLATE NOCASE
+            """, arguments: StatementArguments(accounts.map(\.rawValue))).map { row in
+            ArchiveFolder(id: row["id"], accountID: AccountID(rawValue: row["account_id"]), name: row["name"],
+                          kind: ArchiveFolder.Kind(rawValue: row["kind"]) ?? .folder,
+                          specialUse: row["special_use"], delimiter: row["delimiter"])
+        }
+    }
+
+    /// The thread of a message within its own account, oldest first by arrival
+    /// (`internal_date`, then ID). Spam members are left out unless the message
+    /// asked about is spam itself. Longer than `MessageThread.maximumMessages`:
+    /// a window centred on the message asked about.
+    func thread(_ db: Database, of message: StoredMessageID) throws -> MessageThread? {
+        guard let row = try Row.fetchOne(db, sql: "SELECT account_id, thread_key, source_state FROM messages WHERE id = ?",
+                                         arguments: [message]) else { return nil }
+        let account: String = row["account_id"]
+        let threadKey: String? = row["thread_key"]
+        // `+m.account_id` keeps SQLite on the thread_key index; otherwise it walks
+        // (account_id, internal_date) for the ORDER BY, every message of the account (D-079).
+        var members = [message]
+        if let threadKey {
+            let spamRule = (row["source_state"] as String) == SourceState.spam.rawValue ? "" : "AND (m.source_state != 'spam' OR m.id = ?)"
+            members = try Int64.fetchAll(db, sql: """
+                SELECT m.id FROM messages m WHERE m.thread_key = ? AND +m.account_id = ? \(spamRule)
+                ORDER BY m.internal_date, m.id
+                """, arguments: StatementArguments([threadKey, account] + (spamRule.isEmpty ? [] : [message])))
+        }
+        guard let position = members.firstIndex(of: message) else { return nil }
+        let size = MessageThread.maximumMessages
+        let start = max(0, min(position - size / 2, members.count - size))
+        let window = Array(members[start..<min(members.count, start + size)])
+
+        let rows = try Row.fetchAll(db, sql: """
+            SELECT m.id, m.internal_date, m.subject, m.has_attachments, m.source_state,
+                   a.address AS from_address, ma.display_name AS from_name
+            FROM messages m
+            LEFT JOIN message_addresses ma ON ma.message_id = m.id AND ma.role = 'from' AND ma.position = 0
+            LEFT JOIN addresses a ON a.id = ma.address_id
+            WHERE m.id IN (\(Self.placeholders(window.count)))
+            """, arguments: StatementArguments(window))
+        var byID: [Int64: Row] = [:]
+        for row in rows { byID[row["id"]] = row }
+        let summaries = window.compactMap { id -> ThreadMessage? in
+            guard let row = byID[id] else { return nil }
+            let address: String? = row["from_address"]
+            return ThreadMessage(
+                messageID: id,
+                date: Date(timeIntervalSince1970: TimeInterval(row["internal_date"] as Int64)),
+                from: address.map { EmailAddress(name: row["from_name"], address: $0) },
+                subject: row["subject"],
+                sourceState: SourceState(rawValue: row["source_state"]) ?? .present,
+                hasAttachments: row["has_attachments"])
+        }
+        return MessageThread(accountID: AccountID(rawValue: account), threadKey: threadKey, messages: summaries,
+                             selectedIndex: position - start, totalCount: members.count)
     }
 }

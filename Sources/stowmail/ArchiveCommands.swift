@@ -85,22 +85,39 @@ struct Stats: AsyncParsableCommand {
 
 struct Search: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
-        abstract: "Search the archive.",
+        abstract: "Search the archive, or with no query list the newest mail.",
         discussion: """
             Free text with "phrases", prefix*, OR and -exclusions, plus filters: from: to: subject: \
-            has:attachment -has:attachment account:<id> after:YYYY-MM-DD before:YYYY-MM-DD. \
-            Mail marked as spam in the mailbox is left out; add in:spam for only that, or in:anywhere for everything.
+            has:attachment -has:attachment account:<id> after:YYYY-MM-DD before:YYYY-MM-DD in:<folder or label>. \
+            Mail marked as spam in the mailbox is left out; add in:spam for only that, or in:anywhere for everything. \
+            --folders lists the names in: accepts.
             """
     )
 
-    @Argument(help: "The query.") var query: String
+    @Argument(help: "The query. Leave out to list the newest mail.") var query = ""
     @Option(help: "Maximum results.") var limit = 20
+    @Option(help: "Skip this many results first.") var offset = 0
+    @Flag(help: "List the folders and labels in: can filter by, instead of searching.") var folders = false
 
     func run() async throws {
         let archive = try CLIArchive.open(readOnly: true)
+        let searcher = MessageSearcher(archive: archive)
+        if folders {
+            let accounts = CLIArchive.accounts(archive)
+            for folder in try await searcher.folders(accounts: []) {
+                let owner = (try? accounts.find(folder.accountID.rawValue))?.account.email ?? folder.accountID.rawValue
+                print("\(folder.id)  \(owner)  \(folder.kind.rawValue)  \(folder.name)\(folder.specialUse.map { "  (\($0))" } ?? "")")
+            }
+            return
+        }
+        var parsed = QueryParser.parse(query, limit: limit)
+        parsed.offset = offset
         let start = Date()
-        let hits = try await MessageSearcher(archive: archive).search(QueryParser.parse(query, limit: limit))
-        let elapsed = Date().timeIntervalSince(start)
+        let hits = try await searcher.search(parsed)
+        let searched = Date().timeIntervalSince(start)
+        let total = try await searcher.count(parsed)
+        let counted = Date().timeIntervalSince(start) - searched
+        print(total == 1 ? "1 email" : "\(total) emails")
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withFullDate]
         for hit in hits {
@@ -109,7 +126,34 @@ struct Search: AsyncParsableCommand {
             print("\(hit.messageID)  \(formatter.string(from: hit.date))  \(from)  \(hit.subject ?? "(no subject)")\(flags.isEmpty ? "" : "  [\(flags.joined(separator: ", "))]")")
             print("    \(hit.snippet)")
         }
-        print(String(format: "%d results in %.0f ms", hits.count, elapsed * 1000))
+        print(String(format: "%d shown in %.0f ms, counted in %.0f ms", hits.count, searched * 1000, counted * 1000))
+    }
+}
+
+struct ThreadCommand: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "thread",
+        abstract: "Show the conversation around one email, oldest first.",
+        discussion: "Takes a message ID from `stowmail search`. Spam in the conversation is left out unless the email itself is spam."
+    )
+
+    @Argument(help: "Message ID.") var message: Int64
+
+    func run() async throws {
+        let archive = try CLIArchive.open(readOnly: true)
+        guard let thread = try await MessageSearcher(archive: archive).thread(of: message) else {
+            throw ValidationError("No message with ID \(message).")
+        }
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withFullDate]
+        let shown = thread.truncated ? ", showing \(thread.messages.count) around this one" : ""
+        print("\(thread.totalCount) \(thread.totalCount == 1 ? "email" : "emails") in this conversation\(shown)")
+        for (index, item) in thread.messages.enumerated() {
+            let from = item.from.map { $0.name ?? $0.address } ?? "(no sender)"
+            let marks = [item.hasAttachments ? "attachments" : nil, item.sourceState == .present ? nil : item.sourceState.rawValue]
+                .compactMap { $0 }
+            print("\(index == thread.selectedIndex ? ">" : " ") \(item.messageID)  \(formatter.string(from: item.date))  \(from)  \(item.subject ?? "(no subject)")\(marks.isEmpty ? "" : "  [\(marks.joined(separator: ", "))]")")
+        }
     }
 }
 

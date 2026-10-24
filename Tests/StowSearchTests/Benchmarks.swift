@@ -64,18 +64,39 @@ struct Benchmarks {
             "\"\(generator.phrase)\"", String(generator.midWord.prefix(3)) + "*", "from:\(generator.sender)",
             "\(generator.midWord) has:attachment", "\(generator.commonWord) after:2020-01-01 before:2021-01-01",
             "zzzznotaword",
+            // D-079: browsing with no text, folder and label filters, with and without text.
+            "", "in:inbox", "in:\"\(MessageGenerator.rareLabel)\"", "\(generator.commonWord) in:inbox",
+            "\(generator.rareWord) in:inbox", "\(generator.commonWord) in:\"\(MessageGenerator.rareLabel)\"",
+            "in:inbox has:attachment after:2020-01-01 before:2021-01-01",
         ]
-        for query in queries {
-            _ = try await searcher.search(QueryParser.parse(query))  // warm the cache once
+        func best(_ run: () async throws -> Int) async throws -> (Int, Double) {
+            _ = try await run()  // warm the cache once
             var best = Double.infinity
-            var hits = 0
+            var result = 0
             for _ in 0..<3 {
                 let start = Date()
-                hits = try await searcher.search(QueryParser.parse(query)).count
+                result = try await run()
                 best = min(best, Date().timeIntervalSince(start))
             }
-            print(String(format: "BENCH search %-40@ %3d hits  %6.1f ms", query as NSString, hits, best * 1000))
-            #expect(best < 1.0, "\(query)")
+            return (result, best)
+        }
+        for query in queries {
+            let (hits, searched) = try await best { try await searcher.search(QueryParser.parse(query)).count }
+            let (total, counted) = try await best { try await searcher.count(QueryParser.parse(query)) }
+            print(String(format: "BENCH search %-40@ %3d hits  %6.1f ms   count %6d  %6.1f ms",
+                         "'\(query)'" as NSString, hits, searched * 1000, total, counted * 1000))
+            #expect(searched < 1.0, "\(query)")
+            #expect(counted < 1.0, "count \(query)")
+        }
+        let longest = try await archive.database.read { db in
+            try Int64.fetchOne(db, sql: "SELECT id FROM messages WHERE thread_key = (SELECT thread_key FROM messages GROUP BY thread_key ORDER BY count(*) DESC LIMIT 1) LIMIT 1")
+        }
+        if let longest {
+            let (size, took) = try await best { try await searcher.thread(of: longest)?.totalCount ?? 0 }
+            print(String(format: "BENCH thread of %d messages  %6.1f ms", size, took * 1000))
+            let (folders, listed) = try await best { try await searcher.folders(accounts: []).count }
+            print(String(format: "BENCH folders %d  %6.1f ms", folders, listed * 1000))
+            #expect(took < 0.1)
         }
         let stats = try ArchiveStats.collect(archive)
         print("BENCH archive: database \(stats.databaseBytes / 1_048_576) MB, raw stored \(stats.rawStoredBytes / 1_048_576) MB")
@@ -178,6 +199,7 @@ struct MessageGenerator {
     var rareWord: String { words[15_000] }
     var phrase: String { "\(words[1]) \(words[2])" }
     var sender: String { senders[42] }
+    static let rareLabel = "Project X"
 
     mutating func word() -> String {
         // Zipf-like: small indexes are far more common.
@@ -214,8 +236,12 @@ struct MessageGenerator {
             text += "Content-Type: text/plain; charset=utf-8\r\n\r\n\(body)\r\n"
         }
         let bytes = Data(text.utf8)
+        // About a fifth of the mail in the Inbox, one in a hundred under a user label; threads of up to 40 (D-079).
+        var labels: [String] = []
+        if uid % 5 == 0 { labels.append("\\Inbox") }
+        if uid % 100 == 0 { labels.append(Self.rareLabel) }
         return RawMessage(key: RawMessageKey(accountID: Benchmarks.account, folder: "[Gmail]/All Mail", uidValidity: 1, uid: uid),
-                          internalDate: date, size: bytes.count, bytes: bytes)
+                          labels: labels, gmailThreadID: UInt64(uid / 40 + 1), internalDate: date, size: bytes.count, bytes: bytes)
     }
 
     static func rfc5322(_ date: Date) -> String {

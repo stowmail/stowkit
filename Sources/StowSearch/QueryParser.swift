@@ -11,6 +11,9 @@ import StowCore
 /// - `after:` / `since:` (inclusive) and `before:` (exclusive), as `YYYY-MM-DD` in UTC
 /// - `in:spam` (only mail marked as spam at the provider) and `in:anywhere`
 ///   (spam too); by default spam is left out (D-022)
+/// - `in:<folder or label>`, quoted if it has spaces (`in:"Project X"`): only
+///   mail currently there (D-079). `in:spam` and `in:anywhere` keep their
+///   meaning even if a folder has that name.
 ///
 /// Everything else is free text: words, `"quoted phrases"`, `prefix*`, `OR`
 /// and `-excluded` words (see `FTSExpression`). Unknown `name:value` words are
@@ -41,6 +44,7 @@ public enum QueryParser {
                     case "account": query.accounts.append(AccountID(rawValue: value)); continue
                     case "in" where value.lowercased() == "spam": query.spam = .only; continue
                     case "in" where value.lowercased() == "anywhere": query.spam = .include; continue
+                    case "in": query.place = .named(value); continue
                     case "after", "since":
                         if let date = day(value) { query.since = date; continue }
                     case "before":

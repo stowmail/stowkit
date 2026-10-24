@@ -38,6 +38,6 @@ import Testing
         #expect(try await subjects("quince in:spam") == ["Quince 1"])
         #expect(try await subjects("quince in:anywhere") == ["Quince 1", "Quince 2"])
         #expect(try await subjects("in:spam") == ["Quince 1"])
-        #expect(QueryParser.parse("in:inbox quince").text == "in:inbox quince") // other in: values stay free text
+        #expect(QueryParser.parse("in:inbox quince").text == "quince")  // other in: values name a folder (D-079)
     }
 }

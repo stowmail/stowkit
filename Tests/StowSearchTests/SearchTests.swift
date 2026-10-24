@@ -122,7 +122,9 @@ final class SearchFixture: @unchecked Sendable {
         for input in ["\"", "*", "AND", "OR", "NOT", "(", ")", "{subject}:", "a\"b", "^", "-", "NEAR(a b)", "' OR 1=1 --", "subject:"] {
             _ = try await fixture.search(input)
         }
-        #expect(try await fixture.search("").isEmpty)
+        // No text: everything, newest first (D-079).
+        let total = try await fixture.archive.database.read { db in try Int.fetchOne(db, sql: "SELECT count(*) FROM messages") }
+        #expect(try await fixture.search("").count == total)
     }
 
     @Test func paging() async throws {
