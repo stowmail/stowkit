@@ -72,11 +72,11 @@ public enum FileVault {
 
 /// Stores small secrets as generic password items in the macOS Keychain.
 ///
-/// Every item is filed under one service name (`uk.getstow.stow` by default)
+/// Every item is filed under one service name (`ee.getstow.stow` by default)
 /// and an item name such as `oauth.<account id>`. Items are created
 /// `AfterFirstUnlockThisDeviceOnly` and not synchronisable (D-007).
 public struct KeychainStore: Sendable {
-    public static let defaultService = "uk.getstow.stow"
+    public static let defaultService = "ee.getstow.stow"
 
     public let service: String
     public let backend: KeychainBackend

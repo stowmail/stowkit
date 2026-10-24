@@ -27,7 +27,7 @@ if [ -f "$STAMP" ] && [ "$(cat "$STAMP")" = "$VERSION $CHECKSUM" ] && [ -d "$FRA
     exit 0
 fi
 
-CACHE="$HOME/Library/Caches/uk.getstow.dev"
+CACHE="$HOME/Library/Caches/ee.getstow.dev"
 ZIP="$CACHE/SQLCipher-$VERSION.xcframework.zip"
 mkdir -p "$CACHE"
 if [ ! -f "$ZIP" ] || [ "$(shasum -a 256 "$ZIP" | cut -d' ' -f1)" != "$CHECKSUM" ]; then

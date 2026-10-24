@@ -14,7 +14,7 @@ public actor TokenProvider {
     let registry: any AccountDirectory
     let clientFor: @Sendable (Provider) throws -> OAuthClient
     let now: @Sendable () -> Date
-    private let logger = Logger(label: "uk.getstow.sync.tokens")
+    private let logger = Logger(label: "ee.getstow.sync.tokens")
 
     public init(
         tokenStore: TokenStore,

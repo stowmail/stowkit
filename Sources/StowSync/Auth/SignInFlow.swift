@@ -14,7 +14,7 @@ import StowCore
 public struct SignInFlow: Sendable {
     public let client: OAuthClient
     public let timeout: TimeInterval
-    private let logger = Logger(label: "uk.getstow.sync.signin")
+    private let logger = Logger(label: "ee.getstow.sync.signin")
 
     public init(client: OAuthClient, timeout: TimeInterval = LoopbackListener.defaultTimeout) {
         self.client = client

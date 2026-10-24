@@ -21,7 +21,7 @@ public enum LaunchAgentError: Error, Equatable, CustomStringConvertible {
 /// all of them paths or switches. Client IDs stay in the `.env` file it names,
 /// tokens and keys in the Keychain.
 public enum LaunchAgent {
-    public static let label = "uk.getstow.stowmail.daemon"
+    public static let label = "ee.getstow.stowmail.daemon"
 
     /// The only environment variables copied into the plist. None holds a secret.
     public static let allowedEnvironment = ["STOW_KEYCHAIN", "STOW_ENV_FILE", "STOW_ARCHIVE_DIR", "STOW_KEYCHAIN_SERVICE", "STOW_LOG_LEVEL"]

@@ -62,7 +62,7 @@ public actor Scheduler {
     let power: @Sendable () -> PowerState
     let now: @Sendable () -> Date
     let sleep: @Sendable (TimeInterval) async throws -> Void
-    private let logger = Logger(label: "uk.getstow.engine.scheduler")
+    private let logger = Logger(label: "ee.getstow.engine.scheduler")
 
     private var notBefore: [AccountID: Date] = [:]
     private var failures: [AccountID: Int] = [:]

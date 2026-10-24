@@ -97,7 +97,7 @@ public final class FakeIMAPServer: @unchecked Sendable {
     /// How many times each UID's body was sent.
     public var bodiesServed: [UInt32: Int] { sync { _served } }
 
-    private let queue = DispatchQueue(label: "uk.getstow.tests.fake-imap")
+    private let queue = DispatchQueue(label: "ee.getstow.tests.fake-imap")
     private var listener: NWListener?
     private var _mailboxes: [Mailbox] = []
     private var _capabilities = ["IMAP4rev1", "X-GM-EXT-1", "AUTH=XOAUTH2", "SASL-IR", "UIDPLUS"]

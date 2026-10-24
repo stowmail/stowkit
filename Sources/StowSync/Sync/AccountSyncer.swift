@@ -144,7 +144,7 @@ public struct AccountSyncer: Sendable {
     let retry: RetryPolicy
     let sleep: @Sendable (TimeInterval) async throws -> Void
     let now: @Sendable () -> Date
-    private let logger = Logger(label: "uk.getstow.sync.account")
+    private let logger = Logger(label: "ee.getstow.sync.account")
 
     public static let defaultUnfetchableThreshold = 3
 

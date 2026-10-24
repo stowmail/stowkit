@@ -91,7 +91,7 @@ public struct RecoveryKey: Sendable, Equatable {
 
     /// Four check characters from a hash of the key.
     var check: String {
-        let digest = Array(SHA256.hash(data: Data("uk.getstow.recovery.check".utf8) + bytes))
+        let digest = Array(SHA256.hash(data: Data("ee.getstow.recovery.check".utf8) + bytes))
         let value = Int(digest[0]) << 12 | Int(digest[1]) << 4 | Int(digest[2]) >> 4
         return String((0..<4).map { Self.alphabet[(value >> (15 - $0 * 5)) & 31] })
     }
@@ -162,7 +162,7 @@ public enum RecoveryBundleError: Error, Equatable, CustomStringConvertible {
 public struct RecoveryBundle: Sendable {
     public static let fileName = "keys.recovery"
     static let version = 1
-    static let info = Data("uk.getstow.recovery.v1".utf8)
+    static let info = Data("ee.getstow.recovery.v1".utf8)
 
     struct File: Codable {
         var format: String
@@ -186,7 +186,7 @@ public struct RecoveryBundle: Sendable {
             databaseKey: keys.databaseKeyData, fileKey: keys.fileKey.withUnsafeBytes { Data($0) }))
         let sealed = try AES.GCM.seal(contents, using: wrappingKey(recoveryKey, salt: salt), authenticating: authenticated(archiveID))
         guard let combined = sealed.combined else { throw RecoveryBundleError.unreadable }
-        let file = File(format: "uk.getstow.recovery", version: version, archiveID: archiveID, createdAt: Date(), salt: salt, sealed: combined)
+        let file = File(format: "ee.getstow.recovery", version: version, archiveID: archiveID, createdAt: Date(), salt: salt, sealed: combined)
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         encoder.dateEncodingStrategy = .iso8601
@@ -233,7 +233,7 @@ public struct RecoveryBundle: Sendable {
         }
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
-        guard let file = try? decoder.decode(File.self, from: data), file.format == "uk.getstow.recovery" else {
+        guard let file = try? decoder.decode(File.self, from: data), file.format == "ee.getstow.recovery" else {
             throw RecoveryBundleError.unreadable
         }
         guard file.version == version else { throw RecoveryBundleError.unsupportedVersion(file.version) }
@@ -245,6 +245,6 @@ public struct RecoveryBundle: Sendable {
     }
 
     static func authenticated(_ archiveID: String) -> Data {
-        Data("uk.getstow.recovery.v1|\(archiveID)".utf8)
+        Data("ee.getstow.recovery.v1|\(archiveID)".utf8)
     }
 }

@@ -12,7 +12,7 @@ import StowTestSupport
 import Testing
 
 func testKeychain() -> KeychainStore {
-    KeychainStore(service: "uk.getstow.stow.tests.\(UUID().uuidString)", backend: .file, fileVaultIsOn: { true })
+    KeychainStore(service: "ee.getstow.stow.tests.\(UUID().uuidString)", backend: .file, fileVaultIsOn: { true })
 }
 
 /// Step 1a (D-007, D-031): the recovery key, end to end.
@@ -291,7 +291,7 @@ func testKeychain() -> KeychainStore {
 
     @Test func retentionStepsMatchTheMailbox() throws {
         #expect(RetentionGuide.kind(provider: .gmail, email: "sam@gmail.com") == .gmail)
-        #expect(RetentionGuide.kind(provider: .gmail, email: "sam@getstow.uk") == .googleWorkspace)
+        #expect(RetentionGuide.kind(provider: .gmail, email: "sam@getstow.ee") == .googleWorkspace)
         #expect(RetentionGuide.kind(provider: .microsoft, email: "sam@outlook.com") == .outlookCom)
         #expect(RetentionGuide.kind(provider: .microsoft, email: "sam@company.example") == .microsoft365)
         let date = try #require(ISO8601DateFormatter().date(from: "2025-10-13T12:00:00Z"))

@@ -99,7 +99,7 @@ public final class Importer: Sendable {
     /// False only for measuring import speed without inline extraction (QA checklist).
     let extractText: Bool
     let classifier: RuleClassifier?
-    let logger = Logger(label: "uk.getstow.store.import")
+    let logger = Logger(label: "ee.getstow.store.import")
 
     public init(archive: Archive, extractText: Bool = true, classifier: RuleClassifier? = nil) {
         self.archive = archive

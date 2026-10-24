@@ -160,7 +160,7 @@ import Testing
     }
 
     @Test func aChosenFolderIsRememberedAndAnAbsentArchiveIsOffline() throws {
-        let defaults = try #require(UserDefaults(suiteName: "uk.getstow.tests.\(UUID().uuidString)"))
+        let defaults = try #require(UserDefaults(suiteName: "ee.getstow.tests.\(UUID().uuidString)"))
         let settings = ArchiveSettings(defaults: defaults)
         #expect(settings.chosenFolder == nil)
         let folder = URL(fileURLWithPath: "/Volumes/NotConnected/Stow", isDirectory: true)

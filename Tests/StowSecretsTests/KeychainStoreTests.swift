@@ -7,7 +7,7 @@ import Testing
 /// under it afterwards, and check that nothing is left behind. Tests store
 /// only fake values, so they skip the FileVault requirement.
 func makeTestKeychain(_ backend: KeychainBackend = .file) -> KeychainStore {
-    KeychainStore(service: "uk.getstow.stow.tests.\(UUID().uuidString)", backend: backend, fileVaultIsOn: { true })
+    KeychainStore(service: "ee.getstow.stow.tests.\(UUID().uuidString)", backend: backend, fileVaultIsOn: { true })
 }
 
 /// True when this binary may use the data protection keychain (it is signed
@@ -71,7 +71,7 @@ let dataProtectionAvailable: Bool = {
     }
 
     @Test func loginKeychainNeedsFileVault() throws {
-        let keychain = KeychainStore(service: "uk.getstow.stow.tests.\(UUID().uuidString)", backend: .file, fileVaultIsOn: { false })
+        let keychain = KeychainStore(service: "ee.getstow.stow.tests.\(UUID().uuidString)", backend: .file, fileVaultIsOn: { false })
         defer { try? keychain.deleteAll() }
         #expect(throws: KeychainError.fileVaultRequired) { try keychain.set(Data("x".utf8), for: "item") }
         #expect(throws: KeychainError.fileVaultRequired) { try keychain.get("item") }

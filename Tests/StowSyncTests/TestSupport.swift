@@ -26,7 +26,7 @@ enum Fixtures {
 
 /// A Keychain under a throwaway service name; callers delete it afterwards.
 func makeTestKeychain() -> KeychainStore {
-    KeychainStore(service: "uk.getstow.stow.tests.\(UUID().uuidString)", backend: .file, fileVaultIsOn: { true })
+    KeychainStore(service: "ee.getstow.stow.tests.\(UUID().uuidString)", backend: .file, fileVaultIsOn: { true })
 }
 
 func temporaryDirectory(_ suffix: String = "") -> URL {

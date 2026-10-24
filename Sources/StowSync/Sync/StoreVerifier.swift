@@ -46,7 +46,7 @@ public struct StoreVerifier: Sendable {
     let source: RawMessageSource
     let budget: ByteBudget
     let chunkSize: Int
-    private let logger = Logger(label: "uk.getstow.sync.verify")
+    private let logger = Logger(label: "ee.getstow.sync.verify")
 
     public init(
         account: Account,

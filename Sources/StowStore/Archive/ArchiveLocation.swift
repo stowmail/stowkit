@@ -179,13 +179,13 @@ public struct ArchiveLocation: Sendable, Equatable {
 }
 
 /// Where the user's chosen archive folder is remembered (D-035): the
-/// `uk.getstow.stow` preferences domain. The path is not secret. The app
+/// `ee.getstow.stow` preferences domain. The path is not secret. The app
 /// (Phase 5) keeps a security-scoped bookmark instead.
 public struct ArchiveSettings: @unchecked Sendable {
     static let key = "archiveFolder"
     let defaults: UserDefaults
 
-    public init(defaults: UserDefaults = UserDefaults(suiteName: "uk.getstow.stow") ?? .standard) {
+    public init(defaults: UserDefaults = UserDefaults(suiteName: "ee.getstow.stow") ?? .standard) {
         self.defaults = defaults
     }
 

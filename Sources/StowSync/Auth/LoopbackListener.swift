@@ -40,7 +40,7 @@ public final class LoopbackListener: @unchecked Sendable {
     static let maximumRequestBytes = 16 * 1024
 
     private let listener: NWListener
-    private let queue = DispatchQueue(label: "uk.getstow.oauth-loopback")
+    private let queue = DispatchQueue(label: "ee.getstow.oauth-loopback")
     private let expectedState: String
     private var outcome: Result<String, LoopbackError>?
     private var waiter: CheckedContinuation<String, Error>?

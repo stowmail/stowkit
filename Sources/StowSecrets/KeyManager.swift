@@ -27,18 +27,18 @@ public struct ArchiveKeys: Sendable {
 
     /// AES-GCM key for attachment and raw message files.
     public var fileEncryptionKey: SymmetricKey {
-        derive(info: "uk.getstow.file-encryption.v1")
+        derive(info: "ee.getstow.file-encryption.v1")
     }
 
     /// HMAC-SHA256 key for naming attachment files by content.
     public var fileNamingKey: SymmetricKey {
-        derive(info: "uk.getstow.file-naming.v1")
+        derive(info: "ee.getstow.file-naming.v1")
     }
 
     private func derive(info: String) -> SymmetricKey {
         HKDF<SHA256>.deriveKey(
             inputKeyMaterial: fileKey,
-            salt: Data("uk.getstow.stow".utf8),
+            salt: Data("ee.getstow.stow".utf8),
             info: Data(info.utf8),
             outputByteCount: 32
         )

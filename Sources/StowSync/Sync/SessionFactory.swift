@@ -11,7 +11,7 @@ public struct SessionFactory: Sendable {
     public let endpoint: IMAPEndpoint
     public let timeouts: IMAPTimeouts
     let tokens: TokenProvider
-    private let logger = Logger(label: "uk.getstow.sync.session")
+    private let logger = Logger(label: "ee.getstow.sync.session")
 
     public init(account: Account, endpoint: IMAPEndpoint, tokens: TokenProvider, timeouts: IMAPTimeouts = .default) {
         self.account = account

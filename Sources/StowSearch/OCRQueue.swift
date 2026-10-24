@@ -37,7 +37,7 @@ public final class OCRQueue: Sendable {
 
     let archive: Archive
     let recogniser: @Sendable (CGImage) throws -> String
-    let logger = Logger(label: "uk.getstow.search.ocr")
+    let logger = Logger(label: "ee.getstow.search.ocr")
 
     public init(archive: Archive) {
         self.archive = archive

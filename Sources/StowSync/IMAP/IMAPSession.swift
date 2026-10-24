@@ -20,7 +20,7 @@ public actor IMAPSession {
     private var knownCapabilities: Set<String>?
     private var lastBye: String?
     private var loggedOut = false
-    private let logger = Logger(label: "uk.getstow.sync.imap")
+    private let logger = Logger(label: "ee.getstow.sync.imap")
 
     private init(connection: IMAPConnection) {
         self.connection = connection
