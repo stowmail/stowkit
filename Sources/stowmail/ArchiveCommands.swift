@@ -124,7 +124,8 @@ struct Search: AsyncParsableCommand {
             let from = hit.from.map { $0.name ?? $0.address } ?? "(no sender)"
             let flags = [hit.hasAttachments ? "attachments" : nil, hit.ocrPending ? "OCR pending" : nil].compactMap { $0 }
             print("\(hit.messageID)  \(formatter.string(from: hit.date))  \(from)  \(hit.subject ?? "(no subject)")\(flags.isEmpty ? "" : "  [\(flags.joined(separator: ", "))]")")
-            print("    \(hit.snippet)")
+            // With no text the snippet is just the subject again.
+            if hit.snippet != (hit.subject ?? "") { print("    \(hit.snippet)") }
         }
         print(String(format: "%d shown in %.0f ms, counted in %.0f ms", hits.count, searched * 1000, counted * 1000))
     }
