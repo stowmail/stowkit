@@ -34,7 +34,7 @@ public enum LaunchAgent {
         FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Logs/Stow", isDirectory: true)
     }
 
-    /// Where `install` puts the copy of `stowmail` that launchd runs. A build
+    /// Where `install` puts the copy of `stowmail` (with its frameworks and resource bundles) that launchd runs. A build
     /// replaces the file in `.build`, and with the file-based Keychain (D-012)
     /// macOS trusts one exact binary, so running the build output would make
     /// every rebuild ask for the login password again.
@@ -74,7 +74,11 @@ public enum LaunchAgent {
     public static func install(executable: URL, environment: [String: String]) throws {
         try FileManager.default.createDirectory(at: logDirectory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         try FileManager.default.createDirectory(at: plistURL.deletingLastPathComponent(), withIntermediateDirectories: true)
-        if isLoaded() { _ = try? launchctl(["bootout", "gui/\(getuid())/\(label)"]) }
+        if isLoaded() {
+            _ = try? launchctl(["bootout", "gui/\(getuid())/\(label)"])
+            // bootout returns before the agent is gone; bootstrapping too soon fails with error 5.
+            for _ in 0..<50 where isLoaded() { usleep(200_000) }
+        }
         try copyExecutable(executable, to: installedExecutable)
         try createPrivateFile(outputLog)
         try encoded(executable: installedExecutable, environment: environment).write(to: plistURL, options: .atomic)
@@ -87,23 +91,37 @@ public enum LaunchAgent {
     public static func uninstall() throws {
         if isLoaded() { _ = try launchctl(["bootout", "gui/\(getuid())/\(label)"]) }
         if FileManager.default.fileExists(atPath: plistURL.path) { try FileManager.default.removeItem(at: plistURL) }
-        if FileManager.default.fileExists(atPath: installedExecutable.path) { try FileManager.default.removeItem(at: installedExecutable) }
+        let folder = installedExecutable.deletingLastPathComponent()
+        if FileManager.default.fileExists(atPath: folder.path) { try FileManager.default.removeItem(at: folder) }
     }
 
-    /// Copies the binary beside its destination, then moves it into place in one
-    /// step, so a running copy is never overwritten in place. Same bytes, same
-    /// code signature.
+    /// Copies the binary, and the frameworks and resource bundles beside it
+    /// (SQLCipher, which it loads from `@loader_path`, and SwiftPM's resource
+    /// bundles, such as the rules), into a fresh folder, then swaps that folder
+    /// into place. Same bytes, same code signature.
     static func copyExecutable(_ source: URL, to destination: URL) throws {
         let manager = FileManager.default
         guard source.standardizedFileURL != destination.standardizedFileURL else { return }
-        try manager.createDirectory(at: destination.deletingLastPathComponent(), withIntermediateDirectories: true,
-                                    attributes: [.posixPermissions: 0o700])
-        let staging = destination.deletingLastPathComponent().appendingPathComponent(".\(destination.lastPathComponent).\(UUID().uuidString)")
-        try manager.copyItem(at: source, to: staging)
-        guard rename(staging.path, destination.path) == 0 else {
+        let folder = destination.deletingLastPathComponent()
+        let parent = folder.deletingLastPathComponent()
+        try manager.createDirectory(at: parent, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        let staging = parent.appendingPathComponent(".\(folder.lastPathComponent).\(UUID().uuidString)")
+        let retired = parent.appendingPathComponent(".\(folder.lastPathComponent).old.\(UUID().uuidString)")
+        try manager.createDirectory(at: staging, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+        do {
+            try manager.copyItem(at: source, to: staging.appendingPathComponent(destination.lastPathComponent))
+            for name in try manager.contentsOfDirectory(atPath: source.deletingLastPathComponent().path)
+            where name.hasSuffix(".framework") || name.hasSuffix(".bundle") {
+                try manager.copyItem(at: source.deletingLastPathComponent().appendingPathComponent(name),
+                                     to: staging.appendingPathComponent(name))
+            }
+            if manager.fileExists(atPath: folder.path) { try manager.moveItem(at: folder, to: retired) }
+            try manager.moveItem(at: staging, to: folder)
+        } catch {
             try? manager.removeItem(at: staging)
-            throw CocoaError(.fileWriteUnknown)
+            throw error
         }
+        try? manager.removeItem(at: retired)
     }
 
     /// launchd appends to an existing file and keeps its mode, so create it 0600 first.

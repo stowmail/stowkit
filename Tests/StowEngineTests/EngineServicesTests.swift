@@ -273,16 +273,26 @@ func testKeychain() -> KeychainStore {
     @Test func installCopiesTheBinaryAndKeepsTheLogPrivate() throws {
         let root = TestFixtures.temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: root) }
-        let build = root.appendingPathComponent(".build/stowmail")
-        try FileManager.default.createDirectory(at: build.deletingLastPathComponent(), withIntermediateDirectories: true)
+        let products = root.appendingPathComponent(".build/Debug")
+        let build = products.appendingPathComponent("stowmail")
+        for folder in ["SQLCipher.framework/Versions/A", "SQLCipher.framework.dSYM", "StowKit_StowRules.bundle", "StowSyncTests.xctest"] {
+            try FileManager.default.createDirectory(at: products.appendingPathComponent(folder), withIntermediateDirectories: true)
+        }
+        try Data("library".utf8).write(to: products.appendingPathComponent("SQLCipher.framework/Versions/A/SQLCipher"))
+        try Data("rules".utf8).write(to: products.appendingPathComponent("StowKit_StowRules.bundle/rules.json"))
+        try Data().write(to: products.appendingPathComponent("libStowCore.a"))
         try Data("first build".utf8).write(to: build)
-        let installed = root.appendingPathComponent("bin/stowmail")
+        let installed = root.appendingPathComponent("support/bin/stowmail")
         try LaunchAgent.copyExecutable(build, to: installed)
         try Data("second build".utf8).write(to: build)
         #expect(try Data(contentsOf: installed) == Data("first build".utf8))
         try LaunchAgent.copyExecutable(build, to: installed)
         #expect(try Data(contentsOf: installed) == Data("second build".utf8))
-        #expect(try FileManager.default.contentsOfDirectory(atPath: installed.deletingLastPathComponent().path) == ["stowmail"])
+        // What the binary loads beside itself comes too; debug symbols, tests and static libraries do not.
+        let bin = installed.deletingLastPathComponent()
+        #expect(Set(try FileManager.default.contentsOfDirectory(atPath: bin.path)) == ["stowmail", "SQLCipher.framework", "StowKit_StowRules.bundle"])
+        #expect(try Data(contentsOf: bin.appendingPathComponent("SQLCipher.framework/Versions/A/SQLCipher")) == Data("library".utf8))
+        #expect(try FileManager.default.contentsOfDirectory(atPath: bin.deletingLastPathComponent().path) == ["bin"])
 
         let log = root.appendingPathComponent("daemon.out.log")
         FileManager.default.createFile(atPath: log.path, contents: nil, attributes: [.posixPermissions: 0o644])
