@@ -4,7 +4,7 @@ The engine behind Stow: a local, encrypted, searchable email archive for macOS.
 IMAP sync with OAuth, encrypted SQLite storage, full-text search, bulk-mail
 rules and a local MCP server. No UI code lives here.
 
-Status: Phase 2 (integration: sync into the encrypted archive, scheduler, background sync). Private until the Phase 4 security review.
+Status: Phase 3 (local MCP server) built on Phase 2's sync, archive and search. Private until the Phase 4 security review.
 
 ## Requirements
 
@@ -34,7 +34,7 @@ the macOS Keychain only.
 | `StowStore` | MIME parsing, encrypted database, skeletons and attachment files, the sync sink and state, accounts, tidy-up, coverage, verify, export, archive location. |
 | `StowSearch` | FTS5 search, text extraction and OCR. |
 | `StowRules` | Bulk-mail signals and rules, from headers only. |
-| `StowMCP` | Local, read-only MCP server. |
+| `StowMCP` | Local, read-only MCP server: four tools, per-account access, an audit log. |
 | `StowEngine` | Joins sync, storage and rules: the scheduler and background sync, archive setup and recovery, rules over the archive, logs. Used by the CLI and the app. |
 | `stowmail` | The command-line tool. |
 
@@ -65,8 +65,73 @@ Error text from servers or libraries goes through `Redact.scrub` first.
 | swift-nio (`NIOCore`) | Channel types used by the IMAP connection; already required by the two above (D-101) |
 | swift-argument-parser | CLI |
 | swift-log | Logging API |
+| MCP Swift SDK (0.12.x) | The MCP protocol for `stowmail mcp`, stdio transport only (D-080). Brings in `swift-system` and `eventsource` |
 | GRDB 7.11.1, vendored in `Vendor/GRDB` | SQLite access and migrations, built against SQLCipher |
 | SQLCipher 4.19.0, `Vendor/SQLCipher` | Encrypted SQLite (Zetetic's official framework, fetched and verified by `scripts/fetch-sqlcipher.sh`) |
+
+## Using the archive from Claude (MCP)
+
+`stowmail mcp` is a local MCP server: an assistant app on this Mac (Claude
+Desktop, Claude Code or any MCP client) starts it and talks to it over standard
+input and output. It can search and read the archive, never change it, and has
+no network connection of its own. What it returns goes to the assistant, and so
+to the assistant's provider, when you ask a question.
+
+1. **Turn it on for an account.** Every account is hidden until you do:
+
+   ```sh
+   stowmail mcp enable <account>    # ID, address or name from `stowmail account list`
+   stowmail mcp status              # which accounts assistants can see
+   stowmail mcp disable <account>   # hidden again from the next request
+   ```
+
+2. **Add it to the assistant.** `stowmail mcp config` prints both snippets below
+   with the right path and environment filled in.
+
+   **Claude Desktop:** add to `~/Library/Application Support/Claude/claude_desktop_config.json`
+   (inside `mcpServers` if the file already has it), then quit and reopen Claude:
+
+   ```json
+   {
+     "mcpServers": {
+       "stow": {
+         "command": "/Users/<you>/Library/Application Support/ee.getstow.dev/bin/stowmail",
+         "args": ["mcp"],
+         "env": { "STOW_KEYCHAIN": "file" }
+       }
+     }
+   }
+   ```
+
+   **Claude Code:** run once (`--scope user` makes it available in every project), then check with `claude mcp list`:
+
+   ```sh
+   claude mcp add-json --scope user stow '{"type":"stdio","command":"/Users/<you>/Library/Application Support/ee.getstow.dev/bin/stowmail","args":["mcp"],"env":{"STOW_KEYCHAIN":"file"}}'
+   ```
+
+   The path is the background sync's copy of `stowmail` (`stowmail daemon install`).
+   `STOW_KEYCHAIN=file` is needed while builds are unsigned (D-012); add
+   `STOW_ARCHIVE_DIR` too if your archive is not in the default place.
+
+3. **Keychain prompt.** Unsigned builds use the login keychain, which trusts one
+   exact binary. The daemon's copy is already trusted, so normally there is no
+   prompt. After `stowmail daemon install` replaces it, the first request shows
+   one macOS dialog for `key.database.v1`; choose Always Allow. The request waits
+   until you answer, so the assistant may report a timeout once.
+
+**Tools:** `list_folders` (accounts, email counts, folder and label names),
+`search_messages` (words plus `from`, `to`, `subject`, `has_attachment`,
+`account`, `folder`, `after`, `before`; up to 50 results and the total),
+`get_thread` (the conversation around a message, with bodies of the nearest
+few, capped) and `get_attachment` (an attachment's extracted text, in pages;
+never the file). Mail marked as spam is left out.
+
+**Audit log:** every request is a line in `~/Library/Logs/Stow/mcp-audit.log`:
+time, client, tool, search terms with email addresses removed, accounts and
+result count. Never mail content. `stowmail mcp log` shows the latest.
+
+The server opens the database read-only with the database key alone, so it
+cannot write to the archive or decrypt the stored message and attachment files.
 
 ## Scripts
 
@@ -77,9 +142,12 @@ Error text from servers or libraries goes through `Redact.scrub` first.
 | `scripts/fetch-sqlcipher.sh` | Downloads SQLCipher, checks its SHA-256 and Zetetic's signature. |
 | `scripts/vendor-grdb.sh` | Regenerates `Vendor/GRDB` from an upstream GRDB release. |
 | `scripts/make-fixtures` | Generates synthetic `.eml` fixtures into `Tests/Fixtures/eml/`. |
+| `scripts/mcp-check.py` | Checks `stowmail mcp` against an archive and prints only counts and PASS or FAIL. |
 
 ## Licences
 
 GRDB is MIT licensed (`Vendor/GRDB/LICENSE`). SQLCipher Community Edition is
 BSD-style (`Vendor/SQLCipher/LICENSE.md`) and requires attribution in
-distributed apps. Stow's own licence is decided at the Phase 4 review.
+distributed apps. The MCP Swift SDK is Apache 2.0 with some older parts still
+MIT; `eventsource` is MIT; `swift-system` is Apache 2.0. Stow's own licence is
+Apache 2.0 (D-064).

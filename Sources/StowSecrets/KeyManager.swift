@@ -137,6 +137,14 @@ public struct KeyManager: Sendable {
         }
     }
 
+    /// Loads only the database key, for readers that never open the encrypted
+    /// files (the MCP server, D-081): one Keychain item, so one prompt at most.
+    /// Never creates it.
+    public func loadDatabaseKey() throws -> Data {
+        guard let data = try keychain.get(Self.databaseKeyItem) else { throw KeyManagerError.keysMissing }
+        return try Self.key(from: data, item: Self.databaseKeyItem).withUnsafeBytes { Data($0) }
+    }
+
     private static func key(from data: Data, item: String) throws -> SymmetricKey {
         guard data.count == 32 else { throw KeyManagerError.malformedKey(item) }
         return SymmetricKey(data: data)

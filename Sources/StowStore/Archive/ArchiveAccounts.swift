@@ -106,6 +106,27 @@ public struct ArchiveAccounts: AccountDirectory {
         }
     }
 
+    // MARK: Assistant access (MCP, D-081)
+
+    /// Turns MCP access on or off for one account. Off by default (`accounts.mcp_enabled`).
+    public func setMCPEnabled(_ id: AccountID, _ enabled: Bool) throws {
+        try archive.database.write { db in
+            try db.execute(sql: "UPDATE accounts SET mcp_enabled = ? WHERE id = ?", arguments: [enabled, id.rawValue])
+            guard db.changesCount == 1 else { throw AccountDirectoryError.notFound(id.rawValue) }
+        }
+    }
+
+    /// The accounts MCP may see.
+    public func mcpEnabled() throws -> [Account] {
+        try archive.database.read { db in try Self.mcpEnabledAccounts(db) }
+    }
+
+    /// The accounts MCP may see, for a reader holding only the database (the MCP server never opens an `Archive`).
+    public static func mcpEnabledAccounts(_ db: Database) throws -> [Account] {
+        try Row.fetchAll(db, sql: "SELECT * FROM accounts WHERE mcp_enabled = 1 ORDER BY created_at, id")
+            .compactMap(record).map(\.account)
+    }
+
     static func insert(_ db: Database, _ record: AccountRecord) throws {
         try db.execute(sql: """
             INSERT INTO accounts (id, provider, email, display_name, created_at, needs_reauth, disconnected_at)

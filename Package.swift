@@ -25,6 +25,8 @@ let package = Package(
         .package(url: "https://github.com/apple/swift-nio.git", from: "2.104.0"),
         .package(url: "https://github.com/apple/swift-argument-parser.git", from: "1.8.2"),
         .package(url: "https://github.com/apple/swift-log.git", from: "1.16.2"),
+        // Official MCP SDK, stdio transport only. Pre-1.0: pin to the minor version (D-080).
+        .package(url: "https://github.com/modelcontextprotocol/swift-sdk.git", .upToNextMinor(from: "0.12.1")),
         // GRDB built against SQLCipher, vendored by scripts/vendor-grdb.sh (D-011).
         .package(path: "Vendor/GRDB"),
     ],
@@ -67,7 +69,15 @@ let package = Package(
             dependencies: ["StowCore"],
             resources: [.copy("Resources/rules-data.json")]
         ),
-        .target(name: "StowMCP", dependencies: ["StowCore", "StowSecrets"]),
+        .target(
+            name: "StowMCP",
+            dependencies: [
+                "StowCore",
+                "StowSecrets",
+                .product(name: "MCP", package: "swift-sdk"),
+                .product(name: "Logging", package: "swift-log"),
+            ]
+        ),
         // Joins sync, storage and rules: the scheduler, the daemon and everything
         // the CLI and the app both drive. Like the CLI, it may depend on every module (D-026).
         .target(
@@ -77,6 +87,7 @@ let package = Package(
                 "StowSecrets",
                 "StowSync",
                 "StowStore",
+                "StowSearch",
                 "StowRules",
                 .product(name: "GRDB", package: "GRDB"),
                 .product(name: "Logging", package: "swift-log"),
@@ -115,7 +126,14 @@ let package = Package(
         .testTarget(name: "StowStoreTests", dependencies: ["StowStore", .product(name: "GRDB", package: "GRDB")]),
         .testTarget(name: "StowSearchTests", dependencies: ["StowSearch", "StowStore", "StowSecrets", .product(name: "GRDB", package: "GRDB")]),
         .testTarget(name: "StowRulesTests", dependencies: ["StowRules"]),
-        .testTarget(name: "StowMCPTests", dependencies: ["StowMCP"]),
+        .testTarget(
+            name: "StowMCPTests",
+            dependencies: [
+                "StowMCP", "StowCore", "StowEngine", "StowSearch", "StowStore", "StowSecrets",
+                .product(name: "MCP", package: "swift-sdk"),
+                .product(name: "GRDB", package: "GRDB"),
+            ]
+        ),
         .testTarget(
             name: "StowEngineTests",
             dependencies: [

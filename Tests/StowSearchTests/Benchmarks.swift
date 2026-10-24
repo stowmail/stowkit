@@ -160,6 +160,67 @@ struct Benchmarks {
         #expect(try queue.status().done > processedDuring)
         #expect(slowdown < 0.10)
     }
+
+    // MARK: MCP queries alongside import (Phase 3 QA)
+
+    /// Imports into an archive that already holds mail, alone and then while a
+    /// second, read-only connection makes the calls `stowmail mcp` makes
+    /// (search, count, thread, message with body): paced like an assistant
+    /// answering questions (a round every 100 ms), and flat out.
+    @Test func mcpQueriesDoNotSlowImport() async throws {
+        var generator = MessageGenerator(seed: 17)
+        let base = (0..<5000).map { generator.message(uid: UInt32($0 + 1), attachment: $0 % 7 == 0 ? .text : nil) }
+        var batches: [[RawMessage]] = []
+        for round in 1...3 {
+            let first = 100_000 * round
+            batches.append((0..<5000).map { (n: Int) -> RawMessage in
+                generator.message(uid: UInt32(first + n), attachment: n % 7 == 0 ? .text : nil)
+            })
+        }
+        let word = generator.commonWord
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("stow-bench-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let keys = ArchiveKeys(databaseKey: SymmetricKey(size: .bits256), fileKey: SymmetricKey(size: .bits256))
+        let archive = try Archive.open(ArchiveLocation(root: root), keys: keys)
+        try archive.register(Account(id: Self.account, provider: .gmail, email: "bench@example.com", displayName: "Bench"))
+        _ = try await timeImport(archive, base)
+
+        let reader = try EncryptedDatabase.open(at: archive.location.databaseURL, key: keys.databaseKeyData, readOnly: true)
+        func queries(pause: UInt64) -> Task<Int, Never> {
+            Task.detached {
+                let searcher = MessageSearcher(database: reader)
+                let messages = MessageReader(database: reader)
+                var rounds = 0
+                while !Task.isCancelled {
+                    let query = SearchQuery(text: word, limit: 20)
+                    if let hits = try? await searcher.search(query), let first = hits.first {
+                        _ = try? await searcher.count(query)
+                        _ = try? await searcher.thread(of: first.messageID)
+                        _ = try? await messages.message(first.messageID, bodyLimit: 20_000)
+                    }
+                    rounds += 1
+                    if pause > 0 { try? await Task.sleep(nanoseconds: pause) }
+                }
+                return rounds
+            }
+        }
+
+        let alone = try await timeImport(archive, batches[0])
+        let pacedTask = queries(pause: 100_000_000)
+        let paced = try await timeImport(archive, batches[1])
+        pacedTask.cancel()
+        let pacedRounds = await pacedTask.value
+        let busyTask = queries(pause: 0)
+        let busy = try await timeImport(archive, batches[2])
+        busyTask.cancel()
+        let busyRounds = await busyTask.value
+
+        let pacedSlowdown = (paced.seconds - alone.seconds) / alone.seconds
+        let busySlowdown = (busy.seconds - alone.seconds) / alone.seconds
+        print(String(format: "BENCH MCP: import of 5,000 alone %.2f s; with paced queries %.2f s (%+.1f%%, %d rounds); flat out %.2f s (%+.1f%%, %d rounds)",
+                     alone.seconds, paced.seconds, pacedSlowdown * 100, pacedRounds, busy.seconds, busySlowdown * 100, busyRounds))
+        #expect(pacedSlowdown < 0.10)
+    }
 }
 
 /// Deterministic synthetic mail: Zipf-like word frequencies, a few thousand senders, ten years of dates.
