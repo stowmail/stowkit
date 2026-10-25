@@ -112,6 +112,8 @@ public struct SearchHit: Hashable, Sendable, Codable, Identifiable {
     public var hasAttachments: Bool
     /// True while an attachment of this message still waits for OCR.
     public var ocrPending: Bool
+    /// Where the message stands at the provider, so a list can mark spam when it is shown (D-039, D-418).
+    public var sourceState: SourceState
 
     public init(
         messageID: StoredMessageID,
@@ -124,7 +126,8 @@ public struct SearchHit: Hashable, Sendable, Codable, Identifiable {
         rank: Double,
         matchedFields: Set<SearchField> = [],
         hasAttachments: Bool = false,
-        ocrPending: Bool = false
+        ocrPending: Bool = false,
+        sourceState: SourceState = .present
     ) {
         self.messageID = messageID
         self.accountID = accountID
@@ -137,6 +140,28 @@ public struct SearchHit: Hashable, Sendable, Codable, Identifiable {
         self.matchedFields = matchedFields
         self.hasAttachments = hasAttachments
         self.ocrPending = ocrPending
+        self.sourceState = sourceState
+    }
+
+    // Decoded by hand so a hit encoded before `sourceState` existed still reads (as present).
+    private enum CodingKeys: String, CodingKey {
+        case messageID, accountID, threadKey, date, from, subject, snippet, rank, matchedFields, hasAttachments, ocrPending, sourceState
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(messageID: try c.decode(StoredMessageID.self, forKey: .messageID),
+                  accountID: try c.decode(AccountID.self, forKey: .accountID),
+                  threadKey: try c.decodeIfPresent(String.self, forKey: .threadKey),
+                  date: try c.decode(Date.self, forKey: .date),
+                  from: try c.decodeIfPresent(EmailAddress.self, forKey: .from),
+                  subject: try c.decodeIfPresent(String.self, forKey: .subject),
+                  snippet: try c.decode(String.self, forKey: .snippet),
+                  rank: try c.decode(Double.self, forKey: .rank),
+                  matchedFields: try c.decode(Set<SearchField>.self, forKey: .matchedFields),
+                  hasAttachments: try c.decode(Bool.self, forKey: .hasAttachments),
+                  ocrPending: try c.decode(Bool.self, forKey: .ocrPending),
+                  sourceState: try c.decodeIfPresent(SourceState.self, forKey: .sourceState) ?? .present)
     }
 }
 

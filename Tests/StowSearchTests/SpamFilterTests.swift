@@ -38,6 +38,10 @@ import Testing
         #expect(try await subjects("quince in:spam") == ["Quince 1"])
         #expect(try await subjects("quince in:anywhere") == ["Quince 1", "Quince 2"])
         #expect(try await subjects("in:spam") == ["Quince 1"])
+        // Each hit says where it stands, so the app can mark spam rows (D-418).
+        let states = try await searcher.search(QueryParser.parse("quince in:anywhere")).map { ($0.messageID, $0.sourceState) }
+        #expect(Set(states.map { "\($0.0)=\($0.1.rawValue)" }) == ["\(ids[0])=spam", "\(ids[1])=present"])
+        #expect(try await searcher.search(QueryParser.parse("in:anywhere")).count == 2)
         #expect(QueryParser.parse("in:inbox quince").text == "quince")  // other in: values name a folder (D-079)
     }
 }
