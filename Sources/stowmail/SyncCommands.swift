@@ -66,7 +66,6 @@ struct Size: AsyncParsableCommand {
         let mail = ByteCountFormatter.string(fromByteCount: size.bytes, countStyle: .file)
         if let quota = size.quota {
             print("\(count) emails, your mail uses \(mail) of \(ByteCountFormatter.string(fromByteCount: quota.limitBytes, countStyle: .file)).")
-            print("The provider reports \(ByteCountFormatter.string(fromByteCount: quota.usedBytes, countStyle: .file)) used in all.")
         } else {
             print("\(count) emails, your mail uses \(size.sizesAreEstimates ? "about " : "")\(mail).")
             print(size.quotaAdvertised ? "The server offers QUOTA but did not report a storage limit." : "The server does not offer QUOTA after sign-in.")

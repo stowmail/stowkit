@@ -148,7 +148,7 @@ public struct FetchDiagnostics: Sendable, Equatable {
 /// The storage quota a server reports for a mailbox's quota root (R6, D-404).
 /// Gmail's is the whole Google account's storage, shared with Drive and Photos.
 public struct MailboxQuota: Sendable, Equatable {
-    /// What the quota root uses now, in bytes.
+    /// What the quota root uses now, in bytes. Gmail always reports 0: do not show it.
     public var usedBytes: Int64
     /// The limit, in bytes.
     public var limitBytes: Int64
@@ -162,11 +162,13 @@ public struct MailboxQuota: Sendable, Equatable {
     public static let largestPlausibleLimitBytes: Int64 = 1 << 50 // 1 PiB
 
     /// A quota from GETQUOTAROOT's STORAGE figures (RFC 2087: units of 1024
-    /// octets), or nil when they say nothing real. A Google Workspace account
-    /// answers 0 used and a limit of about 2^53 KiB, because its storage is
-    /// pooled across the organisation (D-404); multiplying that by 1024 must not overflow.
+    /// octets), or nil when the limit says nothing real. Judged by the limit
+    /// alone (D-404, measured 25 Oct 2026): personal Gmail answers a real limit
+    /// (15,728,640 KiB) but always 0 used, while a Google Workspace account
+    /// answers a limit of about 2^53 KiB because its storage is pooled across the
+    /// organisation. Multiplying that by 1024 must not overflow.
     public static func fromStorage(usageKiB: Int, limitKiB: Int) -> MailboxQuota? {
-        guard usageKiB > 0, limitKiB > 0 else { return nil }
+        guard usageKiB >= 0, limitKiB > 0 else { return nil }
         let (used, usedOverflow) = Int64(usageKiB).multipliedReportingOverflow(by: 1024)
         let (limit, limitOverflow) = Int64(limitKiB).multipliedReportingOverflow(by: 1024)
         guard !usedOverflow, !limitOverflow, limit <= largestPlausibleLimitBytes else { return nil }

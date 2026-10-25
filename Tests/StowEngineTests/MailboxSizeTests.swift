@@ -69,9 +69,12 @@ import Testing
     @Test func quotaFiguresThatSayNothingOrWouldOverflow() {
         #expect(MailboxQuota.fromStorage(usageKiB: 6_500_000, limitKiB: 15_728_640)
             == MailboxQuota(usedBytes: 6_500_000 * 1024, limitBytes: 15_728_640 * 1024))
-        #expect(MailboxQuota.fromStorage(usageKiB: 0, limitKiB: 15_728_640) == nil)
+        // Personal Gmail, 25 Oct 2026: a real limit, but always 0 used.
+        #expect(MailboxQuota.fromStorage(usageKiB: 0, limitKiB: 15_728_640)?.limitBytes == Int64(15_728_640) * 1024)
+        #expect(MailboxQuota.fromStorage(usageKiB: -1, limitKiB: 15_728_640) == nil)
         #expect(MailboxQuota.fromStorage(usageKiB: 10, limitKiB: 0) == nil)
         #expect(MailboxQuota.fromStorage(usageKiB: 10, limitKiB: 9_007_199_254_740_991) == nil)
+        #expect(MailboxQuota.fromStorage(usageKiB: 0, limitKiB: 9_007_199_254_740_991) == nil) // Workspace
         #expect(MailboxQuota.fromStorage(usageKiB: Int.max, limitKiB: Int.max) == nil)
     }
 

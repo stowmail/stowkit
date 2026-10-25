@@ -85,6 +85,8 @@ public actor IMAPSession {
             guard found == nil, case .untagged(.quota(_, let resources)) = response,
                   let storage = resources.first(where: { $0.resourceName.uppercased() == "STORAGE" })
             else { return }
+            // Two numbers, nothing personal: what the server said, before Stow decides whether it means anything (D-404).
+            logger.debug("GETQUOTAROOT storage", metadata: ["usageKiB": "\(storage.usage)", "limitKiB": "\(storage.limit)"])
             found = MailboxQuota.fromStorage(usageKiB: storage.usage, limitKiB: storage.limit)
         }
         guard completion.status == "OK" else {
