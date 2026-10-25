@@ -4,7 +4,7 @@ The engine behind Stow: a local, encrypted, searchable email archive for macOS.
 IMAP sync with OAuth, encrypted SQLite storage, full-text search, bulk-mail
 rules and a local MCP server. No UI code lives here.
 
-Status: Phase 3 (local MCP server) built on Phase 2's sync, archive and search. Private until the Phase 4 security review.
+Status: Phases 0 to 3 done (sync, encrypted archive, search, rules, background sync, local MCP server). Next: the Phase 4 security review; private until it passes.
 
 ## Requirements
 
