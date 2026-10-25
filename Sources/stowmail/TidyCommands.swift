@@ -209,3 +209,50 @@ struct Coverage: AsyncParsableCommand {
         }
     }
 }
+
+/// UI-12 (D-408): after deleting old mail at the provider, what the account overview would say.
+struct DeletionCheckCommand: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "deletion-check",
+        abstract: "After you deleted old mail in your mailbox, show how much from before a date is still there.",
+        discussion: """
+            The count comes from the last full check (`stowmail sync --check full`, or the background sync every few \
+            hours). It counts only once a full check has run after --since, the time you deleted.
+            """
+    )
+
+    @Argument(help: "Account ID, ID prefix, address or name.") var account: String
+    @Option(help: "The date you deleted before, YYYY-MM-DD (as in the Gmail search before:).") var before: String
+    @Option(help: "When you deleted, as YYYY-MM-DDTHH:MM:SSZ (UTC). Default: now.") var since: String?
+
+    func validate() throws {
+        if Self.date(before) == nil { throw ValidationError("--before takes a date such as 2025-10-13.") }
+        if let since, ISO8601DateFormatter().date(from: since) == nil {
+            throw ValidationError("--since takes a time such as 2026-10-25T15:40:00Z.")
+        }
+    }
+
+    static func date(_ text: String) -> Date? {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withFullDate]
+        return formatter.date(from: text)
+    }
+
+    func run() async throws {
+        let archive = try CLIArchive.open(readOnly: true)
+        let record = try CLIArchive.accounts(archive).find(account)
+        let sinceDate = since.flatMap { ISO8601DateFormatter().date(from: $0) } ?? Date()
+        let check = try StowStore.Coverage.deletionCheck(archive, account: record.account.id, before: Self.date(before)!, since: sinceDate)
+        let lastCheck = check.lastFullCheck.map { ISO8601DateFormatter().string(from: $0) } ?? "never"
+        print("Last full check of every folder: \(lastCheck).")
+        guard check.isCurrent else {
+            print("Not checked since \(ISO8601DateFormatter().string(from: sinceDate)) yet: Stow will check within the next few hours. (Count at the last check: \(check.stillAtProvider).)")
+            return
+        }
+        if check.deletedAsExpected {
+            print("The mailbox now has nothing before \(CLI.day(check.before)), as expected.")
+        } else {
+            print("The mailbox still has \(check.stillAtProvider) email(s) before \(CLI.day(check.before)) (\(CLI.megabytes(check.stillAtProviderBytes))).")
+        }
+    }
+}
