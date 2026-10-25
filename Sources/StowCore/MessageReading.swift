@@ -159,6 +159,29 @@ public protocol InlinePartReading: Sendable {
     func inlinePart(message: StoredMessageID, contentID: String) async throws -> InlinePart?
 }
 
+/// One attachment's decoded bytes, for Quick Look and Save in the reader (D-410).
+/// In memory only.
+public struct AttachmentData: Hashable, Sendable, Codable {
+    public var messageID: StoredMessageID
+    public var info: AttachmentInfo
+    public var data: Data
+
+    public init(messageID: StoredMessageID, info: AttachmentInfo, data: Data) {
+        self.messageID = messageID
+        self.info = info
+        self.data = data
+    }
+}
+
+/// Reads an attachment's bytes by its 1-based index (the numbering of
+/// `MessageDetail.attachments`), for the app's reader (D-410). Needs the file
+/// key, so like `InlinePartReading` it is not part of `MessageReading` (D-405).
+public protocol AttachmentDataReading: Sendable {
+    /// The attachment decrypted into memory, or nil if there is no such message or index.
+    /// Never writes a file; the caller decides where, if anywhere, it is saved.
+    func attachmentData(message: StoredMessageID, index: Int) async throws -> AttachmentData?
+}
+
 /// A message's body as the reader shows it (D-059, R9): the HTML part as
 /// decoded text, the plain part, or both, and the `cid:` references the HTML
 /// makes. Rebuilt in memory from the stored message; nothing is written to

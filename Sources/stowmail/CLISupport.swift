@@ -39,9 +39,7 @@ enum CLI {
     /// The Keychain under `STOW_KEYCHAIN_SERVICE` if set, so development and
     /// tests keep their keys and tokens apart from the real ones (D-208).
     static func keychain() -> KeychainStore {
-        let service = ProcessInfo.processInfo.environment["STOW_KEYCHAIN_SERVICE"].flatMap { $0.isEmpty ? nil : $0 }
-            ?? KeychainStore.defaultService
-        return KeychainStore(service: service)
+        ArchiveOpening.keychain()
     }
 
     /// Phase 1's account list in the Keychain; only read to move it into the archive (D-032).
@@ -125,14 +123,11 @@ enum CLIArchive {
     /// Opens an existing archive. Never creates one: a missing archive at a
     /// chosen folder is "offline" (a disconnected disk), not a reason to start afresh.
     static func open(readOnly: Bool = false) throws -> Archive {
-        let location = location()
-        guard location.exists else {
-            if ArchiveSettings().chosenFolder != nil, ProcessInfo.processInfo.environment["STOW_ARCHIVE_DIR"] == nil {
-                throw ArchiveLocationError.offline(location.root.path)
-            }
-            throw ValidationError("No archive at \(location.root.path). Run `stowmail init` first.")
+        do {
+            return try ArchiveOpening.openExisting(location: location(), keys: CLI.keyManager(), readOnly: readOnly)
+        } catch ArchiveOpeningError.noArchive(let path) {
+            throw ValidationError("No archive at \(path). Run `stowmail init` first.")
         }
-        return try Archive.open(location, keys: try CLI.keyManager().loadKeys(), readOnly: readOnly)
     }
 
     /// Opens the archive for writing and takes the writer lock, waiting up to

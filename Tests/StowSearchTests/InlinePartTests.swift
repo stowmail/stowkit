@@ -74,6 +74,23 @@ struct InlinePartTests {
         #expect(try await reader.inlinePart(message: f.messageID, contentID: "cid:dot%2B1@shop.example")?.data == f.small)
     }
 
+    @Test func attachmentBytesByIndex() async throws {
+        // D-410: the reader's Quick Look and Save; numbered like MessageDetail.attachments.
+        let f = try Fixture()
+        let reader = MessageReader(archive: f.archive)
+        let detail = try #require(try await reader.message(f.messageID, bodyLimit: 0))
+        let first = try #require(try await reader.attachmentData(message: f.messageID, index: 1))
+        #expect(first.data == f.logo)
+        #expect(first.info == detail.attachments[0])
+        #expect(try await reader.attachmentData(message: f.messageID, index: 2)?.data == f.small)
+        #expect(try await reader.attachmentData(message: f.messageID, index: 3) == nil)
+        #expect(try await reader.attachmentData(message: f.messageID, index: 0) == nil)
+        #expect(try await reader.attachmentData(message: f.messageID + 99, index: 1) == nil)
+        await #expect(throws: MessageReaderError.noFileKey) {
+            _ = try await MessageReader(database: f.archive.database).attachmentData(message: f.messageID, index: 1)
+        }
+    }
+
     @Test func unknownIDOrMessageGivesNil() async throws {
         let f = try Fixture()
         let reader = MessageReader(archive: f.archive)

@@ -10,10 +10,10 @@ import StowStore
 ///
 /// Long text is cut in SQL (`substr`), so a 5 MB body never leaves SQLite whole.
 ///
-/// Made from an `Archive`, it also reads inline parts by Content-ID (R8) and
-/// the displayable body (R9): the two calls that open encrypted files,
-/// decrypting them in memory.
-public final class MessageReader: MessageReading, InlinePartReading, MessageBodyReading, Sendable {
+/// Made from an `Archive`, it also reads inline parts by Content-ID (R8),
+/// attachment bytes (D-410) and the displayable body (R9): the calls that open
+/// encrypted files, decrypting them in memory.
+public final class MessageReader: MessageReading, InlinePartReading, MessageBodyReading, AttachmentDataReading, Sendable {
     let database: any DatabaseReader
     /// Nil when made from a database alone (the MCP server, D-081): no file key.
     let archive: Archive?
@@ -119,6 +119,19 @@ public final class MessageReader: MessageReading, InlinePartReading, MessageBody
         return part
     }
 
+    public func attachmentData(message: StoredMessageID, index: Int) async throws -> AttachmentData? {
+        guard let attachmentFiles = archive?.attachmentFiles else { throw MessageReaderError.noFileKey }
+        guard index >= 1 else { return nil }
+        let found = try await database.read { db -> (hash: Data, info: AttachmentInfo)? in
+            let rows = try Row.fetchAll(db, sql: Self.attachmentSQL, arguments: [message])
+            guard index <= rows.count else { return nil }
+            return (rows[index - 1]["content_hash"], Self.info(rows[index - 1], index: index))
+        }
+        guard let found else { return nil }
+        // Decrypted into memory only; nothing is written to disk.
+        return AttachmentData(messageID: message, info: found.info, data: try attachmentFiles.read(found.hash))
+    }
+
     public func body(of message: StoredMessageID) async throws -> MessageBody? {
         guard let archive else { throw MessageReaderError.noFileKey }
         // Decrypted and parsed in memory only; nothing is written to disk (R9, D-409).
@@ -129,7 +142,7 @@ public final class MessageReader: MessageReading, InlinePartReading, MessageBody
     }
 
     static let attachmentSQL = """
-        SELECT x.attachment_id, x.filename, coalesce(t.mime_type, x.declared_mime_type) AS mime_type, x.disposition,
+        SELECT x.attachment_id, t.content_hash, x.filename, coalesce(t.mime_type, x.declared_mime_type) AS mime_type, x.disposition,
                t.size, t.text_status, coalesce((SELECT length(at.text) FROM attachment_text at WHERE at.attachment_id = t.id), 0) AS text_length
         FROM message_attachments x JOIN attachments t ON t.id = x.attachment_id
         WHERE x.message_id = ? ORDER BY x.part_path
