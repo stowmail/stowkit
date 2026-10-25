@@ -1,8 +1,37 @@
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/images/banner-dark.png">
+    <img src="docs/images/banner-light.png" alt="Stow. StowKit, the open-source engine behind Stow, the private email archive for Mac. Your mail. Your Mac." width="100%">
+  </picture>
+</p>
+
+<p align="center">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/licence-Apache%202.0-037079?style=flat-square" alt="Licence: Apache 2.0"></a>
+  <img src="https://img.shields.io/badge/macOS-14%2B-0B2E33?style=flat-square&logo=apple&logoColor=white" alt="macOS 14 or later">
+  <img src="https://img.shields.io/badge/Swift-6.1%2B-0B2E33?style=flat-square&logo=swift&logoColor=white" alt="Swift 6.1 or later">
+  <img src="https://img.shields.io/badge/MCP-read--only-037079?style=flat-square" alt="MCP: read-only">
+  <a href="https://getstow.ee"><img src="https://img.shields.io/badge/app-getstow.ee-EADBC0?style=flat-square&labelColor=0B2E33" alt="Get the app at getstow.ee"></a>
+</p>
+
 # StowKit
 
-The engine behind Stow: a local, encrypted, searchable email archive for macOS.
-IMAP sync with OAuth, encrypted SQLite storage, full-text search, bulk-mail
-rules and a local MCP server. No UI code lives here.
+Stow is a private email archive for Mac that brings years of old email down from the cloud into an encrypted, searchable archive on your computer. *Your mail. Your Mac.*
+
+This repository is the engine: IMAP sync for Gmail and Outlook, encrypted storage, full-text search, rules and a local read-only MCP server, plus the `stowmail` CLI. It is open source under Apache 2.0 so you can read every line that touches your mail. It never sends, deletes or changes email in your account.
+
+**Just want the app?** Download Stow from [getstow.ee](https://getstow.ee).
+
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/images/how-it-works-dark.png">
+    <img src="docs/images/how-it-works-light.png" alt="How it works: Stow reads mail from Gmail and Outlook over IMAP with OAuth, read-only, into an encrypted archive on your Mac with full-text search, bulk-mail rules and a local read-only MCP server. Stow servers: none." width="100%">
+  </picture>
+</p>
+
+## For developers
+
+The engine uses IMAP with OAuth, encrypted SQLite storage, full-text search,
+bulk-mail rules and a local MCP server. No UI code lives here.
 
 Status: sync, encrypted archive, search, rules, background sync and a local MCP server are working, and the engine has had a security review (October 2026). It is pre-1.0: interfaces may still change. Comments cite design decisions as D-numbers from Stow's internal decision log.
 
