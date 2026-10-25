@@ -54,6 +54,56 @@ func testKeychain() -> KeychainStore {
         }
     }
 
+    /// R7 (D-055, D-084): archive and keys first, then an account, then the
+    /// recovery key; nothing is imported until it is confirmed.
+    @Test func archiveThenAccountThenRecoveryKey() async throws {
+        let keychain = testKeychain()
+        defer { try? keychain.deleteAll() }
+        let location = ArchiveLocation(root: TestFixtures.temporaryDirectory())
+        defer { try? FileManager.default.removeItem(at: location.root) }
+        let manager = KeyManager(keychain: keychain)
+        let paused = RoundResult.paused(ArchiveSetupError.recoveryNotConfirmed.description)
+
+        let archive = try ArchiveSetup.createArchive(location, keyManager: manager)
+        #expect(!RecoveryBundle.exists(in: location.root))
+        #expect(ArchiveSetup.recoveryState(archive) == .none)
+        try ArchiveAccounts(archive: archive).add(AccountRecord(account: Account(id: .generate(), provider: .gmail, email: "sam@example.com", displayName: "S")))
+        #expect(throws: ArchiveSetupError.recoveryNotConfirmed) { try ArchiveSetup.requireConfirmed(archive) }
+        let scheduler = Scheduler(openArchive: { try Archive.open(location, keys: try manager.loadKeys()) },
+                                  makeSync: { _ in throw CocoaError(.fileNoSuchFile) },
+                                  power: { PowerState(onBattery: false, batteryPercent: nil, lowPowerMode: false) })
+        #expect(await scheduler.round().0 == paused)
+        // Creating again makes no key and keeps the account.
+        #expect(ArchiveSetup.recoveryState(try ArchiveSetup.createArchive(location, keyManager: manager)) == .none)
+
+        let stale = try ArchiveSetup.makeRecoveryKey(archive, keyManager: manager)
+        let key = try ArchiveSetup.makeRecoveryKey(archive, keyManager: manager)
+        #expect(ArchiveSetup.recoveryState(archive) == .unconfirmed)
+        let groups = key.groups
+        #expect(throws: ArchiveSetupError.tooFewGroups) { try ArchiveSetup.confirm(archive, recoveryKey: key, typed: [3: groups[3]]) }
+        #expect(throws: ArchiveSetupError.groupMismatch) {
+            try ArchiveSetup.confirm(archive, recoveryKey: key, typed: [3: groups[3], 10: groups[9]])
+        }
+        // A key from an earlier attempt matches its own groups but no longer opens the bundle.
+        #expect(throws: ArchiveSetupError.notCurrentRecoveryKey) {
+            try ArchiveSetup.confirm(archive, recoveryKey: stale, typed: [0: stale.groups[0], 13: stale.groups[13]])
+        }
+        #expect(throws: ArchiveSetupError.recoveryNotConfirmed) { try ArchiveSetup.requireConfirmed(archive) }
+
+        try ArchiveSetup.confirm(archive, recoveryKey: key, typed: [3: groups[3].lowercased(), 10: groups[10]])
+        #expect(ArchiveSetup.recoveryState(archive) == .confirmed)
+        try ArchiveSetup.requireConfirmed(archive)
+        #expect(await scheduler.round().0 != paused)
+        #expect(try ArchiveSetup.initialise(location, keyManager: manager).recoveryKey == nil)
+        let archiveID = try archive.archiveID()
+        try archive.database.close()
+
+        // A new Mac opens it with the confirmed key, accounts included.
+        try keychain.deleteAll()
+        #expect(try ArchiveSetup.recover(archiveFolder: location.root, recoveryKey: key, keyManager: manager) == archiveID)
+        #expect(try ArchiveAccounts(archive: try Archive.open(location, keys: try manager.loadKeys())).all().count == 1)
+    }
+
     @Test func rotatingUnconfirmsAndOnlyTheNewKeyWorks() throws {
         let keychain = testKeychain()
         defer { try? keychain.deleteAll() }
@@ -234,6 +284,12 @@ func testKeychain() -> KeychainStore {
                                     power: { PowerState(onBattery: false, batteryPercent: nil, lowPowerMode: false) })
         guard case .paused(let reason) = await unconfirmed.round().0 else { Issue.record("should pause"); return }
         #expect(reason.contains("recovery key"))
+
+        // A confirmation whose bundle has gone does not count (D-084).
+        let archive = try Archive.open(location, keys: keys)
+        try ArchiveSetup.markConfirmed(archive)
+        try archive.database.close()
+        #expect(await unconfirmed.round().0 == .paused(ArchiveSetupError.recoveryNotConfirmed.description))
     }
 
     /// D-036: after the budget runs out, wait only until there is room again, never under the minimum.

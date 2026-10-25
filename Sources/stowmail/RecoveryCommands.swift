@@ -11,9 +11,13 @@ struct Init: AsyncParsableCommand {
         abstract: "Create the archive keys in the Keychain, an empty encrypted archive and its recovery key.",
         discussion: """
             The recovery key is shown once and must be confirmed by typing two of its groups back before any mail is \
-            imported (D-007). Accounts added before the archive existed are moved into it.
+            imported (D-007). Accounts added before the archive existed are moved into it. With --recovery-key-later, \
+            the key is made afterwards with `stowmail recovery-key create`, as the app does after sign-in (D-055).
             """
     )
+
+    @Flag(name: .long, help: "Create the archive and its keys only. Nothing is imported until `stowmail recovery-key create` is confirmed.")
+    var recoveryKeyLater = false
 
     func run() async throws {
         CLI.bootstrapLogging()
@@ -28,6 +32,17 @@ struct Init: AsyncParsableCommand {
             case .refused(let reason): throw ArchiveLocationError.unsupportedVolume(reason)
             }
         }
+        if recoveryKeyLater {
+            let archive = try ArchiveSetup.createArchive(location, keyManager: CLI.keyManager())
+            print("Archive ready at \(archive.location.root.path)")
+            try adoptAccounts(archive)
+            switch ArchiveSetup.recoveryState(archive) {
+            case .confirmed: print("Its recovery key was confirmed earlier. To replace it, run `stowmail recovery-key rotate`.")
+            case .none, .unconfirmed:
+                print("No recovery key yet, so no mail is imported. Add an account, then run `stowmail recovery-key create`.")
+            }
+            return
+        }
         let (archive, recoveryKey) = try ArchiveSetup.initialise(location, keyManager: CLI.keyManager())
         print("Archive ready at \(archive.location.root.path)")
         if let recoveryKey {
@@ -35,6 +50,10 @@ struct Init: AsyncParsableCommand {
         } else {
             print("Its recovery key was confirmed earlier. To replace it, run `stowmail recovery-key rotate`.")
         }
+        try adoptAccounts(archive)
+    }
+
+    private func adoptAccounts(_ archive: Archive) throws {
         let moved = try ArchiveSetup.adoptKeychainAccounts(archive, registry: CLI.keychainRegistry())
         if moved > 0 { print("Moved \(moved) account(s) into the archive. Their tokens stay in the Keychain.") }
     }
@@ -43,9 +62,28 @@ struct Init: AsyncParsableCommand {
 struct RecoveryKeyCommand: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "recovery-key",
-        abstract: "Replace the recovery key.",
-        subcommands: [Rotate.self]
+        abstract: "Make or replace the recovery key.",
+        subcommands: [Create.self, Rotate.self]
     )
+
+    struct Create: AsyncParsableCommand {
+        static let configuration = CommandConfiguration(
+            abstract: "Make the archive's first recovery key, show it once and confirm it.",
+            discussion: """
+                For an archive made with `init --recovery-key-later`, or whose key was never confirmed. Refuses when a \
+                confirmed key exists; `rotate` replaces one.
+                """
+        )
+
+        func run() async throws {
+            CLI.bootstrapLogging()
+            let (archive, lock) = try CLIArchive.openForWriting(requireRecovery: false)
+            defer { lock.release() }
+            guard ArchiveSetup.recoveryState(archive) != .confirmed else { throw ArchiveSetupError.recoveryAlreadyConfirmed }
+            let key = try ArchiveSetup.makeRecoveryKey(archive, keyManager: CLI.keyManager())
+            try RecoveryPrompt.showAndConfirm(archive, key)
+        }
+    }
 
     struct Rotate: AsyncParsableCommand {
         static let configuration = CommandConfiguration(
@@ -115,14 +153,15 @@ enum RecoveryPrompt {
         for attempt in 1...3 {
             let a = CLI.ask("Type group \(first + 1) of your recovery key (four characters): ") ?? ""
             let b = CLI.ask("Type group \(second + 1): ") ?? ""
-            if key.groupMatches(first, typed: a), key.groupMatches(second, typed: b) {
-                try ArchiveSetup.markConfirmed(archive)
+            do {
+                try ArchiveSetup.confirm(archive, recoveryKey: key, typed: [first: a, second: b])
                 print("Recovery key confirmed. Stow can now import your mail.")
                 return
+            } catch ArchiveSetupError.groupMismatch {
+                if attempt < 3 { print(ArchiveSetupError.groupMismatch.description) }
             }
-            if attempt < 3 { print("That does not match. Check the groups you saved and try again.") }
         }
-        print("Not confirmed. Run `stowmail recovery-key rotate` to get a new key; no mail is imported until one is confirmed.")
+        print("Not confirmed. Run `stowmail recovery-key create` to get a new key; no mail is imported until one is confirmed.")
         throw ExitCode.failure
     }
 }

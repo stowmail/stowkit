@@ -135,7 +135,7 @@ public actor Scheduler {
             return (.cannotOpen(Redact.scrub(String(describing: error))), [:])
         }
         defer { try? archive.database.close() }
-        guard ArchiveSetup.isConfirmed(archive) else { return (.paused(ArchiveSetupError.recoveryNotConfirmed.description), [:]) }
+        guard ArchiveSetup.recoveryState(archive) == .confirmed else { return (.paused(ArchiveSetupError.recoveryNotConfirmed.description), [:]) }
         guard let lock = try? ArchiveLock.acquire(archive.location) else { return (.busy, [:]) }
         defer { lock.release() }
         if !swept {

@@ -57,7 +57,11 @@ struct Doctor: AsyncParsableCommand {
         if location.exists {
             print("  database: present\(RecoveryBundle.exists(in: location.root) ? ", recovery bundle present" : ", NO recovery bundle")")
             if let archive = try? CLIArchive.open(readOnly: true) {
-                print("  recovery key confirmed: \(ArchiveSetup.isConfirmed(archive) ? "yes" : "NO (run `stowmail recovery-key rotate`)")")
+                switch ArchiveSetup.recoveryState(archive) {
+                case .confirmed: print("  recovery key confirmed: yes")
+                case .unconfirmed: print("  recovery key confirmed: NO (run `stowmail recovery-key create`)")
+                case .none: print("  recovery key: NONE MADE YET (run `stowmail recovery-key create`)")
+                }
             } else {
                 print("  could not open it with this Mac's keys")
             }
