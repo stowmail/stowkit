@@ -27,6 +27,10 @@ What the engine promises, and where to look:
 
 The Stow app built on this engine is a separate product; report issues in it to the same address.
 
+## Signed commits
+
+Commits to `main` from 25 October 2026 onwards are signed by Toby Treacher (`tobyt@getstow.ee`) with the SSH key `SHA256:gjaPQISqRw9oQxgVWNFL8g+KaKpdeXZAsiX+2+MYxw0`, and GitHub marks them Verified. Earlier commits are unsigned. A commit on `main` after that date without a valid signature did not come from us; please report it.
+
 ## Security review
 
 What was checked before the engine was published, what was found and fixed, and what is still open: [docs/security-review.md](docs/security-review.md).
