@@ -10,21 +10,22 @@ import StowStore
 ///
 /// Long text is cut in SQL (`substr`), so a 5 MB body never leaves SQLite whole.
 ///
-/// Made from an `Archive`, it also reads inline parts by Content-ID (R8): the
-/// one call that opens an encrypted attachment file, decrypting it in memory.
-public final class MessageReader: MessageReading, InlinePartReading, Sendable {
+/// Made from an `Archive`, it also reads inline parts by Content-ID (R8) and
+/// the displayable body (R9): the two calls that open encrypted files,
+/// decrypting them in memory.
+public final class MessageReader: MessageReading, InlinePartReading, MessageBodyReading, Sendable {
     let database: any DatabaseReader
     /// Nil when made from a database alone (the MCP server, D-081): no file key.
-    let attachmentFiles: EncryptedFileStore?
+    let archive: Archive?
 
     public init(database: any DatabaseReader) {
         self.database = database
-        attachmentFiles = nil
+        archive = nil
     }
 
     public init(archive: Archive) {
         database = archive.database
-        attachmentFiles = archive.attachmentFiles
+        self.archive = archive
     }
 
     public func message(_ id: StoredMessageID, bodyLimit: Int) async throws -> MessageDetail? {
@@ -96,7 +97,7 @@ public final class MessageReader: MessageReading, InlinePartReading, Sendable {
     }
 
     public func inlinePart(message: StoredMessageID, contentID: String) async throws -> InlinePart? {
-        guard let attachmentFiles else { throw MessageReaderError.noFileKey }
+        guard let attachmentFiles = archive?.attachmentFiles else { throw MessageReaderError.noFileKey }
         let wanted = InlinePart.contentID(fromReference: contentID)
         guard !wanted.isEmpty else { return nil }
         // An exact match first; Content-IDs are compared without case only when nothing matches exactly.
@@ -118,6 +119,15 @@ public final class MessageReader: MessageReading, InlinePartReading, Sendable {
         return part
     }
 
+    public func body(of message: StoredMessageID) async throws -> MessageBody? {
+        guard let archive else { throw MessageReaderError.noFileKey }
+        // Decrypted and parsed in memory only; nothing is written to disk (R9, D-409).
+        guard let raw = try archive.rawMessage(message) else { return nil }
+        let parts = MIMEParser().displayBody(raw)
+        return MessageBody(messageID: message, html: parts.html, plain: parts.plain,
+                           contentIDs: parts.html.map(MessageBody.contentIDs(inHTML:)) ?? [])
+    }
+
     static let attachmentSQL = """
         SELECT x.attachment_id, x.filename, coalesce(t.mime_type, x.declared_mime_type) AS mime_type, x.disposition,
                t.size, t.text_status, coalesce((SELECT length(at.text) FROM attachment_text at WHERE at.attachment_id = t.id), 0) AS text_length
@@ -136,7 +146,7 @@ public enum MessageReaderError: Error, Equatable, CustomStringConvertible {
 
     public var description: String {
         switch self {
-        case .noFileKey: "This reader was opened without the archive's file key, so it cannot read attachments."
+        case .noFileKey: "This reader was opened without the archive's file key, so it cannot read attachments or rebuild a message's body."
         }
     }
 }

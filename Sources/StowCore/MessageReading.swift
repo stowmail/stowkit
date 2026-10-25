@@ -158,3 +158,51 @@ public protocol InlinePartReading: Sendable {
     /// message or the ID is unknown. Never fetches anything from the network.
     func inlinePart(message: StoredMessageID, contentID: String) async throws -> InlinePart?
 }
+
+/// A message's body as the reader shows it (D-059, R9): the HTML part as
+/// decoded text, the plain part, or both, and the `cid:` references the HTML
+/// makes. Rebuilt in memory from the stored message; nothing is written to
+/// disk and nothing is fetched.
+public struct MessageBody: Hashable, Sendable, Codable {
+    public var messageID: StoredMessageID
+    /// Every text/html body part, decoded with its charset, joined by a line break. Nil if none.
+    /// Untrusted: show it only in a web view with scripts and network loads blocked.
+    public var html: String?
+    /// Every text/plain body part, decoded, joined by blank lines. Nil if none.
+    public var plain: String?
+    /// The Content-IDs the HTML refers to as `cid:...`, as `InlinePart.contentID(fromReference:)`
+    /// gives them, in the order first seen, each once.
+    public var contentIDs: [String]
+
+    public init(messageID: StoredMessageID, html: String?, plain: String?, contentIDs: [String]) {
+        self.messageID = messageID
+        self.html = html
+        self.plain = plain
+        self.contentIDs = contentIDs
+    }
+
+    /// The Content-IDs of every `cid:` reference in `html` (in `src`, `href`,
+    /// CSS `url()` or anywhere else), in order, each once.
+    public static func contentIDs(inHTML html: String) -> [String] {
+        let pattern = #"(?<![A-Za-z0-9])cid:[^\s"'<>()\\]+"#
+        guard let expression = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else { return [] }
+        var seen = Set<String>()
+        var found: [String] = []
+        let text = html as NSString
+        for match in expression.matches(in: html, range: NSRange(location: 0, length: text.length)) {
+            let id = InlinePart.contentID(fromReference: text.substring(with: match.range))
+            if !id.isEmpty, seen.insert(id).inserted { found.append(id) }
+        }
+        return found
+    }
+}
+
+/// Reads a message's displayable body for the app's reader (D-059, R9, D-409).
+///
+/// Separate from `MessageReading` for the same reason as `InlinePartReading`:
+/// the HTML is not in the database (only its text is), so the stored message
+/// is decrypted and parsed again, which needs the file key.
+public protocol MessageBodyReading: Sendable {
+    /// The body of `message`, or nil if there is no such message.
+    func body(of message: StoredMessageID) async throws -> MessageBody?
+}

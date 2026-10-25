@@ -90,7 +90,25 @@ public struct MIMEParser: Sendable {
         )
     }
 
+    /// The body parts as a reader shows them (R9, D-409): the HTML source of
+    /// every text/html body part, decoded with its charset, and the plain parts.
+    /// Walks the same tree as `parse`, so the same parts count as body text;
+    /// attachments are skipped without being decoded. Changes nothing `parse` stores.
+    public func displayBody(_ raw: Data) -> (html: String?, plain: String?) {
+        let bytes = [UInt8](raw)
+        var state = State()
+        state.keepHTMLSource = true
+        var headerWarnings: [String] = []
+        let block = HeaderParser.splitFields(bytes, in: 0..<bytes.count, warnings: &headerWarnings)
+        walk(bytes, fields: block.fields, body: block.bodyStart..<bytes.count, path: [], depth: 0,
+             defaultType: "text/plain", state: &state)
+        return (state.html.isEmpty ? nil : state.html.joined(separator: "\n"),
+                state.plain.isEmpty ? nil : state.plain.joined(separator: "\n\n"))
+    }
+
     struct State {
+        /// Keep each HTML part's source in `html` rather than its text, and skip attachments (`displayBody`).
+        var keepHTMLSource = false
         var plain: [String] = []
         var html: [String] = []
         var attachments: [ParsedAttachment] = []
@@ -184,12 +202,6 @@ public struct MIMEParser: Sendable {
         func field(_ name: String) -> String? {
             fields.first { $0.name.caseInsensitiveCompare(name) == .orderedSame }?.value
         }
-        let encodingHeader = field("Content-Transfer-Encoding")
-        let encoding = TransferDecoding.Encoding(header: encodingHeader)
-        if encoding == .unknown { state.warn("unknown Content-Transfer-Encoding") }
-        let (data, problem) = TransferDecoding.decode(bytes, body, encoding: encoding)
-        if problem, encoding == .base64 { state.warn("invalid base64") }
-
         let filename = disposition?[parameter: "filename"] ?? contentType?[parameter: "name"]
         let dispositionValue = disposition?.value
         let isAttachment = dispositionValue == "attachment"
@@ -197,12 +209,19 @@ public struct MIMEParser: Sendable {
         // carries a file name without saying "inline".
         let isBodyText = (type == "text/plain" || type == "text/html") && !isAttachment
             && (dispositionValue == "inline" || filename == nil)
+        if state.keepHTMLSource, !isBodyText { return }
+
+        let encodingHeader = field("Content-Transfer-Encoding")
+        let encoding = TransferDecoding.Encoding(header: encodingHeader)
+        if encoding == .unknown { state.warn("unknown Content-Transfer-Encoding") }
+        let (data, problem) = TransferDecoding.decode(bytes, body, encoding: encoding)
+        if problem, encoding == .base64 { state.warn("invalid base64") }
 
         if isBodyText {
             let decoded = Charset.decode(data, charset: contentType?[parameter: "charset"])
             if decoded.usedFallback { state.warn("body text not in its declared charset") }
             if type == "text/html" {
-                state.html.append(HTMLText.text(fromHTML: decoded.text))
+                state.html.append(state.keepHTMLSource ? decoded.text : HTMLText.text(fromHTML: decoded.text))
             } else {
                 state.plain.append(decoded.text.replacingOccurrences(of: "\r\n", with: "\n"))
             }
