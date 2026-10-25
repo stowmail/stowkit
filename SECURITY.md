@@ -27,6 +27,10 @@ What the engine promises, and where to look:
 
 The Stow app built on this engine is a separate product; report issues in it to the same address.
 
+## Security review
+
+What was checked before the engine was published, what was found and fixed, and what is still open: [docs/security-review.md](docs/security-review.md).
+
 ## Prompt injection
 
 The MCP server returns email written by other people to an AI assistant. An email can contain text meant to steer the assistant. Stow's tools can only read, mark email content as data, and keep each body between lines carrying a random code. That lowers the risk; it cannot remove it. If your assistant also has tools that can send email, fetch web pages or write files, an injected instruction could try to use them. Reports of ways around Stow's markings are welcome.
