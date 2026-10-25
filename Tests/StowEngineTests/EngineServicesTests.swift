@@ -39,7 +39,7 @@ func testKeychain() -> KeychainStore {
 
         // A new Mac: no keys in its Keychain.
         try keychain.deleteAll()
-        #expect(throws: KeyManagerError.keysMissing) { try manager.loadKeys() }
+        #expect(throws: KeyManagerError.keysMissing(backend: keychain.backend, service: keychain.service)) { try manager.loadKeys() }
         #expect(throws: ArchiveSetupError.archiveWithoutKeys(location.root.path)) { try ArchiveSetup.initialise(location, keyManager: manager) }
         #expect(throws: RecoveryBundleError.wrongKey) {
             try ArchiveSetup.recover(archiveFolder: location.root, recoveryKey: RecoveryKey.generate(), keyManager: manager)
@@ -218,6 +218,13 @@ func testKeychain() -> KeychainStore {
                                 power: { PowerState(onBattery: false, batteryPercent: nil, lowPowerMode: false) })
         guard case .offline = await offline.round().0 else { Issue.record("should be offline"); return }
 
+        // Missing keys are not a disconnected disk, and must not be reported as one (D-082).
+        let missingKeys = KeyManagerError.keysMissing(backend: .dataProtection, service: KeychainStore.defaultService)
+        let noKeys = Scheduler(openArchive: { throw missingKeys },
+                               makeSync: { _ in throw CocoaError(.fileNoSuchFile) },
+                               power: { PowerState(onBattery: false, batteryPercent: nil, lowPowerMode: false) })
+        #expect(await noKeys.round().0 == .cannotOpen(missingKeys.description))
+
         let location = ArchiveLocation(root: TestFixtures.temporaryDirectory())
         defer { try? FileManager.default.removeItem(at: location.root) }
         let keys = ArchiveKeys(databaseKey: SymmetricKey(size: .bits256), fileKey: SymmetricKey(size: .bits256))
@@ -318,6 +325,18 @@ func testKeychain() -> KeychainStore {
         #expect(plist["LowPriorityIO"] as? Bool == true)
         #expect(plist["ProgramArguments"] as? [String] == ["/usr/local/bin/stowmail", "daemon", "run"])
         #expect((plist["KeepAlive"] as? [String: Bool])?["SuccessfulExit"] == false)
+    }
+
+    /// D-082: reinstalling from a shell without STOW_KEYCHAIN keeps the old agent's keychain.
+    @Test func reinstallKeepsSettingsTheShellDoesNotSet() {
+        let previous = ["STOW_KEYCHAIN": "file", "STOW_ENV_FILE": "/old/.env", "STOW_LOG_LEVEL": "debug"]
+        let current = ["STOW_ENV_FILE": "/new/.env", "STOW_LOG_LEVEL": "", "HOME": "/Users/sam"]
+        let (environment, change) = LaunchAgent.reinstallEnvironment(current: current, previous: previous)
+        #expect(environment == ["STOW_KEYCHAIN": "file", "STOW_ENV_FILE": "/new/.env"])
+        #expect(change.kept == ["STOW_KEYCHAIN=file"])
+        #expect(change.changed == ["STOW_ENV_FILE: /old/.env to /new/.env"])
+        #expect(change.removed == ["STOW_LOG_LEVEL=debug"])
+        #expect(LaunchAgent.reinstallEnvironment(current: ["STOW_KEYCHAIN": "file"], previous: [:]).change == .init())
     }
 
     /// Step 8: the log file is redacted even if a caller slips.

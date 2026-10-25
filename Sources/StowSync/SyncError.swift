@@ -46,7 +46,7 @@ public enum SyncError: Error, Equatable, CustomStringConvertible {
         case .authenticationFailed(let text):
             "The mail server rejected the sign-in (\(text)). Try `stowmail account signin`."
         case .mailboxUnavailable(let text):
-            "Signed in, but the server has no mailbox Stow can reach over IMAP for this account (\(text)). This usually means the Microsoft account has no Outlook.com or Exchange Online mailbox (for example it was created with a non-Microsoft address), or IMAP is turned off for it. Signing in again will not help; this account cannot be synced."
+            "Signed in, but the server would not open this account's mailbox over IMAP (\(text)). This can be a fault on Microsoft's side that clears by itself, or the account may have no Outlook.com or Exchange Online mailbox (for example one created with a non-Microsoft address), or IMAP may be turned off for it. Signing in again will not help. The background sync tries again once a day."
         case .connectionFailed(let text): "Could not connect to the mail server: \(text)"
         case .connectionClosed(let text): "The mail server closed the connection\(text.map { ": \($0)" } ?? ".")"
         case .timedOut: "The mail server stopped responding."

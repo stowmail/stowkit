@@ -36,18 +36,22 @@ struct Daemon: AsyncParsableCommand {
     struct Install: AsyncParsableCommand {
         static let configuration = CommandConfiguration(
             abstract: "Install the background sync as a launchd agent that starts now and at every login.",
-            discussion: "The agent's file holds no secrets: only this program's path and a few settings, such as where the .env file is."
+            discussion: "The agent's file holds no secrets: only this program's path and a few settings, such as where the .env file is. Settings the installed agent already has are kept unless set in this shell; set one to empty to remove it."
         )
 
         func run() async throws {
             let executable = (Bundle.main.executableURL ?? URL(fileURLWithPath: CommandLine.arguments[0])).resolvingSymlinksInPath()
-            var environment = ProcessInfo.processInfo.environment.filter { LaunchAgent.allowedEnvironment.contains($0.key) }
-            if environment["STOW_ENV_FILE"] == nil {
+            var current = ProcessInfo.processInfo.environment.filter { LaunchAgent.allowedEnvironment.contains($0.key) }
+            if current["STOW_ENV_FILE"] == nil {
                 let local = URL(fileURLWithPath: FileManager.default.currentDirectoryPath).appendingPathComponent(".env")
-                if FileManager.default.fileExists(atPath: local.path) { environment["STOW_ENV_FILE"] = local.path }
+                if FileManager.default.fileExists(atPath: local.path) { current["STOW_ENV_FILE"] = local.path }
             }
+            let (environment, change) = LaunchAgent.reinstallEnvironment(current: current, previous: LaunchAgent.installedEnvironment())
             try LaunchAgent.install(executable: executable, environment: environment)
             print("Installed \(LaunchAgent.plistURL.path).")
+            if !change.kept.isEmpty { print("Kept from the previous install: \(change.kept.joined(separator: ", ")).") }
+            if !change.changed.isEmpty { print("Changed: \(change.changed.joined(separator: ", ")).") }
+            if !change.removed.isEmpty { print("Removed: \(change.removed.joined(separator: ", ")).") }
             print("The background sync runs now and at every login, at low priority. `stowmail status` shows how it is doing.")
             print("It runs a copy of this program at \(LaunchAgent.installedExecutable.path), so rebuilding does not affect it.")
             print("Run `stowmail daemon install` again to update it to a new build.")
@@ -115,8 +119,14 @@ struct Status: AsyncParsableCommand {
         }
         let heartbeat = (try? archive.meta("daemon_heartbeat")).flatMap { $0 }.flatMap(Int.init).map { Date(timeIntervalSince1970: TimeInterval($0)) }
         let daemon = LaunchAgent.isInstalled ? (LaunchAgent.isLoaded() ? "running" : "installed but not running") : "not installed (`stowmail daemon install`)"
-        print("Background sync: \(daemon)\(heartbeat.map { ", last active \(CLI.time($0))" } ?? "")")
-        if let reason = PowerState.current().pauseReason { print("Sync is paused: \(reason).") }
+        let pauseReason = PowerState.current().pauseReason
+        // A round finishes at least every few minutes while syncing; "running" alone hid a stuck sync (D-082).
+        if LaunchAgent.isLoaded(), pauseReason == nil, let heartbeat, Date().timeIntervalSince(heartbeat) > 20 * 60 {
+            print("Background sync: running, but it has not finished a round since \(CLI.time(heartbeat)). The reason is in \(LaunchAgent.outputLog.path).")
+        } else {
+            print("Background sync: \(daemon)\(heartbeat.map { ", last active \(CLI.time($0))" } ?? "")")
+        }
+        if let reason = pauseReason { print("Sync is paused: \(reason).") }
         print("Archive: \(location.root.path). Logs: \(LaunchAgent.logDirectory.path)")
     }
 

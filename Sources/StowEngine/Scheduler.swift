@@ -45,6 +45,10 @@ public enum RoundResult: Sendable, Equatable {
     case paused(String)
     /// The archive's folder is not available, for example a disconnected disk (D-023).
     case offline(String)
+    /// The folder is there but the archive could not be opened, for example its
+    /// keys are not in the Keychain searched. Kept apart from `offline` so the
+    /// reason points at the right fix (D-082).
+    case cannotOpen(String)
     /// Another Stow process is writing to the archive.
     case busy
 }
@@ -98,6 +102,7 @@ public actor Scheduler {
                 switch result {
                 case .paused(let reason): logger.notice("Sync paused", metadata: ["reason": "\(reason)"])
                 case .offline: logger.notice("Archive offline; sync paused until it is back")
+                case .cannotOpen(let reason): logger.error("Archive could not be opened; sync paused until it can", metadata: ["reason": "\(reason)"])
                 case .busy: logger.info("Archive busy; waiting")
                 case .worked, .idle: if lastLogged != nil, lastLogged != .worked, lastLogged != .idle { logger.notice("Sync resumed") }
                 }
@@ -106,7 +111,7 @@ public actor Scheduler {
             let pause: TimeInterval = switch result {
             case .worked: 1
             case .idle: settings.idleInterval
-            case .paused, .offline: 60
+            case .paused, .offline, .cannotOpen: 60
             case .busy: 30
             }
             do {
@@ -124,9 +129,10 @@ public actor Scheduler {
         do {
             archive = try openArchive()
         } catch let error as ArchiveLocationError {
-            return (.offline(error.description), [:])
+            if case .offline = error { return (.offline(error.description), [:]) }
+            return (.cannotOpen(error.description), [:])
         } catch {
-            return (.offline(Redact.scrub(String(describing: error))), [:])
+            return (.cannotOpen(Redact.scrub(String(describing: error))), [:])
         }
         defer { try? archive.database.close() }
         guard ArchiveSetup.isConfirmed(archive) else { return (.paused(ArchiveSetupError.recoveryNotConfirmed.description), [:]) }

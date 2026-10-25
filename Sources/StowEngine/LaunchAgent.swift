@@ -43,7 +43,7 @@ public enum LaunchAgent {
             .appendingPathComponent("Library/Application Support/ee.getstow.dev/bin/stowmail")
     }
 
-    static var outputLog: URL { logDirectory.appendingPathComponent("daemon.out.log") }
+    public static var outputLog: URL { logDirectory.appendingPathComponent("daemon.out.log") }
 
     /// The plist's contents. Environment variables outside `allowedEnvironment` are dropped.
     public static func plist(executable: URL, environment: [String: String]) -> [String: Any] {
@@ -63,6 +63,45 @@ public enum LaunchAgent {
         ]
         if !kept.isEmpty { plist["EnvironmentVariables"] = kept }
         return plist
+    }
+
+    /// The settings the installed agent runs with, or none if it is not installed.
+    public static func installedEnvironment() -> [String: String] {
+        guard let data = try? Data(contentsOf: plistURL),
+              let plist = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any]
+        else { return [:] }
+        return plist["EnvironmentVariables"] as? [String: String] ?? [:]
+    }
+
+    /// What changed between the agent being replaced and the new one.
+    public struct SettingsChange: Sendable, Equatable {
+        public var kept: [String] = []
+        public var changed: [String] = []
+        public var removed: [String] = []
+    }
+
+    /// The settings for a reinstall. A setting the old agent had is kept unless
+    /// this shell sets it, and set but empty removes it, so reinstalling from a
+    /// shell without `STOW_KEYCHAIN` cannot silently switch keychains (D-082).
+    public static func reinstallEnvironment(current: [String: String], previous: [String: String])
+        -> (environment: [String: String], change: SettingsChange) {
+        var environment = current.filter { allowedEnvironment.contains($0.key) }
+        var change = SettingsChange()
+        for key in allowedEnvironment {
+            let old = previous[key].flatMap { $0.isEmpty ? nil : $0 }
+            switch (old, environment[key]) {
+            case (let old?, nil):
+                environment[key] = old
+                change.kept.append("\(key)=\(old)")
+            case (let old?, let new?) where new.isEmpty:
+                change.removed.append("\(key)=\(old)")
+            case (let old?, let new?) where new != old:
+                change.changed.append("\(key): \(old) to \(new)")
+            default:
+                break
+            }
+        }
+        return (environment.filter { !$0.value.isEmpty }, change)
     }
 
     public static func encoded(executable: URL, environment: [String: String]) throws -> Data {

@@ -49,8 +49,8 @@ public enum KeyManagerError: Error, Equatable, CustomStringConvertible {
     /// `createKeys()` was called but keys already exist. Replacing them would
     /// make the existing archive unreadable, so this is refused.
     case keysAlreadyExist
-    /// No keys in the Keychain. Run setup (or restore from the recovery key).
-    case keysMissing
+    /// Neither key is in the Keychain searched: this backend and service.
+    case keysMissing(backend: KeychainBackend, service: String)
     /// Only one of the two keys is present: the Keychain was changed outside Stow.
     case keysIncomplete
     case malformedKey(String)
@@ -58,10 +58,29 @@ public enum KeyManagerError: Error, Equatable, CustomStringConvertible {
     public var description: String {
         switch self {
         case .keysAlreadyExist: "Archive keys already exist; refusing to replace them"
-        case .keysMissing: "No archive keys in the Keychain. Run setup, or restore with the recovery key"
+        case .keysMissing(let backend, let service):
+            Self.keysMissingDescription(backend: backend, service: service)
         case .keysIncomplete: "Only one archive key is in the Keychain; the archive cannot be opened"
         case .malformedKey(let item): "Keychain item \(item) is not a 256-bit key"
         }
+    }
+
+    /// Says where Stow looked, because the usual cause is looking in the wrong
+    /// place, and never suggests `init`, which is wrong for an existing archive (D-082).
+    /// The STOW_KEYCHAIN hint holds until builds are signed (D-012).
+    static func keysMissingDescription(backend: KeychainBackend, service: String) -> String {
+        let place = switch backend {
+        case .file: "the login keychain (STOW_KEYCHAIN=file)"
+        case .dataProtection: "the data protection keychain"
+        }
+        var text = "The archive keys are not in \(place) under \"\(service)\", so the archive cannot be opened."
+        if backend == .dataProtection {
+            text += " Development builds keep their keys in the login keychain: set STOW_KEYCHAIN=file and try again (for the background sync, run `stowmail daemon install` with it set)."
+        } else if service != KeychainStore.defaultService {
+            text += " STOW_KEYCHAIN_SERVICE is set; unset it if this is the real archive."
+        }
+        text += " If the keys are really gone, restore them with `stowmail recover --archive <folder>` and the recovery key."
+        return text
     }
 }
 
@@ -126,7 +145,7 @@ public struct KeyManager: Sendable {
         let files = try keychain.get(Self.fileKeyItem)
         switch (database, files) {
         case (nil, nil):
-            throw KeyManagerError.keysMissing
+            throw KeyManagerError.keysMissing(backend: keychain.backend, service: keychain.service)
         case (let database?, let files?):
             return ArchiveKeys(
                 databaseKey: try Self.key(from: database, item: Self.databaseKeyItem),
@@ -141,7 +160,9 @@ public struct KeyManager: Sendable {
     /// files (the MCP server, D-081): one Keychain item, so one prompt at most.
     /// Never creates it.
     public func loadDatabaseKey() throws -> Data {
-        guard let data = try keychain.get(Self.databaseKeyItem) else { throw KeyManagerError.keysMissing }
+        guard let data = try keychain.get(Self.databaseKeyItem) else {
+            throw KeyManagerError.keysMissing(backend: keychain.backend, service: keychain.service)
+        }
         return try Self.key(from: data, item: Self.databaseKeyItem).withUnsafeBytes { Data($0) }
     }
 

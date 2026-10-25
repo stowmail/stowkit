@@ -46,13 +46,26 @@ import Testing
 }
 
 @Suite struct KeyManagerTests {
+    @Test func missingKeysSayWhereStowLookedAndNeverSuggestInit() {
+        let wrongKeychain = KeyManagerError.keysMissing(backend: .dataProtection, service: KeychainStore.defaultService).description
+        #expect(wrongKeychain.contains("data protection keychain"))
+        #expect(wrongKeychain.contains("STOW_KEYCHAIN=file"))
+        let testService = KeyManagerError.keysMissing(backend: .file, service: "ee.getstow.stow.dev").description
+        #expect(testService.contains("STOW_KEYCHAIN_SERVICE"))
+        for text in [wrongKeychain, testService] {
+            #expect(text.contains("stowmail recover"))
+            #expect(!text.contains("init"))
+            #expect(!text.lowercased().contains("setup"))
+        }
+    }
+
     @Test func createThenLoadGivesTheSameKeys() throws {
         let keychain = makeTestKeychain()
         defer { try? keychain.deleteAll() }
         let manager = KeyManager(keychain: keychain)
 
         #expect(try !manager.keysExist())
-        #expect(throws: KeyManagerError.keysMissing) { try manager.loadKeys() }
+        #expect(throws: KeyManagerError.keysMissing(backend: keychain.backend, service: keychain.service)) { try manager.loadKeys() }
 
         let created = try manager.createKeys()
         let loaded = try manager.loadKeys()
