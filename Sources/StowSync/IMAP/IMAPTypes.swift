@@ -148,7 +148,7 @@ public struct FetchDiagnostics: Sendable, Equatable {
 /// The storage quota a server reports for a mailbox's quota root (R6, D-404).
 /// Gmail's is the whole Google account's storage, shared with Drive and Photos.
 public struct MailboxQuota: Sendable, Equatable {
-    /// What the quota root uses now, in bytes. Gmail always reports 0: do not show it.
+    /// What the quota root uses now, in bytes. Not shown: Stow's own sum of message sizes is what "your mail uses" means.
     public var usedBytes: Int64
     /// The limit, in bytes.
     public var limitBytes: Int64
@@ -163,8 +163,8 @@ public struct MailboxQuota: Sendable, Equatable {
 
     /// A quota from GETQUOTAROOT's STORAGE figures (RFC 2087: units of 1024
     /// octets), or nil when the limit says nothing real. Judged by the limit
-    /// alone (D-404, measured 25 Oct 2026): personal Gmail answers a real limit
-    /// (15,728,640 KiB) but always 0 used, while a Google Workspace account
+    /// alone (D-404, measured 25 Oct 2026): personal Gmail answered a real limit
+    /// (15,728,640 KiB) with 0 used (the account held 114 KB), while a Google Workspace account
     /// answers a limit of about 2^53 KiB because its storage is pooled across the
     /// organisation. Multiplying that by 1024 must not overflow.
     public static func fromStorage(usageKiB: Int, limitKiB: Int) -> MailboxQuota? {
