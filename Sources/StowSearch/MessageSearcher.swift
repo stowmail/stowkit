@@ -230,17 +230,17 @@ public final class MessageSearcher: MessageSearching, Sendable {
 
         var snippets: [Int64: (String, Set<SearchField>)] = [:]
         if let match {
-            let highlights = Self.columns.indices.map { "highlight(messages_fts, \($0), char(1), char(2)) AS h\($0)" }
-            let rows = try Row.fetchAll(db, sql: """
-                SELECT rowid, snippet(messages_fts, -1, '[', ']', '…', 16) AS snippet, \(highlights.joined(separator: ", "))
-                FROM messages_fts WHERE messages_fts MATCH ? AND rowid IN (\(placeholders))
-                """, arguments: StatementArguments([match] + ids))
-            for row in rows {
-                var fields = Set<SearchField>()
-                for (index, column) in Self.columns.enumerated() {
-                    if let text: String = row["h\(index)"], text.contains("\u{1}") { fields.insert(column.field) }
-                }
-                snippets[row["rowid"]] = (row["snippet"] ?? "", fields)
+            let fields = try matchedFields(db, query, ids: ids, placeholders: placeholders)
+            // One snippet column per message, so FTS5 tokenises one column rather than scoring every
+            // column (attachment text can run to a million characters, D-205). Grouped by column.
+            var byColumn: [Int: [Int64]] = [:]
+            for id in ids { byColumn[Self.snippetColumn(fields[id] ?? []), default: []].append(id) }
+            for (column, members) in byColumn {
+                let rows = try Row.fetchAll(db, sql: """
+                    SELECT rowid, snippet(messages_fts, \(column), '[', ']', '…', 16) AS snippet
+                    FROM messages_fts WHERE messages_fts MATCH ? AND rowid IN (\(Self.placeholders(members.count)))
+                    """, arguments: StatementArguments([match] + members))
+                for row in rows { snippets[row["rowid"]] = (row["snippet"] ?? "", fields[row["rowid"]] ?? []) }
             }
         }
 
@@ -264,6 +264,48 @@ public final class MessageSearcher: MessageSearching, Sendable {
                 sourceState: SourceState(rawValue: row["source_state"]) ?? .present
             )
         }
+    }
+
+    /// Which fields each message matched in, from the index alone: one column-filtered MATCH per
+    /// column for the free text, plus the fields a `from:`, `to:` or `subject:` filter names.
+    /// Never reads the text, unlike `highlight()`, which returned every column whole (D-417).
+    func matchedFields(_ db: Database, _ query: SearchQuery, ids: [Int64], placeholders: String) throws -> [Int64: Set<SearchField>] {
+        var fields: [Int64: Set<SearchField>] = [:]
+        if let text = FTSExpression.build(query.text) {
+            for column in Self.columns {
+                for id in try Int64.fetchAll(db, sql: """
+                    SELECT rowid FROM messages_fts WHERE messages_fts MATCH ? AND rowid IN (\(placeholders))
+                    """, arguments: StatementArguments(["{\(column.name)} : (\(text))"] + ids)) {
+                    fields[id, default: []].insert(column.field)
+                }
+            }
+        }
+        var named: Set<SearchField> = []
+        if query.from.flatMap({ FTSExpression.build($0) }) != nil { named.insert(.from) }
+        if query.to.flatMap({ FTSExpression.build($0) }) != nil { named.formUnion([.to, .cc]) }
+        if query.subject.flatMap({ FTSExpression.build($0) }) != nil { named.insert(.subject) }
+        if !named.isEmpty {
+            // A filter matched in one of its columns; keep the ones the index confirms.
+            for field in named {
+                guard let column = Self.columns.first(where: { $0.field == field }),
+                      let value = field == .from ? query.from : field == .subject ? query.subject : query.to,
+                      let expression = FTSExpression.build(value) else { continue }
+                for id in try Int64.fetchAll(db, sql: """
+                    SELECT rowid FROM messages_fts WHERE messages_fts MATCH ? AND rowid IN (\(placeholders))
+                    """, arguments: StatementArguments(["{\(column.name)} : (\(expression))"] + ids)) {
+                    fields[id, default: []].insert(field)
+                }
+            }
+        }
+        return fields
+    }
+
+    /// The column a message's snippet comes from: the body when it matched, then the cheaper
+    /// columns, and attachment text last, since it is the costliest to tokenise.
+    static func snippetColumn(_ fields: Set<SearchField>) -> Int {
+        let order: [SearchField] = [.body, .subject, .attachmentName, .from, .to, .cc, .attachmentText]
+        let field = order.first(where: fields.contains) ?? .body
+        return columns.firstIndex { $0.field == field } ?? 4
     }
 
     // MARK: Sender suggestions (D-057, R5)
