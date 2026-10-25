@@ -264,6 +264,10 @@ final class MCPFixture: @unchecked Sendable {
         let last = await fixture.call("get_attachment", ["message_id": .int(id), "attachment": 1, "offset": 130_000])
         #expect(last.results == 1_999)
         #expect(!last.text.contains("More text"))
+        let past = await fixture.call("get_attachment", ["message_id": .int(id), "attachment": 1, "offset": 500_000])
+        #expect(!past.isError)
+        #expect(past.text.contains("No text at offset 500000; the text has 131999 characters."))
+        #expect(past.results == 0)
         let wrong = await fixture.call("get_attachment", ["message_id": .int(id), "attachment": 2])
         #expect(wrong.text.contains("has 1 attachment(s); there is no number 2"))
     }

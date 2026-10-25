@@ -284,7 +284,7 @@ public struct ArchiveTools: Sendable {
 
         var lines = ["Attachment \(index) of message [\(id)]: \(Self.attachmentLine(result.info))"]
         let shown = result.text?.unicodeScalars.count ?? 0
-        if let text = result.text, result.info.textLength > 0 {
+        if let text = result.text, !text.isEmpty {
             let method = result.method.map { [ "pdfkit": "read from the PDF", "docx": "read from the Word file", "ocr": "recognised by OCR",
                                                "plain": "plain text" ][$0] ?? $0 } ?? "extracted"
             lines.append("Text \(method): characters \(offset + 1) to \(offset + shown) of \(result.info.textLength).")
