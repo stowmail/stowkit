@@ -91,6 +91,8 @@ public final class FakeIMAPServer: @unchecked Sendable {
     public var examineAnswersReadWrite: Bool { get { sync { _readWrite } } set { sync { _readWrite = newValue } } }
 
     // Observations.
+    /// The STORAGE quota GETQUOTAROOT reports, in KiB (used, limit); nil answers NO.
+    public var storageQuotaKiB: (used: Int, limit: Int)? { get { sync { _quota } } set { sync { _quota = newValue } } }
     public var commandLog: [String] { sync { _log } }
     public var connectionCount: Int { sync { _connections } }
     public var bodyFetchCount: Int { sync { _bodyFetches } }
@@ -115,6 +117,7 @@ public final class FakeIMAPServer: @unchecked Sendable {
     private var _bodyless: Set<UInt32> = []
     private var _expunge: Set<UInt32> = []
     private var _log: [String] = []
+    private var _quota: (used: Int, limit: Int)?
     private var _connections = 0
     private var _bodyFetches = 0
     private var _served: [UInt32: Int] = [:]
@@ -273,6 +276,12 @@ public final class FakeIMAPServer: @unchecked Sendable {
             send(out, to: client)
         case "UID FETCH":
             fetch(tag: tag, rest: rest, client)
+        case "GETQUOTAROOT":
+            if let quota = _quota {
+                send("* QUOTAROOT \(rest) \"\"\r\n* QUOTA \"\" (STORAGE \(quota.used) \(quota.limit))\r\n\(tag) OK Success\r\n", to: client)
+            } else {
+                send("\(tag) NO No quota here\r\n", to: client)
+            }
         case "LOGOUT":
             send("* BYE Logging out\r\n\(tag) OK LOGOUT completed\r\n", to: client)
             close(client)

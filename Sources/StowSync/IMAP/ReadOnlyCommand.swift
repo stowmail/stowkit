@@ -14,7 +14,7 @@ enum UIDSelection: Sendable, Equatable {
     }
 }
 
-/// The complete list of IMAP commands Stow can send (D-109).
+/// The complete list of IMAP commands Stow can send (D-109; GETQUOTAROOT added by D-404).
 ///
 /// This is the only way `IMAPSession` builds a command, and the connection
 /// only accepts values of this type, so a command that changes the mailbox
@@ -47,6 +47,10 @@ enum ReadOnlyCommand: Sendable {
     /// `UID FETCH 1:* (UID X-GM-MSGID)`: the Gmail IDs in a folder such as Spam
     /// or Bin, to classify messages that left All Mail. Identifiers only, never content (D-039).
     case fetchGmailIDs(ClosedRange<UInt32>)
+    /// `GETQUOTAROOT <mailbox>` (RFC 2087, RFC 9208): reads the quota that applies
+    /// to a mailbox, for "your mail uses 6.2 GB of 15 GB" (R6, D-404). Only reads.
+    /// SETQUOTA, which changes a quota, has no case.
+    case getQuotaRoot(rawName: [UInt8])
     case logout
 
     /// The command verb, for logs. Never includes arguments, which may hold a
@@ -58,6 +62,7 @@ enum ReadOnlyCommand: Sendable {
         case .listAll: "LIST"
         case .examine: "EXAMINE"
         case .fetchSummaries, .fetchSummariesOf, .fetchHeaderFields, .fetchMessages, .fetchStates, .fetchGmailIDs: "UID FETCH"
+        case .getQuotaRoot: "GETQUOTAROOT"
         case .logout: "LOGOUT"
         }
     }
@@ -97,6 +102,8 @@ enum ReadOnlyCommand: Sendable {
             return .uidFetch(.range(Self.uidRange(range)), attributes, modifiers)
         case .fetchGmailIDs(let range):
             return .uidFetch(.range(Self.uidRange(range)), [.uid, .gmailMessageID], [])
+        case .getQuotaRoot(let rawName):
+            return .getQuotaRoot(MailboxName(rawName))
         case .logout:
             return .logout
         }

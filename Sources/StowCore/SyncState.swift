@@ -211,6 +211,12 @@ public protocol SyncStateStore: Sendable {
 
     func setSourceStates(_ account: AccountID, _ states: [Int64: SourceState], at: Date) async throws
 
+    /// Messages with no copy left on the server whose source state was never
+    /// settled, because an earlier run stopped between `markRemovedFromServer`
+    /// and `setSourceStates` (for example a dropped connection while looking in
+    /// Spam and Bin). A full check classifies them again (D-408).
+    func unclassifiedVanished(_ account: AccountID) async throws -> [VanishedMessage]
+
     /// After a full comparison with the server: stores the time and CONDSTORE's HIGHESTMODSEQ.
     func folderChecked(_ account: AccountID, folder: String, uidValidity: UInt32, highestModSeq: UInt64?, fullCheck: Bool, at: Date) async throws
 

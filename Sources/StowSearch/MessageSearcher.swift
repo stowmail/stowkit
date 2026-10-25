@@ -46,6 +46,10 @@ public final class MessageSearcher: MessageSearching, Sendable {
         try await database.read { db in try self.thread(db, of: message) }
     }
 
+    public func senderSuggestions(prefix: String, accounts: [AccountID], limit: Int) async throws -> [SenderSuggestion] {
+        try await database.read { db in try self.senderSuggestions(db, prefix: prefix, accounts: accounts, limit: limit) }
+    }
+
     /// The MATCH expression for a query, or nil if it has no text conditions.
     static func matchExpression(_ query: SearchQuery) -> String? {
         var parts: [String] = []
@@ -259,6 +263,54 @@ public final class MessageSearcher: MessageSearching, Sendable {
                 ocrPending: row["ocr_pending"]
             )
         }
+    }
+
+    // MARK: Sender suggestions (D-057, R5)
+
+    /// Most suggestions one call returns.
+    public static let maximumSenderSuggestions = 50
+
+    /// Distinct From addresses (the first From of each message) whose address,
+    /// display name, or a word of the display name starts with `prefix`,
+    /// case-insensitively, by how many messages each sent. No extra index: the
+    /// From rows are scanned once (timing in D-403).
+    func senderSuggestions(_ db: Database, prefix: String, accounts: [AccountID], limit: Int) throws -> [SenderSuggestion] {
+        let wanted = prefix.trimmingCharacters(in: .whitespaces).lowercased()
+        let limit = min(max(0, limit), Self.maximumSenderSuggestions)
+        guard !wanted.isEmpty, limit > 0 else { return [] }
+        let pattern = Self.likeLiteral(wanted) + "%"
+        var filters = ["""
+            (a.address LIKE ? ESCAPE '\\' OR ma.display_name LIKE ? ESCAPE '\\' OR ma.display_name LIKE ? ESCAPE '\\')
+            """]
+        var arguments: [any DatabaseValueConvertible] = [pattern, pattern, "% " + pattern]
+        if !accounts.isEmpty {
+            filters.append("m.account_id IN (\(Self.placeholders(accounts.count)))")
+            arguments.append(contentsOf: accounts.map(\.rawValue))
+        }
+        if try Bool.fetchOne(db, sql: "SELECT EXISTS (SELECT 1 FROM messages WHERE source_state = 'spam')") == true {
+            filters.append("m.source_state != 'spam'")
+        }
+        let rows = try Row.fetchAll(db, sql: """
+            SELECT a.id, a.address, count(*) AS n
+            FROM message_addresses ma JOIN addresses a ON a.id = ma.address_id JOIN messages m ON m.id = ma.message_id
+            WHERE ma.role = 'from' AND ma.position = 0 AND \(filters.joined(separator: " AND "))
+            GROUP BY a.id ORDER BY n DESC, a.address LIMIT ?
+            """, arguments: StatementArguments(arguments + [limit]))
+        return try rows.map { row in
+            // The display name this address most often used, for the token's label.
+            let name = try String.fetchOne(db, sql: """
+                SELECT display_name FROM message_addresses WHERE address_id = ? AND role = 'from' AND display_name IS NOT NULL
+                GROUP BY display_name ORDER BY count(*) DESC, display_name LIMIT 1
+                """, arguments: [row["id"] as Int64])
+            return SenderSuggestion(sender: EmailAddress(name: name, address: row["address"]), messageCount: row["n"])
+        }
+    }
+
+    /// `text` matched literally inside a LIKE pattern with `ESCAPE '\'`.
+    static func likeLiteral(_ text: String) -> String {
+        text.replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "%", with: "\\%")
+            .replacingOccurrences(of: "_", with: "\\_")
     }
 
     // MARK: Folders and threads (D-079)

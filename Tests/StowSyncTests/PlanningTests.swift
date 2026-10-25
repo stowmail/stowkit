@@ -1,6 +1,7 @@
 import Foundation
 import NIOIMAPCore
 import StowCore
+import StowTestSupport
 import Testing
 @testable import StowSync
 
@@ -143,11 +144,18 @@ import Testing
             .fetchSummaries(1...10, gmail: false), .fetchSummaries(1...10, gmail: true), .fetchSummariesOf(uids: [4, 9]),
             .fetchHeaderFields(.list([3, 4]), fields: ["From", "List-Unsubscribe"]), .fetchHeaderFields(.range(1...9), fields: ["Message-ID"]),
             .fetchMessages(uids: [1, 2, 5], gmail: true), .fetchStates(1...10, gmail: true, changedSince: nil),
-            .fetchStates(1...10, gmail: false, changedSince: 42), .fetchGmailIDs(1...10), .logout,
+            .fetchStates(1...10, gmail: false, changedSince: 42), .fetchGmailIDs(1...10),
+            .getQuotaRoot(rawName: Array("INBOX".utf8)), .logout,
         ]
+        // GETQUOTAROOT is the only command added since D-109 (D-404); nothing else may appear.
+        #expect(Set(all.map(\.verb)) == ["CAPABILITY", "AUTHENTICATE XOAUTH2", "LIST", "EXAMINE", "UID FETCH", "GETQUOTAROOT", "LOGOUT"])
         for command in all {
+            #expect(!mailboxWriteVerbs.contains(command.verb), "\(command.verb)")
             switch command.command {
             case .capability, .authenticate, .list, .logout:
+                break
+            case .getQuotaRoot:
+                // Reads a quota. SETQUOTA, which changes one, has no case.
                 break
             case .examine(_, let parameters):
                 // CONDSTORE only asks for mod-sequences; EXAMINE stays read-only.
@@ -189,7 +197,7 @@ import Testing
             .appendingPathComponent("Sources/StowSync")
         let forbidden = [".select(", ".store(", ".uidStore(", ".expunge", ".uidExpunge(", ".copy(", ".uidCopy(", ".move(",
                          ".uidMove(", ".append(", ".create(", ".delete(", ".rename(", ".subscribe(", ".setMetadata(",
-                         "peek: false", ".rfc822,", ".rfc822]", "AppendCommand", ".idleStart"]
+                         "peek: false", ".rfc822,", ".rfc822]", "AppendCommand", ".idleStart", ".setQuota("]
         let files = ["IMAP", "Sync"].flatMap { folder in
             FileManager.default.enumerator(at: sources.appendingPathComponent(folder), includingPropertiesForKeys: nil)!
                 .compactMap { $0 as? URL }.filter { $0.pathExtension == "swift" }

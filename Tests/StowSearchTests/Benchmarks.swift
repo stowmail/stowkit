@@ -98,6 +98,12 @@ struct Benchmarks {
             print(String(format: "BENCH folders %d  %6.1f ms", folders, listed * 1000))
             #expect(took < 0.1)
         }
+        // R5 (D-403): From token suggestions, no extra index. One letter matches every sender here: the worst case.
+        for prefix in [String(generator.sender.prefix(1)), generator.sender] {
+            let (found, took) = try await best { try await searcher.senderSuggestions(prefix: prefix, accounts: [], limit: 10).count }
+            print(String(format: "BENCH senders %-40@ %2d  %6.1f ms", "'\(prefix)'" as NSString, found, took * 1000))
+            #expect(took < 0.25, "senders \(prefix)")
+        }
         let stats = try ArchiveStats.collect(archive)
         print("BENCH archive: database \(stats.databaseBytes / 1_048_576) MB, raw stored \(stats.rawStoredBytes / 1_048_576) MB")
     }

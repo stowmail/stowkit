@@ -1,6 +1,6 @@
 {
-  "version": 1,
-  "note": "Plain data for the sender signals. Domains match themselves and any subdomain. Edit freely; no code change needed.",
+  "version": 2,
+  "note": "Plain data for the sender signals and protected mail. List-provider domains match themselves and any subdomain; billing senders match a full address or exactly that domain. Keywords match whole words, ignoring case. Edit freely; no code change needed.",
   "noReplyLocalParts": [
     "noreply", "donotreply", "dontreply", "notreply", "mailerdaemon", "bounce", "bounces"
   ],
@@ -21,5 +21,28 @@
     "salesforce.com", "exacttarget.com", "et.salesforce.com",
     "marketo.com", "mktomail.com",
     "substack.com", "convertkit-mail.com", "ck.page", "beehiiv.com", "buttondown.email"
+  ],
+  "protectedSubjectKeywords": [
+    "invoice", "invoices", "invoiced",
+    "receipt", "receipts",
+    "order", "orders", "ordered",
+    "vat",
+    "payment", "payments",
+    "statement", "statements"
+  ],
+  "protectedSenderKeywords": [
+    "invoice", "invoices", "billing",
+    "receipt", "receipts",
+    "order", "orders",
+    "vat",
+    "payment", "payments",
+    "statement", "statements"
+  ],
+  "billingSenders": [
+    "auto-confirm@amazon.co.uk", "auto-confirm@amazon.com", "auto-confirm@amazon.de", "auto-confirm@amazon.fr",
+    "digital-no-reply@amazon.co.uk", "digital-no-reply@amazon.com",
+    "no_reply@email.apple.com",
+    "service@paypal.co.uk", "service@paypal.com", "service@paypal.de", "service@intl.paypal.com",
+    "googleplay-noreply@google.com", "payments-noreply@google.com"
   ]
 }

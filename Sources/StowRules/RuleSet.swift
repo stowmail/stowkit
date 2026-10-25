@@ -65,6 +65,24 @@ public struct RuleOutcome: Hashable, Sendable {
     public var reason: String
 }
 
+/// Why a message is protected: never suggested for removal (UI-10, D-407).
+public struct Protection: Hashable, Sendable {
+    public enum Kind: String, Hashable, Sendable {
+        /// The user protects this sender (`ProtectedSenders` in the archive).
+        case userSender
+        /// A known billing sender from `rules-data.json`.
+        case billingSender
+        /// A keyword in the sender's address, such as `invoices@`.
+        case senderKeyword
+        /// A keyword in the subject, such as "invoice".
+        case subjectKeyword
+    }
+
+    public var kind: Kind
+    /// Shown to the user. Names a keyword or a domain, never an address or the subject (D-303).
+    public var reason: String
+}
+
 /// The answer for one message: a score, a suggestion and the reasons for both.
 public struct Assessment: Hashable, Sendable {
     public var score: Int
@@ -74,6 +92,8 @@ public struct Assessment: Hashable, Sendable {
     public var reasons: [String]
     /// Set when a per-sender override decided the suggestion.
     public var overriddenBy: String?
+    /// Set when the message is protected: its suggestion is always keep (D-407).
+    public var protection: Protection?
 }
 
 /// The full, user-editable rule configuration. Saved as versioned JSON.
@@ -89,6 +109,14 @@ public struct RuleSet: Codable, Hashable, Sendable {
     public var minimumStrongSignals: Int
     public var recipientThreshold: Int
     public var senderOverrides: [SenderOverride]
+    /// Addresses or domains whose mail the user protects (D-407). Kept in the
+    /// encrypted archive, not in the settings file, because they name senders
+    /// (D-041): never encoded, filled in by `EngineRules.ruleSet`.
+    public var protectedSenders: [String] = []
+
+    enum CodingKeys: String, CodingKey {
+        case version, rules, deprioritiseAt, considerDeletingAt, minimumStrongSignals, recipientThreshold, senderOverrides
+    }
 
     public init(
         version: Int = RuleSet.currentVersion,
@@ -168,9 +196,42 @@ public struct RuleSet: Codable, Hashable, Sendable {
             overriddenBy = "Your override for this sender: \(o.suggestion.label)."
             reasons.append(overriddenBy!)
         }
+
+        // Protection comes last and wins over everything, overrides included:
+        // protected mail is never suggested for removal (D-407).
+        let protection = protection(headers, data: data)
+        if let protection {
+            if suggestion != .keep, overriddenBy != nil {
+                reasons.append("Protected mail is always kept, so your override does not apply to it.")
+            }
+            suggestion = .keep
+            reasons.insert(protection.reason, at: 0)
+        }
         if reasons.isEmpty { reasons.append("No bulk-mail signals found.") }
 
-        return Assessment(score: score, suggestion: suggestion, outcomes: outcomes, reasons: reasons, overriddenBy: overriddenBy)
+        return Assessment(score: score, suggestion: suggestion, outcomes: outcomes, reasons: reasons, overriddenBy: overriddenBy,
+                          protection: protection)
+    }
+
+    /// Whether the message is protected, and why: the user's protected senders
+    /// first, then known billing senders, then keywords in the sender's address
+    /// and in the subject.
+    public func protection(_ headers: MessageHeaders, data: RulesData = .bundled) -> Protection? {
+        if let sender = headers.from.first {
+            if protectedSenders.contains(where: { SenderOverride(match: $0, suggestion: .keep).matches(sender) }) {
+                return Protection(kind: .userSender, reason: "Protected: you protect mail from \(sender.domain).")
+            }
+            if data.billingSender(sender) != nil {
+                return Protection(kind: .billingSender, reason: "Protected: \(sender.domain) is a known billing sender.")
+            }
+            if let keyword = data.protectedSenderKeyword(inLocalPart: sender.localPart) {
+                return Protection(kind: .senderKeyword, reason: "Protected: sender address contains '\(keyword)'.")
+            }
+        }
+        if let subject = headers.subject, let keyword = data.protectedSubjectKeyword(in: subject) {
+            return Protection(kind: .subjectKeyword, reason: "Protected: subject contains '\(keyword)'.")
+        }
+        return nil
     }
 }
 

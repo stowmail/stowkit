@@ -75,6 +75,26 @@ public actor IMAPSession {
         return found
     }
 
+    /// The STORAGE quota that applies to a mailbox (INBOX by default), from
+    /// GETQUOTAROOT, which only reads (R6, D-404). Nil when the server refuses
+    /// the command or reports no storage limit. Callers send it only when the
+    /// server advertises QUOTA after sign-in.
+    public func storageQuota(of mailbox: [UInt8] = Array("INBOX".utf8)) async throws -> MailboxQuota? {
+        var found: MailboxQuota?
+        let completion = try await runForCompletion(.getQuotaRoot(rawName: mailbox)) { response in
+            guard found == nil, case .untagged(.quota(_, let resources)) = response,
+                  let storage = resources.first(where: { $0.resourceName.uppercased() == "STORAGE" }), storage.limit > 0
+            else { return }
+            // RFC 2087: STORAGE is counted in units of 1024 octets.
+            found = MailboxQuota(usedBytes: Int64(storage.usage) * 1024, limitBytes: Int64(storage.limit) * 1024)
+        }
+        guard completion.status == "OK" else {
+            logger.debug("GETQUOTAROOT refused", metadata: ["status": "\(completion.status)", "text": "\(Self.describe(completion.text))"])
+            return nil
+        }
+        return found
+    }
+
     /// Every mailbox the server lists, including ones that cannot be opened.
     public func listFolders() async throws -> [IMAPFolder] {
         var folders: [IMAPFolder] = []

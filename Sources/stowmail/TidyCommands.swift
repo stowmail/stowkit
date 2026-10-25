@@ -74,6 +74,12 @@ struct Remove: AsyncParsableCommand {
         _ = try removal.sweepUnusedFiles()
         let plan = try removal.plan(selector, account: id)
         print("\(plan.messageIDs.count) message(s), \(CLI.megabytes(plan.bytes)) as the provider counts them, from \(plan.senderDomains) sender domain(s).")
+        if plan.protectedLeftOut > 0 {
+            print("\(plan.protectedLeftOut) protected message(s) left out: receipts, invoices, orders, payments, statements and senders you protect are never removed by a rule. `stowmail rules protected` lists your protected senders.")
+        }
+        if plan.protectedIncluded > 0 {
+            print("\(plan.protectedIncluded) of them are protected (receipts, invoices, orders and the like). They are included because you named this \(sender != nil ? "sender" : "group") yourself.")
+        }
         guard !plan.messageIDs.isEmpty else { return }
         if dryRun {
             print("Nothing removed (--dry-run).")

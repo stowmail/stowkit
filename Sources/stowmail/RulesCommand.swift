@@ -9,7 +9,7 @@ import StowStore
 struct Rules: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         abstract: "Explain, list and run the bulk-mail rules.",
-        subcommands: [RulesList.self, RulesExplain.self, RulesReportCommand.self, RulesOverride.self]
+        subcommands: [RulesList.self, RulesExplain.self, RulesReportCommand.self, RulesOverride.self, RulesProtected.self]
     )
 }
 
@@ -97,6 +97,11 @@ struct RulesReportCommand: AsyncParsableCommand {
         for signal in SignalID.allCases {
             print("  \(signal.rawValue): \(report.signalCounts[signal] ?? 0)")
         }
+        let protected = report.protected.values.reduce(0, +)
+        print("Protected (always kept): \(protected)")
+        for kind in [Protection.Kind.userSender, .billingSender, .senderKeyword, .subjectKeyword] where report.protected[kind] != nil {
+            print("  \(kind.rawValue): \(report.protected[kind]!)")
+        }
         if report.unreadable > 0 { print("\(report.unreadable) message(s) could not be read back; run `stowmail verify`.") }
     }
 }
@@ -132,6 +137,48 @@ struct RulesOverride: AsyncParsableCommand {
         for o in try overrides.list(for: id) {
             print("  \(o.match) -> \(o.suggestion.rawValue)\(o.account == nil ? "" : " (one account)")")
         }
+    }
+}
+
+struct RulesProtected: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "protected",
+        abstract: "List the senders you protect, or protect or stop protecting one.",
+        discussion: """
+            Mail from a protected address or domain is never suggested for removal, like receipts, invoices and \
+            orders (D-407). Kept in the encrypted archive. The sender's archived mail is assessed again at once.
+            """
+    )
+
+    @OptionGroup var options: RulesOptions
+    @Argument(help: "An address, or a domain (that domain only).") var match: String?
+    @Flag(help: "Stop protecting this address or domain.") var remove = false
+
+    func validate() throws {
+        if remove, match == nil { throw ValidationError("Say which address or domain to stop protecting.") }
+    }
+
+    func run() async throws {
+        CLI.bootstrapLogging()
+        let (archive, lock) = try CLIArchive.openForWriting(requireRecovery: false)
+        defer { lock.release() }
+        let protected = ProtectedSenders(archive: archive)
+        if let match {
+            let changed = remove ? try protected.remove(match) : try protected.add(match)
+            switch (remove, changed) {
+            case (false, true): print("Mail from \(match) is now protected.")
+            case (false, false): print("\(match) was already protected.")
+            case (true, true): print("\(match) is no longer protected.")
+            case (true, false): print("\(match) was not protected.")
+            }
+            if changed {
+                let report = try RulesRunner.run(archive, settings: options.url, sender: match)
+                print("\(report.messages) archived message(s) from it assessed again.")
+            }
+        }
+        let list = try protected.list()
+        print("Protected senders: \(list.count)")
+        for entry in list { print("  \(entry)") }
     }
 }
 

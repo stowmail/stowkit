@@ -70,6 +70,10 @@ public final class DirectMCPArchive: MCPArchive {
         try await MessageSearcher(database: database()).thread(of: message)
     }
 
+    public func senderSuggestions(prefix: String, accounts: [AccountID], limit: Int) async throws -> [SenderSuggestion] {
+        try await MessageSearcher(database: database()).senderSuggestions(prefix: prefix, accounts: accounts, limit: limit)
+    }
+
     public func message(_ id: StoredMessageID, bodyLimit: Int) async throws -> MessageDetail? {
         try await MessageReader(database: database()).message(id, bodyLimit: bodyLimit)
     }

@@ -98,10 +98,22 @@ struct Search: AsyncParsableCommand {
     @Option(help: "Maximum results.") var limit = 20
     @Option(help: "Skip this many results first.") var offset = 0
     @Flag(help: "List the folders and labels in: can filter by, instead of searching.") var folders = false
+    @Option(help: "Suggest senders starting with this, as the app's From token does, instead of searching.") var senders: String?
 
     func run() async throws {
         let archive = try CLIArchive.open(readOnly: true)
         let searcher = MessageSearcher(archive: archive)
+        if let senders {
+            let start = Date()
+            let found = try await searcher.senderSuggestions(prefix: senders, accounts: [], limit: limit)
+            let elapsed = Date().timeIntervalSince(start)
+            for suggestion in found {
+                let name = suggestion.sender.name.map { "\($0) " } ?? ""
+                print("\(name)<\(suggestion.sender.address)>  \(suggestion.messageCount)")
+            }
+            print("\(found.count) sender(s) in \(Int(elapsed * 1000)) ms")
+            return
+        }
         if folders {
             let accounts = CLIArchive.accounts(archive)
             for folder in try await searcher.folders(accounts: []) {

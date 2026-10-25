@@ -31,6 +31,20 @@ public struct RemovalPlan: Sendable, Equatable {
     public var bytes: Int
     /// Distinct sender domains among them, for the summary.
     public var senderDomains: Int
+    /// Protected messages the selector matched but left out: a rule or
+    /// suggestion never removes protected mail (D-407).
+    public var protectedLeftOut = 0
+    /// Protected messages in `messageIDs`: only when the user named the sender
+    /// or the source state themselves.
+    public var protectedIncluded = 0
+
+    public init(messageIDs: [StoredMessageID], bytes: Int, senderDomains: Int, protectedLeftOut: Int = 0, protectedIncluded: Int = 0) {
+        self.messageIDs = messageIDs
+        self.bytes = bytes
+        self.senderDomains = senderDomains
+        self.protectedLeftOut = protectedLeftOut
+        self.protectedIncluded = protectedIncluded
+    }
 }
 
 public struct RemovalResult: Sendable, Equatable {
@@ -75,6 +89,9 @@ public struct ArchiveRemoval: Sendable {
             .replacingOccurrences(of: "_", with: "\\_")
     }
 
+    /// True for a message whose stored rules result marks it protected (D-407).
+    static let isProtectedSQL = "(',' || coalesce(m.rule_signals, '') || ',') LIKE '%,\(StoredRuleResult.protectedMarker),%'"
+
     public func plan(_ selector: RemovalSelector, account: AccountID? = nil) throws -> RemovalPlan {
         try archive.database.read { db in
             var conditions: [String] = []
@@ -105,13 +122,22 @@ public struct ArchiveRemoval: Sendable {
                 arguments.append(state.rawValue)
             }
             let rows = try Row.fetchAll(db, sql: """
-                SELECT m.id, m.size, a.domain FROM messages m LEFT JOIN addresses a ON a.id = m.from_address_id
+                SELECT m.id, m.size, a.domain, \(Self.isProtectedSQL) AS protected
+                FROM messages m LEFT JOIN addresses a ON a.id = m.from_address_id
                 WHERE \(conditions.joined(separator: " AND ")) ORDER BY m.id
                 """, arguments: StatementArguments(arguments))
+            // Rules and suggestions never pick protected mail; a sender or source state the user names does (D-407).
+            let leavesProtectedOut: Bool = switch selector {
+            case .signal, .suggestion: true
+            case .sender, .sourceState: false
+            }
+            let chosen = leavesProtectedOut ? rows.filter { !($0["protected"] as Bool) } : rows
             return RemovalPlan(
-                messageIDs: rows.map { $0["id"] },
-                bytes: rows.reduce(0) { $0 + ($1["size"] as Int) },
-                senderDomains: Set(rows.compactMap { $0["domain"] as String? }).count
+                messageIDs: chosen.map { $0["id"] },
+                bytes: chosen.reduce(0) { $0 + ($1["size"] as Int) },
+                senderDomains: Set(chosen.compactMap { $0["domain"] as String? }).count,
+                protectedLeftOut: rows.count - chosen.count,
+                protectedIncluded: chosen.filter { $0["protected"] as Bool }.count
             )
         }
     }

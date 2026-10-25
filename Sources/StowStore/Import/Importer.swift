@@ -62,8 +62,14 @@ public struct StoredRuleResult: Sendable, Equatable {
 
     public var suggestion: Suggestion
     public var score: Int
-    /// Signal identifiers that fired, for `stowmail remove --rule`.
+    /// Signal identifiers that fired, for `stowmail remove --rule`, and
+    /// `protectedMarker` when the message is protected (D-407).
     public var signals: [String]
+
+    /// Written into `rule_signals` for protected mail. Not a signal ID, so `--rule` can never select it.
+    public static let protectedMarker = "protected"
+
+    public var isProtected: Bool { signals.contains(Self.protectedMarker) }
 
     public init(suggestion: Suggestion, score: Int, signals: [String]) {
         self.suggestion = suggestion

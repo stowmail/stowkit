@@ -29,6 +29,8 @@ actor MemorySyncState: SyncStateStore {
     private var downloads: [(Date, Int64)] = []
     private(set) var events: [(kind: String, old: String?, new: String?)] = []
     private(set) var sourceStates: [Int64: SourceState] = [:]
+    /// Marked removed from the server, not yet classified.
+    private var pendingVanished: [Int64: VanishedMessage] = [:]
 
     private func folder(_ name: String) -> Folder {
         folders[name] ?? Folder()
@@ -173,11 +175,17 @@ actor MemorySyncState: SyncStateStore {
                 vanished.append(VanishedMessage(messageID: Int64(uid)))
             }
         }
+        for message in vanished { pendingVanished[message.messageID] = message }
         return vanished
     }
 
     func setSourceStates(_ account: AccountID, _ states: [Int64: SourceState], at: Date) {
         sourceStates.merge(states) { _, new in new }
+        for id in states.keys { pendingVanished[id] = nil }
+    }
+
+    func unclassifiedVanished(_ account: AccountID) -> [VanishedMessage] {
+        pendingVanished.values.sorted { $0.messageID < $1.messageID }
     }
 
     func folderChecked(_ account: AccountID, folder name: String, uidValidity: UInt32, highestModSeq: UInt64?, fullCheck: Bool, at: Date) {

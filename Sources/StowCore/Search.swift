@@ -215,6 +215,19 @@ public struct MessageThread: Hashable, Sendable, Codable {
     }
 }
 
+/// A sender the search field can offer as a From token (D-057, R5).
+public struct SenderSuggestion: Hashable, Sendable, Codable {
+    /// The address, with the display name it most often came with.
+    public var sender: EmailAddress
+    /// How many messages it sent, within the accounts and spam rule asked about.
+    public var messageCount: Int
+
+    public init(sender: EmailAddress, messageCount: Int) {
+        self.sender = sender
+        self.messageCount = messageCount
+    }
+}
+
 /// Runs searches. Implemented by `StowSearch` (Track B); used by the CLI, MCP and the app.
 public protocol MessageSearching: Sendable {
     /// One page of matches: best first with text, newest first without.
@@ -225,4 +238,8 @@ public protocol MessageSearching: Sendable {
     func folders(accounts: [AccountID]) async throws -> [ArchiveFolder]
     /// The conversation around a message, or nil if there is no such message.
     func thread(of message: StoredMessageID) async throws -> MessageThread?
+    /// Senders whose address, display name or a word of it starts with `prefix`,
+    /// most frequent first: for the From token (D-057). Same account rule as
+    /// `search` (empty means every account) and spam hidden, as by default.
+    func senderSuggestions(prefix: String, accounts: [AccountID], limit: Int) async throws -> [SenderSuggestion]
 }

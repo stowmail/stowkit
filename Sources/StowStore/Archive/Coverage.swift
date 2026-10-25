@@ -33,6 +33,27 @@ public struct CoverageReport: Sendable, Equatable {
     public var deleteBefore: Date?
 }
 
+/// What the account overview says after the user deleted old mail at the
+/// provider (UI-12, D-408): "Gmail now has nothing before 13 Oct 2025, as
+/// expected" or "Gmail still has 214 emails before 13 Oct 2025". Counts only.
+public struct DeletionCheck: Sendable, Equatable {
+    public var account: AccountID
+    /// The date the user deleted before (the instructions' `deleteBefore`).
+    public var before: Date
+    /// Archived messages dated before `before` that the provider still had at the last full check.
+    public var stillAtProvider: Int
+    public var stillAtProviderBytes: Int
+    /// When every synced folder had last been fully compared with the server; nil if one never has.
+    public var lastFullCheck: Date?
+    /// True when that full check came after the deletion window opened, so the
+    /// count reflects the user's deletion. False: show nothing yet, or "Stow
+    /// will check in the next few hours", never the count as a result.
+    public var isCurrent: Bool
+
+    /// Nothing left before the date, according to a full check made after the deletion.
+    public var deletedAsExpected: Bool { isCurrent && stillAtProvider == 0 }
+}
+
 /// The coverage date and what follows from it (D-021, D-034).
 public enum Coverage {
     /// Days before the retention cutoff in which mail not yet archived is warned about.
@@ -56,12 +77,7 @@ public enum Coverage {
             }
             guard let coverage = report.coverageDate else { return report }
             let limit = min(coverage, report.retentionCutoff ?? coverage)
-            let safe = try Row.fetchOne(db, sql: """
-                SELECT count(*) AS n, coalesce(sum(size), 0) AS bytes FROM messages
-                WHERE account_id = ? AND source_state = 'present' AND internal_date < ?
-                """, arguments: [account.rawValue, Int(limit.timeIntervalSince1970)])!
-            report.safeToDelete = safe["n"]
-            report.safeToDeleteBytes = safe["bytes"]
+            (report.safeToDelete, report.safeToDeleteBytes) = try presentBefore(db, account: account, date: limit)
             if let cutoff = report.retentionCutoff {
                 report.coversRetention = coverage >= cutoff
                 if report.coversRetention {
@@ -111,6 +127,44 @@ public enum Coverage {
             } else {
                 report.coverageDate = lastListed
             }
+        }
+    }
+
+    /// Archived messages from before `date` that the provider still has
+    /// (`source_state = 'present'`, D-039): what is safe to delete there, and,
+    /// after the user deleted, what is left (D-408).
+    static func presentBefore(_ db: Database, account: AccountID, date: Date) throws -> (count: Int, bytes: Int) {
+        let row = try Row.fetchOne(db, sql: """
+            SELECT count(*) AS n, coalesce(sum(size), 0) AS bytes FROM messages
+            WHERE account_id = ? AND source_state = 'present' AND internal_date < ?
+            """, arguments: [account.rawValue, Int(date.timeIntervalSince1970)])!
+        return (row["n"], row["bytes"])
+    }
+
+    /// After the user deleted old mail at the provider (UI-12, D-098, D-408):
+    /// how many archived messages from before `before` the provider still has.
+    ///
+    /// The count is only as fresh as the last full check (D-038): a message is
+    /// marked gone, trashed or spam only when a full check misses it (D-039).
+    /// So the report says when every synced folder last had one, and whether
+    /// that was after `since`, the moment the user's deletion window opened
+    /// (the app passes when it showed the instructions, or when the user said
+    /// they had deleted). Until `isCurrent`, the count describes the mailbox
+    /// before the deletion and must not be shown as its result.
+    public static func deletionCheck(_ archive: Archive, account: AccountID, before: Date, since: Date) throws -> DeletionCheck {
+        try archive.database.read { db in
+            let (count, bytes) = try presentBefore(db, account: account, date: before)
+            let checks = try Row.fetchAll(db, sql: """
+                SELECT s.last_full_sync_at FROM folders f LEFT JOIN sync_state s ON s.folder_id = f.id
+                WHERE f.account_id = ? AND f.kind = 'folder' AND f.skipped_reason IS NULL AND f.is_selectable = 1
+                """, arguments: [account.rawValue]).map { $0["last_full_sync_at"] as Int64? }
+            // Every folder must have had one; the oldest is the one that counts.
+            let lastFullCheck = checks.isEmpty || checks.contains { $0 == nil }
+                ? nil : checks.compactMap { $0 }.min().map { Date(timeIntervalSince1970: TimeInterval($0)) }
+            return DeletionCheck(account: account, before: before, stillAtProvider: count, stillAtProviderBytes: bytes,
+                                 lastFullCheck: lastFullCheck,
+                                 // Times are stored in whole seconds: a check in the same second as `since` does not count.
+                                 isCurrent: lastFullCheck.map { $0.timeIntervalSince1970 > since.timeIntervalSince1970.rounded(.down) } ?? false)
         }
     }
 

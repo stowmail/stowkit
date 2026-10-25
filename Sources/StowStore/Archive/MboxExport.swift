@@ -5,13 +5,23 @@ import StowCore
 public enum MboxExportError: Error, Equatable, CustomStringConvertible {
     case destinationExists(String)
     case cannotCreate(String)
+    case notAFolder(String)
 
     public var description: String {
         switch self {
         case .destinationExists(let path): "\(path) already exists. Choose a new file name."
         case .cannotCreate(let path): "Could not create \(path)"
+        case .notAFolder(let path): "\(path) is a file, not a folder. Choose a folder to export into."
         }
     }
+}
+
+/// One account's file written by "Export everything" (D-068, D-406).
+public struct AccountExport: Sendable, Equatable {
+    public var account: AccountID
+    public var file: URL
+    public var messages: Int
+    public var bytes: Int
 }
 
 /// Writes an account's mail as one mbox file (D-042), so nothing is locked
@@ -56,6 +66,72 @@ public enum MboxExport {
         }
         try handle.synchronize()
         return (rows.count, bytes)
+    }
+
+    /// "Export everything" (D-068): one mboxrd file per account in `folder`,
+    /// each exactly what `export` writes for that account, named from the
+    /// account's address (`fileName(for:)`). Every account in the archive,
+    /// connected or not. The folder is created (0700) if missing. Refuses before
+    /// writing anything if any of the files already exists. The engine has no
+    /// licence state: this works whatever the app's licence says.
+    /// `progress` gets the account, then messages done and that account's total.
+    @discardableResult
+    public static func exportAll(
+        _ archive: Archive, to folder: URL, progress: (@Sendable (AccountID, Int, Int) -> Void)? = nil
+    ) throws -> [AccountExport] {
+        var isFolder: ObjCBool = false
+        if FileManager.default.fileExists(atPath: folder.path, isDirectory: &isFolder) {
+            guard isFolder.boolValue else { throw MboxExportError.notAFolder(folder.path) }
+        } else {
+            do {
+                try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true,
+                                                        attributes: [.posixPermissions: 0o700])
+            } catch {
+                throw MboxExportError.cannotCreate(folder.path)
+            }
+        }
+        // Straight from the table, so an account whose provider this build does not know is exported too.
+        let accounts = try archive.database.read { db in
+            try Row.fetchAll(db, sql: "SELECT id, email FROM accounts ORDER BY created_at, id").map {
+                (AccountID(rawValue: $0["id"]), $0["email"] as String)
+            }
+        }
+        var used: Set<String> = []
+        let planned = accounts.map { account, email -> (AccountID, URL) in
+            let base = fileName(for: email, fallback: account.rawValue)
+            var name = base + ".mbox"
+            var number = 2
+            // APFS is usually case-insensitive: compare names without case.
+            while used.contains(name.lowercased()) {
+                name = "\(base)-\(number).mbox"
+                number += 1
+            }
+            used.insert(name.lowercased())
+            return (account, folder.appendingPathComponent(name, isDirectory: false))
+        }
+        for (_, url) in planned {
+            var status = stat()
+            if lstat(url.path, &status) == 0 { throw MboxExportError.destinationExists(url.path) }
+        }
+        var results: [AccountExport] = []
+        for (account, url) in planned {
+            var perAccount: (@Sendable (Int, Int) -> Void)?
+            if let progress { perAccount = { done, total in progress(account, done, total) } }
+            let result = try export(archive, account: account, to: url, progress: perAccount)
+            results.append(AccountExport(account: account, file: url, messages: result.messages, bytes: result.bytes))
+        }
+        return results
+    }
+
+    /// A file name (without `.mbox`) from an account's address: lowercased,
+    /// anything but letters, digits and `@ . _ - +` replaced by `_`, no leading
+    /// dot, at most 200 characters; `fallback` if nothing is left.
+    public static func fileName(for address: String, fallback: String) -> String {
+        let allowed = Set("abcdefghijklmnopqrstuvwxyz0123456789@._-+")
+        var name = String(address.trimmingCharacters(in: .whitespaces).lowercased().map { allowed.contains($0) ? $0 : "_" })
+        while name.hasPrefix(".") { name.removeFirst() }
+        name = String(name.prefix(200))
+        return name.isEmpty ? fallback : name
     }
 
     /// One mbox entry: the `From ` line, the quoted message, and a blank line.

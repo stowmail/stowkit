@@ -9,15 +9,22 @@ import StowStore
 /// opened and the file key is not needed.
 ///
 /// Long text is cut in SQL (`substr`), so a 5 MB body never leaves SQLite whole.
-public final class MessageReader: MessageReading, Sendable {
+///
+/// Made from an `Archive`, it also reads inline parts by Content-ID (R8): the
+/// one call that opens an encrypted attachment file, decrypting it in memory.
+public final class MessageReader: MessageReading, InlinePartReading, Sendable {
     let database: any DatabaseReader
+    /// Nil when made from a database alone (the MCP server, D-081): no file key.
+    let attachmentFiles: EncryptedFileStore?
 
     public init(database: any DatabaseReader) {
         self.database = database
+        attachmentFiles = nil
     }
 
-    public convenience init(archive: Archive) {
-        self.init(database: archive.database)
+    public init(archive: Archive) {
+        database = archive.database
+        attachmentFiles = archive.attachmentFiles
     }
 
     public func message(_ id: StoredMessageID, bodyLimit: Int) async throws -> MessageDetail? {
@@ -88,6 +95,29 @@ public final class MessageReader: MessageReading, Sendable {
                               method: text?["method"], text: text?["text"], offset: start)
     }
 
+    public func inlinePart(message: StoredMessageID, contentID: String) async throws -> InlinePart? {
+        guard let attachmentFiles else { throw MessageReaderError.noFileKey }
+        let wanted = InlinePart.contentID(fromReference: contentID)
+        guard !wanted.isEmpty else { return nil }
+        // An exact match first; Content-IDs are compared without case only when nothing matches exactly.
+        let found = try await database.read { db -> (hash: Data, part: InlinePart)? in
+            guard let row = try Row.fetchOne(db, sql: """
+                SELECT x.content_id, x.filename, x.declared_mime_type, t.mime_type, t.content_hash
+                FROM message_attachments x JOIN attachments t ON t.id = x.attachment_id
+                WHERE x.message_id = ? AND x.content_id = ? COLLATE NOCASE
+                ORDER BY x.content_id = ? DESC, x.part_path LIMIT 1
+                """, arguments: [message, wanted, wanted]) else { return nil }
+            return (row["content_hash"], InlinePart(messageID: message, contentID: row["content_id"], data: Data(),
+                                                    declaredType: row["declared_mime_type"], detectedType: row["mime_type"],
+                                                    filename: row["filename"]))
+        }
+        guard let found else { return nil }
+        var part = found.part
+        // Decrypted into memory only; nothing is written to disk.
+        part.data = try attachmentFiles.read(found.hash)
+        return part
+    }
+
     static let attachmentSQL = """
         SELECT x.attachment_id, x.filename, coalesce(t.mime_type, x.declared_mime_type) AS mime_type, x.disposition,
                t.size, t.text_status, coalesce((SELECT length(at.text) FROM attachment_text at WHERE at.attachment_id = t.id), 0) AS text_length
@@ -98,5 +128,15 @@ public final class MessageReader: MessageReading, Sendable {
     static func info(_ row: Row, index: Int) -> AttachmentInfo {
         AttachmentInfo(index: index, filename: row["filename"], mimeType: row["mime_type"], size: row["size"],
                        disposition: row["disposition"], textStatus: row["text_status"], textLength: row["text_length"])
+    }
+}
+
+public enum MessageReaderError: Error, Equatable, CustomStringConvertible {
+    case noFileKey
+
+    public var description: String {
+        switch self {
+        case .noFileKey: "This reader was opened without the archive's file key, so it cannot read attachments."
+        }
     }
 }

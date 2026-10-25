@@ -42,6 +42,38 @@ struct Folders: AsyncParsableCommand {
     }
 }
 
+/// R6 (D-055 step 5, D-404): what the first-run screen shows before any download.
+struct Size: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        abstract: "List an account's mailbox and show how many emails and how much mail it holds, downloading nothing.",
+        discussion: "Works before the recovery key is confirmed. Records what it lists, so the first sync starts from there."
+    )
+
+    @Argument(help: "Account ID, ID prefix, address or name.")
+    var account: String
+
+    func run() async throws {
+        CLI.bootstrapLogging()
+        let (archive, lock) = try CLIArchive.openForWriting(requireRecovery: false)
+        defer { lock.release() }
+        let accounts = CLIArchive.accounts(archive)
+        let record = try accounts.find(account)
+        guard record.isConnected else {
+            throw ValidationError("That account is disconnected. Add it again with `stowmail account add` to reconnect it.")
+        }
+        let size = try await EngineSync(archive: archive, tokens: try CLI.tokenProvider(accounts: accounts)).mailboxSize(for: record.account)
+        let count = size.messages.formatted(.number)
+        let mail = ByteCountFormatter.string(fromByteCount: size.bytes, countStyle: .file)
+        if let quota = size.quota {
+            print("\(count) emails, your mail uses \(mail) of \(ByteCountFormatter.string(fromByteCount: quota.limitBytes, countStyle: .file)).")
+            print("The provider reports \(ByteCountFormatter.string(fromByteCount: quota.usedBytes, countStyle: .file)) used in all.")
+        } else {
+            print("\(count) emails, your mail uses \(size.sizesAreEstimates ? "about " : "")\(mail).")
+            print(size.quotaAdvertised ? "The server offers QUOTA but did not report a storage limit." : "The server does not offer QUOTA after sign-in.")
+        }
+    }
+}
+
 enum ChangeCheckArgument: String, ExpressibleByArgument, CaseIterable {
     case skip, quick, full
 
@@ -245,19 +277,54 @@ struct Verify: AsyncParsableCommand {
 
 struct Export: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
-        abstract: "Write an account's archived mail to an mbox file, exactly as downloaded.",
-        discussion: "The file is unencrypted (permissions 0600): keep it somewhere safe, and delete it when done."
+        abstract: "Write archived mail to mbox files, exactly as downloaded: one account, or every account with --all.",
+        discussion: """
+            One account: `stowmail export <account> --mbox <file>`. Everything: `stowmail export --all --mbox-dir <folder>` \
+            writes one file per account, named after its address. Files are never overwritten. They are unencrypted \
+            (permissions 0600): keep them somewhere safe, and delete them when done.
+            """
     )
 
     @Argument(help: "Account ID, ID prefix, address or name.")
-    var account: String
+    var account: String?
 
     @Option(name: .long, help: "The mbox file to create. It must not exist yet.")
-    var mbox: String
+    var mbox: String?
+
+    @Flag(name: .long, help: "Export every account, one file each, into --mbox-dir.")
+    var all = false
+
+    @Option(name: .long, help: "With --all: the folder to write into (created if missing).")
+    var mboxDir: String?
+
+    func validate() throws {
+        if all {
+            guard account == nil, mbox == nil, mboxDir != nil else {
+                throw ValidationError("With --all, give --mbox-dir <folder> and no account or --mbox.")
+            }
+        } else {
+            guard account != nil, mbox != nil, mboxDir == nil else {
+                throw ValidationError("Give an account and --mbox <file>, or --all --mbox-dir <folder>.")
+            }
+        }
+    }
 
     func run() async throws {
         CLI.bootstrapLogging()
         let archive = try CLIArchive.open(readOnly: true)
+        if all, let mboxDir {
+            let folder = URL(fileURLWithPath: (mboxDir as NSString).expandingTildeInPath, isDirectory: true)
+            let results = try MboxExport.exportAll(archive, to: folder) { _, done, total in
+                Swift.print("  \(done) of \(total)")
+            }
+            for result in results {
+                print("Wrote \(result.messages) message(s), \(CLI.megabytes(result.bytes)), to \(result.file.lastPathComponent).")
+            }
+            print("\(results.count) file(s) in \(folder.path).")
+            print("These files are not encrypted. Keep them safe and delete them when you no longer need them.")
+            return
+        }
+        guard let account, let mbox else { return }
         let record = try CLIArchive.accounts(archive).find(account)
         let url = URL(fileURLWithPath: (mbox as NSString).expandingTildeInPath)
         let result = try MboxExport.export(archive, account: record.account.id, to: url) { done, total in

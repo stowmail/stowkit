@@ -144,3 +144,17 @@ public struct FetchDiagnostics: Sendable, Equatable {
     /// Untagged NO, BAD or BYE lines received during the command.
     public var untagged: [String] = []
 }
+
+/// The storage quota a server reports for a mailbox's quota root (R6, D-404).
+/// Gmail's is the whole Google account's storage, shared with Drive and Photos.
+public struct MailboxQuota: Sendable, Equatable {
+    /// What the quota root uses now, in bytes.
+    public var usedBytes: Int64
+    /// The limit, in bytes.
+    public var limitBytes: Int64
+
+    public init(usedBytes: Int64, limitBytes: Int64) {
+        self.usedBytes = usedBytes
+        self.limitBytes = limitBytes
+    }
+}

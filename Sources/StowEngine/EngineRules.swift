@@ -13,7 +13,7 @@ public enum EngineRules {
 
     /// The rule settings for `account`: switches and weights from the settings
     /// file, sender overrides from the archive (its own and every account's)
-    /// ahead of any still in the file.
+    /// ahead of any still in the file, and the protected senders (D-407).
     public static func ruleSet(settings url: URL = defaultSettingsURL, archive: Archive?, account: AccountID?) throws -> RuleSet {
         var set = try RuleSet.load(from: url)
         if let archive {
@@ -21,6 +21,7 @@ public enum EngineRules {
                 SenderOverride(match: $0.match, suggestion: suggestion($0.suggestion))
             }
             set.senderOverrides = stored + set.senderOverrides
+            set.protectedSenders = try ProtectedSenders(archive: archive).list()
         }
         return set
     }
@@ -54,8 +55,10 @@ public enum EngineRules {
         case .deprioritise: .deprioritise
         case .considerDeletingFromSource: .considerDeleting
         }
-        return StoredRuleResult(suggestion: suggestion, score: assessment.score,
-                                signals: assessment.outcomes.filter { $0.enabled && $0.fired }.map(\.signal.rawValue))
+        var signals = assessment.outcomes.filter { $0.enabled && $0.fired }.map(\.signal.rawValue)
+        // Stored beside the signals (no schema change), so removal by rule or suggestion can leave protected mail out (D-407).
+        if assessment.protection != nil { signals.append(StoredRuleResult.protectedMarker) }
+        return StoredRuleResult(suggestion: suggestion, score: assessment.score, signals: signals)
     }
 
     static func suggestion(_ stored: StoredRuleResult.Suggestion) -> Suggestion {

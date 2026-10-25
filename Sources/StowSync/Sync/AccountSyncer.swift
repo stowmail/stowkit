@@ -21,6 +21,10 @@ public struct SyncOptions: Sendable {
     /// Whether to compare archived copies with the server once nothing is left
     /// to download (D-038, D-039).
     public var checkChanges: ChangeCheck
+    /// List every folder and stop: nothing is downloaded or compared. With it,
+    /// the run also reads the storage quota when the server offers QUOTA, for
+    /// the mailbox size shown before the first download (R6, D-055 step 5, D-404).
+    public var listOnly: Bool
 
     public init(
         limit: Int? = nil,
@@ -29,7 +33,8 @@ public struct SyncOptions: Sendable {
         headerChunk: Int = 500,
         partialRetry: [PartialRetryRound] = PartialRetryRound.default,
         deadline: Date? = nil,
-        checkChanges: ChangeCheck = .skip
+        checkChanges: ChangeCheck = .skip,
+        listOnly: Bool = false
     ) {
         self.limit = limit
         self.batches = batches
@@ -38,6 +43,7 @@ public struct SyncOptions: Sendable {
         self.partialRetry = partialRetry
         self.deadline = deadline
         self.checkChanges = checkChanges
+        self.listOnly = listOnly
     }
 }
 
@@ -113,6 +119,10 @@ public struct SyncReport: Sendable, Equatable {
     public var flagsUpdated = 0
     /// Archived messages found to be gone from where sync looks, and what became of them.
     public var sourceChanges: [SourceState: Int] = [:]
+    /// The storage quota, read only in a list-only run and only when the server offers QUOTA (D-404).
+    public var quota: MailboxQuota?
+    /// Whether the server offered QUOTA after sign-in, in a list-only run.
+    public var quotaAdvertised = false
     public var outcome: SyncOutcome = .complete
 }
 
@@ -219,6 +229,10 @@ public struct AccountSyncer: Sendable {
         onEvent(.connected(attempt: attempt))
         do {
             let capabilities = try await session.capabilities()
+            // Capability names are not personal. Microsoft's list after sign-in answers whether it offers QUOTA (R6).
+            logger.debug("Capabilities after sign-in", metadata: [
+                "provider": "\(account.provider.rawValue)", "capabilities": "\(capabilities.sorted().joined(separator: " "))",
+            ])
             let condstore = capabilities.contains("CONDSTORE")
             let listed = try await session.listFolders()
             let plan = try FolderPlanner.plan(provider: account.provider, folders: listed, capabilities: capabilities)
@@ -246,6 +260,16 @@ public struct AccountSyncer: Sendable {
                 report.queued += queued
                 report.foldersSynced += 1
                 onEvent(.folderListed(index: index, of: plan.toSync.count, newMessages: queued))
+            }
+
+            if options.listOnly {
+                report.quotaAdvertised = capabilities.contains("QUOTA")
+                if report.quotaAdvertised { report.quota = try await session.storageQuota() }
+                for (name, folder) in opened {
+                    try await state.folderWalked(account.id, folder: name, uidValidity: folder.status.uidValidity, at: now())
+                }
+                await session.logout()
+                return
             }
 
             // 2. Download from the queue, best priority first.
@@ -496,8 +520,13 @@ public struct AccountSyncer: Sendable {
         var vanished: [VanishedMessage] = []
         var flagsUpdated = 0
         let at = now()
+        // A full check's time is stored only once what vanished is classified, so a
+        // run cut short in between never makes the source states look current (D-408).
+        var fullyChecked: [(folder: String, uidValidity: UInt32, highestModSeq: UInt64?)] = []
 
         if mode == .full {
+            // Left unclassified by an earlier run that stopped part way (D-408).
+            vanished += try await state.unclassifiedVanished(account.id)
             // A folder synced before but no longer listed at all was deleted (or renamed) on the server.
             let listedNames = Set(listed.map(\.name))
             for name in try await state.syncedFolders(account.id) where !listedNames.contains(name) {
@@ -550,15 +579,20 @@ public struct AccountSyncer: Sendable {
                                                                  uids: absent, at: at)
                 try await state.vanishedBeforeDownload(account.id, folder: folder.name, uidValidity: saved.uidValidity,
                                                        uids: absentQueued.filter { !present.contains($0) })
-                try await state.folderChecked(account.id, folder: folder.name, uidValidity: saved.uidValidity,
-                                              highestModSeq: status.highestModSeq, fullCheck: true, at: at)
+                fullyChecked.append((folder.name, saved.uidValidity, status.highestModSeq))
             }
         }
 
         if !vanished.isEmpty {
+            var seen = Set<Int64>()
+            vanished = vanished.filter { seen.insert($0.messageID).inserted }
             let classified = try await classify(vanished, folders: listed, session: session)
             try await state.setSourceStates(account.id, classified, at: at)
             for (_, sourceState) in classified { report.sourceChanges[sourceState, default: 0] += 1 }
+        }
+        for checked in fullyChecked {
+            try await state.folderChecked(account.id, folder: checked.folder, uidValidity: checked.uidValidity,
+                                          highestModSeq: checked.highestModSeq, fullCheck: true, at: at)
         }
         report.flagsUpdated += flagsUpdated
         onEvent(.changesChecked(flagsUpdated: flagsUpdated, removedAtSource: vanished.count))

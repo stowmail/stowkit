@@ -110,3 +110,51 @@ public protocol MessageReading: Sendable {
     /// by its 1-based index in the message; nil if there is no such message or attachment.
     func attachmentText(message: StoredMessageID, index: Int, offset: Int, limit: Int) async throws -> AttachmentText?
 }
+
+/// One MIME part of a stored message found by its Content-ID: an image the
+/// HTML refers to as `cid:...` (D-059, R8). Decoded bytes, in memory only.
+public struct InlinePart: Hashable, Sendable {
+    public var messageID: StoredMessageID
+    /// The Content-ID, without angle brackets.
+    public var contentID: String
+    /// The part's decoded content.
+    public var data: Data
+    /// The type the message declared for the part, lowercased, for example `image/png`.
+    public var declaredType: String
+    /// The type Stow detected when it stored the part, if it could tell.
+    public var detectedType: String?
+    public var filename: String?
+
+    public init(messageID: StoredMessageID, contentID: String, data: Data, declaredType: String, detectedType: String?,
+                filename: String?) {
+        self.messageID = messageID
+        self.contentID = contentID
+        self.data = data
+        self.declaredType = declaredType
+        self.detectedType = detectedType
+        self.filename = filename
+    }
+
+    /// The Content-ID a `cid:` reference names: `cid:` taken off, percent
+    /// escapes decoded (RFC 2392) and angle brackets removed. Also accepts a bare ID.
+    public static func contentID(fromReference reference: String) -> String {
+        var text = reference.trimmingCharacters(in: .whitespaces)
+        if text.lowercased().hasPrefix("cid:") {
+            text = String(text.dropFirst(4))
+            text = text.removingPercentEncoding ?? text
+        }
+        if text.hasPrefix("<"), text.hasSuffix(">"), text.count >= 2 { text = String(text.dropFirst().dropLast()) }
+        return text
+    }
+}
+
+/// Reads a message's inline parts by Content-ID, for the app's reader (D-059, R8).
+///
+/// Separate from `MessageReading` because it opens the encrypted attachment
+/// files, which needs the file key: the MCP server reads the database alone
+/// and never loads that key (D-081), so it does not offer this (D-405).
+public protocol InlinePartReading: Sendable {
+    /// The part of `message` whose Content-ID matches, decoded; nil if the
+    /// message or the ID is unknown. Never fetches anything from the network.
+    func inlinePart(message: StoredMessageID, contentID: String) async throws -> InlinePart?
+}
