@@ -81,7 +81,7 @@ public final class MessageReader: MessageReading, Sendable {
         let rows = try Row.fetchAll(db, sql: Self.attachmentSQL, arguments: [message])
         guard index <= rows.count else { return nil }
         let row = rows[index - 1]
-        let start = max(0, offset)
+        let start = min(max(0, offset), Int(Int32.max))  // no overflow in `start + 1`, whatever the caller passes
         let text = try Row.fetchOne(db, sql: "SELECT method, substr(text, ?, ?) AS text FROM attachment_text WHERE attachment_id = ?",
                                     arguments: [start + 1, max(0, limit), row["attachment_id"] as Int64])
         return AttachmentText(messageID: message, accountID: AccountID(rawValue: account), info: Self.info(row, index: index),

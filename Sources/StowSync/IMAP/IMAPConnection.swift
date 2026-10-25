@@ -24,6 +24,12 @@ final class IMAPConnection: Sendable {
     /// One event loop group for every connection in the process.
     static let group = NIOTSEventLoopGroup(loopCount: 1)
 
+    /// The largest body literal the parser accepts (security review M-4).
+    /// swift-nio-imap's default is unlimited. Exchange Online allows messages
+    /// up to 150 MB and Gmail 50 MB, so a larger literal is a broken or hostile
+    /// server; the parser then fails the connection instead of trusting it.
+    static let bodySizeLimit: UInt64 = 256 << 20
+
     static func connect(to endpoint: IMAPEndpoint, timeouts: IMAPTimeouts) async throws -> IMAPConnection {
         let (stream, continuation) = AsyncThrowingStream.makeStream(of: Response.self, throwing: Error.self)
         let readTimeout = TimeAmount.milliseconds(Int64(timeouts.read * 1000))
@@ -35,7 +41,7 @@ final class IMAPConnection: Sendable {
                         IdleStateHandler(readTimeout: readTimeout),
                         // Never let the parser see a read ending in a lone CR (D-120).
                         TrailingCRHandler(),
-                        IMAPClientHandler(),
+                        IMAPClientHandler(parserOptions: ResponseParser.Options(bodySizeLimit: Self.bodySizeLimit)),
                         ResponseForwarder(continuation: continuation),
                     ])
                 }

@@ -27,16 +27,46 @@ public struct FileLogHandler: LogHandler {
     }
 
     public func log(event: LogEvent) {
+        file.append(Self.line(event, label: label, metadata: metadata))
+    }
+
+    /// One scrubbed log line, ending in a newline.
+    static func line(_ event: LogEvent, label: String, metadata: Logger.Metadata) -> String {
         let merged = metadata.merging(event.metadata ?? [:]) { _, new in new }
         let details = merged.isEmpty ? "" : " " + merged.sorted { $0.key < $1.key }
             .map { "\($0.key)=\(Redact.scrub($0.value.description))" }.joined(separator: " ")
-        file.append("\(Self.timestamp()) \(event.level) \(label): \(Redact.scrub(event.message.description))\(details)\n")
+        return "\(timestamp()) \(event.level) \(label): \(Redact.scrub(event.message.description))\(details)\n"
     }
 
     static func timestamp() -> String {
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         return formatter.string(from: Date())
+    }
+}
+
+/// Writes the same scrubbed lines as `FileLogHandler` to standard error.
+///
+/// Standard error often ends up on disk outside Stow's control: MCP clients
+/// keep a server's standard error in their own log files, and launchd writes
+/// the background sync's to `daemon.out.log`. So it is scrubbed too (D-040).
+public struct StandardErrorLogHandler: LogHandler {
+    public var logLevel: Logger.Level
+    public var metadata: Logger.Metadata = [:]
+    let label: String
+
+    public init(label: String, level: Logger.Level = .notice) {
+        self.label = label
+        logLevel = level
+    }
+
+    public subscript(metadataKey key: String) -> Logger.Metadata.Value? {
+        get { metadata[key] }
+        set { metadata[key] = newValue }
+    }
+
+    public func log(event: LogEvent) {
+        FileHandle.standardError.write(Data(FileLogHandler.line(event, label: label, metadata: metadata).utf8))
     }
 }
 

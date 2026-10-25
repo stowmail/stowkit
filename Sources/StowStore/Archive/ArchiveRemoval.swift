@@ -67,6 +67,14 @@ public struct ArchiveRemoval: Sendable {
     }
 
     /// The messages a selector picks, optionally for one account.
+    /// `text` matched literally inside a LIKE pattern with `ESCAPE '\'`, so a
+    /// `%` or `_` typed in a selector cannot widen what is removed (security review).
+    static func likeLiteral(_ text: String) -> String {
+        text.replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "%", with: "\\%")
+            .replacingOccurrences(of: "_", with: "\\_")
+    }
+
     public func plan(_ selector: RemovalSelector, account: AccountID? = nil) throws -> RemovalPlan {
         try archive.database.read { db in
             var conditions: [String] = []
@@ -77,8 +85,8 @@ public struct ArchiveRemoval: Sendable {
             }
             switch selector {
             case .signal(let signal):
-                conditions.append("(',' || coalesce(m.rule_signals, '') || ',') LIKE ?")
-                arguments.append("%,\(signal),%")
+                conditions.append("(',' || coalesce(m.rule_signals, '') || ',') LIKE ? ESCAPE '\\'")
+                arguments.append("%,\(Self.likeLiteral(signal)),%")
             case .suggestion(let suggestion):
                 conditions.append("m.rule_suggestion = ?")
                 arguments.append(suggestion.rawValue)
@@ -89,8 +97,8 @@ public struct ArchiveRemoval: Sendable {
                     arguments.append(value)
                 } else {
                     let domain = value.trimmingCharacters(in: CharacterSet(charactersIn: "@"))
-                    conditions.append("(a.domain = ? OR a.domain LIKE ?)")
-                    arguments += [domain, "%.\(domain)"]
+                    conditions.append("(a.domain = ? OR a.domain LIKE ? ESCAPE '\\')")
+                    arguments += [domain, "%.\(Self.likeLiteral(domain))"]
                 }
             case .sourceState(let state):
                 conditions.append("m.source_state = ?")

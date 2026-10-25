@@ -159,7 +159,14 @@ import Testing
         let result = try MboxExport.export(test.archive, account: test.account.id, to: file)
         #expect(result.messages == messages.count)
         #expect((try FileManager.default.attributesOfItem(atPath: file.path)[.posixPermissions] as? Int) == 0o600)
-        #expect(throws: MboxExportError.self) { try MboxExport.export(test.archive, account: test.account.id, to: file) }
+        #expect(throws: MboxExportError.destinationExists(file.path)) { try MboxExport.export(test.archive, account: test.account.id, to: file) }
+        // Nor through a link left at the path: the target is never written (security review).
+        let target = file.deletingLastPathComponent().appendingPathComponent("target-\(UUID().uuidString)")
+        let link = file.deletingLastPathComponent().appendingPathComponent("link-\(UUID().uuidString).mbox")
+        defer { try? FileManager.default.removeItem(at: link) }
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: target)
+        #expect(throws: MboxExportError.self) { try MboxExport.export(test.archive, account: test.account.id, to: link) }
+        #expect(!FileManager.default.fileExists(atPath: target.path))
 
         let parsed = Self.readMboxrd(try Data(contentsOf: file))
         // mbox has no way to say a message ended without a line break, so those gain one (D-042).

@@ -414,7 +414,18 @@ private final class ResponseInbox: @unchecked Sendable {
 }
 
 /// Builds messages from the streamed parts of FETCH replies.
+///
+/// Sizes and literal lengths come from the server, so they are bounded before
+/// use: a hostile or broken server must not be able to trap an addition or a
+/// memory reservation (security review M-4, M-5).
 struct FetchAssembler {
+    /// RFC822.SIZE values above this are taken as this. Far above any real
+    /// message (the parser refuses bodies over `IMAPConnection.bodySizeLimit`),
+    /// and small enough that adding millions of them cannot overflow.
+    static let maximumReportedSize = 1 << 40
+    /// The most memory reserved up front for a body; larger bodies grow as they arrive.
+    static let maximumReservation = 32 << 20
+
     struct Partial {
         var uid: UInt32?
         var size: Int?
@@ -450,7 +461,7 @@ struct FetchAssembler {
         case .simpleAttribute(let attribute):
             switch attribute {
             case .uid(let uid): current?.uid = uid.rawValue
-            case .rfc822Size(let size): current?.size = size
+            case .rfc822Size(let size): current?.size = min(max(size, 0), Self.maximumReportedSize)
             case .internalDate(let date): current?.internalDate = date.date
             case .gmailMessageID(let id): current?.gmailMessageID = id
             case .gmailThreadID(let id): current?.gmailThreadID = id
@@ -465,14 +476,14 @@ struct FetchAssembler {
             switch kind {
             case .body(section: let section, offset: nil) where section == .complete:
                 streaming = .body
-                current?.body = Data(capacity: byteCount)
+                current?.body = Data(capacity: min(byteCount, Self.maximumReservation))
                 current?.announcedBodyLength = byteCount
             case .body(section: let section, offset: nil) where Self.isHeaderFields(section):
                 streaming = .headerFields
-                current?.headerFields = Data(capacity: byteCount)
+                current?.headerFields = Data(capacity: min(byteCount, Self.maximumReservation))
             case .rfc822:
                 streaming = .body
-                current?.body = Data(capacity: byteCount)
+                current?.body = Data(capacity: min(byteCount, Self.maximumReservation))
                 current?.announcedBodyLength = byteCount
             default:
                 streaming = .none

@@ -123,6 +123,40 @@ func testKeychain() -> KeychainStore {
         }
     }
 
+    /// Security review M-1 (D-086): a confirmation names the bundle it confirmed,
+    /// so a bundle replaced without one, as by a rotation that wrote the new
+    /// bundle and then failed, never reads as confirmed.
+    @Test func aReplacedBundleIsNotConfirmed() throws {
+        let keychain = testKeychain()
+        defer { try? keychain.deleteAll() }
+        let location = ArchiveLocation(root: TestFixtures.temporaryDirectory())
+        defer { try? FileManager.default.removeItem(at: location.root) }
+        let manager = KeyManager(keychain: keychain)
+        let archive = try ArchiveSetup.createArchive(location, keyManager: manager)
+        let key = try ArchiveSetup.makeRecoveryKey(archive, keyManager: manager)
+        try ArchiveSetup.confirm(archive, recoveryKey: key, typed: [0: key.groups[0], 5: key.groups[5]])
+        #expect(ArchiveSetup.recoveryState(archive) == .confirmed)
+
+        // The new bundle is written but the confirmation is never cleared.
+        try RecoveryBundle.write(try manager.loadKeys(), archiveID: try archive.archiveID(), recoveryKey: RecoveryKey.generate(), to: location.root)
+        #expect(ArchiveSetup.recoveryState(archive) == .unconfirmed)
+        #expect(throws: ArchiveSetupError.recoveryNotConfirmed) { try ArchiveSetup.requireConfirmed(archive) }
+
+        // A rotation that cannot write its bundle leaves the archive unconfirmed, never confirmed.
+        let next = try ArchiveSetup.makeRecoveryKey(archive, keyManager: manager)
+        try ArchiveSetup.confirm(archive, recoveryKey: next, typed: [1: next.groups[1], 2: next.groups[2]])
+        try FileManager.default.setAttributes([.posixPermissions: 0o500], ofItemAtPath: location.root.path)
+        defer { try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: location.root.path) }
+        #expect(throws: (any Error).self) { try ArchiveSetup.rotate(archive, keys: try manager.loadKeys()) }
+        #expect(ArchiveSetup.recoveryState(archive) == .unconfirmed)
+
+        // Confirmations made before D-086 recorded no bundle and still count.
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: location.root.path)
+        try ArchiveSetup.markConfirmed(archive)
+        try archive.setMeta(ArchiveSetup.confirmedBundleKey, nil)
+        #expect(ArchiveSetup.recoveryState(archive) == .confirmed)
+    }
+
     @Test func phase1AccountsMoveIntoTheArchiveKeepingTheirTokens() throws {
         let keychain = testKeychain()
         defer { try? keychain.deleteAll() }
@@ -407,6 +441,27 @@ func testKeychain() -> KeychainStore {
         #expect(text.contains("warning test:") && text.contains("account=1234"))
         #expect(!text.contains("sam@example.com") && !text.contains("pat@example.org") && !text.contains("abcdefghijklmnopqrstuvwxyz0123456789ABCD"))
         #expect((try FileManager.default.attributesOfItem(atPath: url.path)[.posixPermissions] as? Int) == 0o600)
+    }
+
+    /// Security review M-2: standard error is scrubbed too, since MCP clients
+    /// and launchd keep it in files of their own.
+    @Test func standardErrorIsScrubbed() throws {
+        let url = TestFixtures.temporaryDirectory().appendingPathComponent("stderr.log")
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        #expect(FileManager.default.createFile(atPath: url.path, contents: nil))
+        let capture = try FileHandle(forWritingTo: url)
+        let saved = dup(STDERR_FILENO)
+        dup2(capture.fileDescriptor, STDERR_FILENO)
+        let logger = Logger(label: "test") { label in StandardErrorLogHandler(label: label, level: .debug) }
+        logger.warning("Server said Bearer abcdefghijklmnopqrstuvwxyz0123456789ABCD for sam@example.com",
+                       metadata: ["detail": "contact pat@example.org"])
+        dup2(saved, STDERR_FILENO)
+        close(saved)
+        try capture.close()
+        let text = try String(contentsOf: url, encoding: .utf8)
+        #expect(text.contains("warning test:"))
+        #expect(!text.contains("sam@example.com") && !text.contains("pat@example.org") && !text.contains("abcdefghijklmnopqrstuvwxyz0123456789ABCD"))
     }
 
     @Test func powerPausesOnLowBatteryOrLowPowerMode() {

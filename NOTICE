@@ -1,0 +1,27 @@
+Stow engine
+Copyright T1G OÜ
+
+This product is licensed under the Apache License, Version 2.0 (see LICENSE).
+
+It uses the following third-party software, under their own licences:
+
+GRDB.swift (vendored in Vendor/GRDB)
+Copyright (C) 2015-2025 Gwendal Roué
+MIT License: see Vendor/GRDB/LICENSE
+
+SQLCipher Community Edition (fetched into Vendor/SQLCipher by scripts/fetch-sqlcipher.sh)
+Copyright (c) 2025, ZETETIC LLC
+BSD-style licence: see Vendor/SQLCipher/LICENSE.md. Applications distributing
+SQLCipher must carry this attribution.
+
+MCP Swift SDK (https://github.com/modelcontextprotocol/swift-sdk)
+The Model Context Protocol project and its contributors
+Apache License 2.0, with some earlier contributions under the MIT License
+
+eventsource (https://github.com/mattt/eventsource), used by the MCP Swift SDK
+Copyright 2025 Mattt (https://mat.tt)
+MIT License
+
+Apple's swift-nio, swift-nio-imap, swift-nio-transport-services, swift-log,
+swift-argument-parser, swift-system, swift-collections and swift-atomics are
+Apache License 2.0, copyright Apple Inc. and the Swift project authors.

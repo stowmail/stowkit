@@ -87,6 +87,10 @@ import Testing
         let address = try removal.plan(.sender("alex@example.com"))
         #expect(address.messageIDs.count <= domain.messageIDs.count)
         #expect(try removal.plan(.sender("xample.com")).messageIDs.isEmpty)
+        // LIKE wildcards in a selector are plain characters (security review).
+        #expect(try removal.plan(.sender("%")).messageIDs.isEmpty)
+        #expect(try removal.plan(.sender("%.com")).messageIDs.isEmpty)
+        #expect(try removal.plan(.signal("%")).messageIDs.isEmpty)
     }
 
     @Test func coverageWaitsForListingThenFollowsTheQueue() async throws {

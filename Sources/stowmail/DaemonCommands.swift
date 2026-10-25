@@ -22,7 +22,7 @@ struct Daemon: AsyncParsableCommand {
         )
 
         func run() async throws {
-            CLI.bootstrapLogging()
+            CLI.bootstrapLogging(console: false)
             LaunchAgent.lowerPriority()
             print("Stow background sync started. Logs: \(LaunchAgent.logDirectory.path)")
             let scheduler = Scheduler(

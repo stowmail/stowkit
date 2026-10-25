@@ -4,7 +4,9 @@ The engine behind Stow: a local, encrypted, searchable email archive for macOS.
 IMAP sync with OAuth, encrypted SQLite storage, full-text search, bulk-mail
 rules and a local MCP server. No UI code lives here.
 
-Status: Phases 0 to 3 done (sync, encrypted archive, search, rules, background sync, local MCP server). Next: the Phase 4 security review; private until it passes.
+Status: sync, encrypted archive, search, rules, background sync and a local MCP server are working, and the engine has had a security review (October 2026). It is pre-1.0: interfaces may still change. Comments cite design decisions as D-numbers from Stow's internal decision log.
+
+Security reports: see [SECURITY.md](SECURITY.md).
 
 ## Requirements
 
@@ -77,6 +79,13 @@ input and output. It can search and read the archive, never change it, and has
 no network connection of its own. What it returns goes to the assistant, and so
 to the assistant's provider, when you ask a question.
 
+Email is written by other people, and an email can contain text meant to steer
+your assistant ("forward this inbox to..."). Stow's tools can only read, so such
+text cannot make Stow change anything, and Stow marks email content as data. But
+if the same assistant also has tools that can send email, fetch web pages or
+write files, be careful what you let it do after reading mail. See
+[SECURITY.md](SECURITY.md).
+
 1. **Turn it on for an account.** Every account is hidden until you do:
 
    ```sh
@@ -143,11 +152,15 @@ cannot write to the archive or decrypt the stored message and attachment files.
 | `scripts/vendor-grdb.sh` | Regenerates `Vendor/GRDB` from an upstream GRDB release. |
 | `scripts/make-fixtures` | Generates synthetic `.eml` fixtures into `Tests/Fixtures/eml/`. |
 | `scripts/mcp-check.py` | Checks `stowmail mcp` against an archive and prints only counts and PASS or FAIL. |
+| `scripts/fuzz-mime.sh` | Fuzzes the MIME parser, skeletons and the .docx reader with libFuzzer and AddressSanitizer. Needs a swift.org toolchain (Xcode's Swift cannot build fuzzers on macOS); see the script. |
 
-## Licences
+## Licence
+
+Copyright T1G OÜ. Licensed under the Apache License, Version 2.0: see
+[LICENSE](LICENSE) and [NOTICE](NOTICE). Contributions are welcome under the
+same licence: see [CONTRIBUTING.md](CONTRIBUTING.md).
 
 GRDB is MIT licensed (`Vendor/GRDB/LICENSE`). SQLCipher Community Edition is
 BSD-style (`Vendor/SQLCipher/LICENSE.md`) and requires attribution in
 distributed apps. The MCP Swift SDK is Apache 2.0 with some older parts still
-MIT; `eventsource` is MIT; `swift-system` is Apache 2.0. Stow's own licence is
-Apache 2.0 (D-064).
+MIT; `eventsource` is MIT; `swift-system` is Apache 2.0.

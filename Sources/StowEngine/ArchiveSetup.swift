@@ -61,6 +61,9 @@ public enum RecoveryState: Sendable, Equatable {
 /// never change, so nothing is re-encrypted.
 public enum ArchiveSetup {
     static let confirmedKey = "recovery_confirmed_at"
+    /// The fingerprint of the bundle that was confirmed (D-086). Empty when
+    /// none was beside the archive; absent for confirmations made before it.
+    static let confirmedBundleKey = "recovery_confirmed_bundle"
 
     /// The CLI's `init`: creates the archive and its keys, then makes a
     /// recovery key unless a confirmed one exists. Returns the new recovery
@@ -85,10 +88,22 @@ public enum ArchiveSetup {
         return try Archive.open(location, keys: keys)
     }
 
-    /// A confirmation counts only with the bundle it confirmed still beside the archive.
+    /// A confirmation counts only with the bundle it confirmed still beside the
+    /// archive: a bundle replaced without a new confirmation, by a rotation
+    /// that failed half way or by a file copied in, reads as unconfirmed (D-086).
     public static func recoveryState(_ archive: Archive) -> RecoveryState {
-        guard RecoveryBundle.exists(in: archive.location.root) else { return .none }
-        return isConfirmed(archive) ? .confirmed : .unconfirmed
+        let root = archive.location.root
+        guard RecoveryBundle.exists(in: root) else { return .none }
+        guard isConfirmed(archive) else { return .unconfirmed }
+        let recorded: String?
+        do {
+            recorded = try archive.meta(confirmedBundleKey)
+        } catch {
+            return .unconfirmed
+        }
+        // Confirmed before D-086, which did not record the bundle: trusted as before.
+        guard let recorded else { return .confirmed }
+        return recorded == (try? RecoveryBundle.fingerprint(in: root)) ? .confirmed : .unconfirmed
     }
 
     /// Makes a new recovery key for the archive and returns it to show once.
@@ -99,10 +114,16 @@ public enum ArchiveSetup {
 
     /// Makes a new recovery key and wraps the archive keys with it, replacing
     /// the old bundle. The new key is unconfirmed until `confirm`.
+    ///
+    /// The confirmation is cleared before the bundle is written, so a failure
+    /// in between leaves an unconfirmed archive (sync pauses) rather than a
+    /// "confirmed" one whose bundle no shown key opens (D-086).
     public static func rotate(_ archive: Archive, keys: ArchiveKeys) throws -> RecoveryKey {
         let recoveryKey = RecoveryKey.generate()
-        try RecoveryBundle.write(keys, archiveID: try archive.archiveID(), recoveryKey: recoveryKey, to: archive.location.root)
+        let archiveID = try archive.archiveID()
         try archive.setMeta(confirmedKey, nil)
+        try archive.setMeta(confirmedBundleKey, nil)
+        try RecoveryBundle.write(keys, archiveID: archiveID, recoveryKey: recoveryKey, to: archive.location.root)
         return recoveryKey
     }
 
@@ -115,14 +136,18 @@ public enum ArchiveSetup {
         for (group, text) in typed where !recoveryKey.groupMatches(group, typed: text) {
             throw ArchiveSetupError.groupMismatch
         }
+        let root = archive.location.root
+        let fingerprint = try RecoveryBundle.fingerprint(in: root)
         let archiveID: String
         do {
-            archiveID = try RecoveryBundle.unwrap(in: archive.location.root, with: recoveryKey).archiveID
+            archiveID = try RecoveryBundle.unwrap(in: root, with: recoveryKey).archiveID
         } catch RecoveryBundleError.wrongKey {
             throw ArchiveSetupError.notCurrentRecoveryKey
         }
+        // The bundle checked must be the one recorded as confirmed.
+        guard try RecoveryBundle.fingerprint(in: root) == fingerprint else { throw ArchiveSetupError.notCurrentRecoveryKey }
         guard try archive.archiveID() == archiveID else { throw ArchiveSetupError.bundleMismatch }
-        try markConfirmed(archive, at: date)
+        try record(archive, bundle: fingerprint, at: date)
     }
 
     /// Two different group numbers (0-based) to ask the user to type back.
@@ -136,6 +161,11 @@ public enum ArchiveSetup {
     /// Marks the current key confirmed without checking it. Tests and setups
     /// that write their own bundle use it; the CLI and app use `confirm`.
     public static func markConfirmed(_ archive: Archive, at date: Date = Date()) throws {
+        try record(archive, bundle: (try? RecoveryBundle.fingerprint(in: archive.location.root)) ?? "", at: date)
+    }
+
+    private static func record(_ archive: Archive, bundle fingerprint: String, at date: Date) throws {
+        try archive.setMeta(confirmedBundleKey, fingerprint)
         try archive.setMeta(confirmedKey, String(Int(date.timeIntervalSince1970)))
     }
 

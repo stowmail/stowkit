@@ -211,6 +211,16 @@ public struct RecoveryBundle: Sendable {
         FileManager.default.fileExists(atPath: archiveFolder.appendingPathComponent(fileName).path)
     }
 
+    /// SHA-256 of the bundle file, in hex, so a confirmation can name the
+    /// exact bundle it confirmed (D-086). Any new bundle has a new random salt,
+    /// so it never shares a fingerprint with an older one.
+    public static func fingerprint(in archiveFolder: URL) throws -> String {
+        guard let data = FileManager.default.contents(atPath: archiveFolder.appendingPathComponent(fileName).path) else {
+            throw RecoveryBundleError.missing
+        }
+        return SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+    }
+
     /// Unwraps the keys in `archiveFolder`'s bundle. Returns them with the archive ID they belong to.
     public static func unwrap(in archiveFolder: URL, with recoveryKey: RecoveryKey) throws -> (keys: ArchiveKeys, archiveID: String) {
         let file = try read(archiveFolder)

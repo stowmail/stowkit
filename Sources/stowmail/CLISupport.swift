@@ -10,21 +10,25 @@ import StowSync
 
 /// Shared plumbing for the commands.
 enum CLI {
-    /// Logs go to standard error and to `~/Library/Logs/Stow/stowmail.log`
-    /// (D-040). Level from STOW_LOG_LEVEL (trace, debug, info, notice,
-    /// warning, error), default notice. Never logs secrets (D-014).
-    private static let loggingBootstrapped: Bool = {
-        let level = ProcessInfo.processInfo.environment["STOW_LOG_LEVEL"].flatMap(Logger.Level.init(rawValue:)) ?? .notice
-        LoggingSystem.bootstrap { label in
-            var console = StreamLogHandler.standardError(label: label)
-            console.logLevel = level
-            return MultiplexLogHandler([console, FileLogHandler(label: label, level: level)])
-        }
-        return true
-    }()
+    private nonisolated(unsafe) static var loggingBootstrapped = false
+    private static let loggingLock = NSLock()
 
-    static func bootstrapLogging() {
-        _ = loggingBootstrapped
+    /// Logs go to standard error and to `~/Library/Logs/Stow/stowmail.log`
+    /// (D-040), both scrubbed. Level from STOW_LOG_LEVEL (trace, debug, info,
+    /// notice, warning, error), default notice. Never logs secrets (D-014).
+    /// The background sync passes `console: false`: launchd would copy every
+    /// line into `daemon.out.log`, which is never rotated.
+    static func bootstrapLogging(console: Bool = true) {
+        loggingLock.withLock {
+            guard !loggingBootstrapped else { return }
+            loggingBootstrapped = true
+            let level = ProcessInfo.processInfo.environment["STOW_LOG_LEVEL"].flatMap(Logger.Level.init(rawValue:)) ?? .notice
+            LoggingSystem.bootstrap { label in
+                let file = FileLogHandler(label: label, level: level)
+                guard console else { return file }
+                return MultiplexLogHandler([StandardErrorLogHandler(label: label, level: level), file])
+            }
+        }
     }
 
     static func storeRoot(_ out: String?) -> URL {

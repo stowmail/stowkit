@@ -30,11 +30,12 @@ public enum MboxExport {
     public static func export(
         _ archive: Archive, account: AccountID, to url: URL, progress: (@Sendable (Int, Int) -> Void)? = nil
     ) throws -> (messages: Int, bytes: Int) {
-        guard !FileManager.default.fileExists(atPath: url.path) else { throw MboxExportError.destinationExists(url.path) }
-        guard FileManager.default.createFile(atPath: url.path, contents: nil, attributes: [.posixPermissions: 0o600]) else {
-            throw MboxExportError.cannotCreate(url.path)
+        // One exclusive create: never over a file, or through a link, that appears in the meantime.
+        let descriptor = open(url.path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o600)
+        guard descriptor >= 0 else {
+            throw errno == EEXIST ? MboxExportError.destinationExists(url.path) : MboxExportError.cannotCreate(url.path)
         }
-        let handle = try FileHandle(forWritingTo: url)
+        let handle = FileHandle(fileDescriptor: descriptor, closeOnDealloc: true)
         defer { try? handle.close() }
 
         let rows = try archive.database.read { db in
