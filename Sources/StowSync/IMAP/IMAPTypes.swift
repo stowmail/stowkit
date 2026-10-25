@@ -157,4 +157,19 @@ public struct MailboxQuota: Sendable, Equatable {
         self.usedBytes = usedBytes
         self.limitBytes = limitBytes
     }
+
+    /// No personal or business mailbox plan is anywhere near this; a bigger limit means "none reported".
+    public static let largestPlausibleLimitBytes: Int64 = 1 << 50 // 1 PiB
+
+    /// A quota from GETQUOTAROOT's STORAGE figures (RFC 2087: units of 1024
+    /// octets), or nil when they say nothing real. A Google Workspace account
+    /// answers 0 used and a limit of about 2^53 KiB, because its storage is
+    /// pooled across the organisation (D-404); multiplying that by 1024 must not overflow.
+    public static func fromStorage(usageKiB: Int, limitKiB: Int) -> MailboxQuota? {
+        guard usageKiB > 0, limitKiB > 0 else { return nil }
+        let (used, usedOverflow) = Int64(usageKiB).multipliedReportingOverflow(by: 1024)
+        let (limit, limitOverflow) = Int64(limitKiB).multipliedReportingOverflow(by: 1024)
+        guard !usedOverflow, !limitOverflow, limit <= largestPlausibleLimitBytes else { return nil }
+        return MailboxQuota(usedBytes: used, limitBytes: limit)
+    }
 }

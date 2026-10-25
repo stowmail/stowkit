@@ -53,6 +53,28 @@ import Testing
         #expect(!server.commandLog.contains { $0.uppercased().contains("QUOTA") })
     }
 
+    /// What Gmail answered for a Google Workspace account on 25 Oct 2026: 0 used, a limit of about 2^53 KiB.
+    @Test func aWorkspaceQuotaThatSaysNothingGivesSizeOnly() async throws {
+        let fixtures = try TestFixtures.small()
+        let server = gmailServer(fixtures)
+        server.capabilities.append("QUOTA")
+        server.storageQuotaKiB = (used: 0, limit: 9_007_199_254_740_991)
+        let harness = try await EngineHarness(server: server)
+        defer { harness.cleanUp() }
+        let size = try await harness.sync.mailboxSize(for: harness.account)
+        #expect(size.quotaAdvertised && size.quota == nil)
+        #expect(size.messages == fixtures.count)
+    }
+
+    @Test func quotaFiguresThatSayNothingOrWouldOverflow() {
+        #expect(MailboxQuota.fromStorage(usageKiB: 6_500_000, limitKiB: 15_728_640)
+            == MailboxQuota(usedBytes: 6_500_000 * 1024, limitBytes: 15_728_640 * 1024))
+        #expect(MailboxQuota.fromStorage(usageKiB: 0, limitKiB: 15_728_640) == nil)
+        #expect(MailboxQuota.fromStorage(usageKiB: 10, limitKiB: 0) == nil)
+        #expect(MailboxQuota.fromStorage(usageKiB: 10, limitKiB: 9_007_199_254_740_991) == nil)
+        #expect(MailboxQuota.fromStorage(usageKiB: Int.max, limitKiB: Int.max) == nil)
+    }
+
     @Test func aRefusedQuotaGivesSizeOnly() async throws {
         let fixtures = try TestFixtures.small()
         let server = gmailServer(fixtures)

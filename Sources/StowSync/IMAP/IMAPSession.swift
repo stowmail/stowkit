@@ -83,10 +83,9 @@ public actor IMAPSession {
         var found: MailboxQuota?
         let completion = try await runForCompletion(.getQuotaRoot(rawName: mailbox)) { response in
             guard found == nil, case .untagged(.quota(_, let resources)) = response,
-                  let storage = resources.first(where: { $0.resourceName.uppercased() == "STORAGE" }), storage.limit > 0
+                  let storage = resources.first(where: { $0.resourceName.uppercased() == "STORAGE" })
             else { return }
-            // RFC 2087: STORAGE is counted in units of 1024 octets.
-            found = MailboxQuota(usedBytes: Int64(storage.usage) * 1024, limitBytes: Int64(storage.limit) * 1024)
+            found = MailboxQuota.fromStorage(usageKiB: storage.usage, limitKiB: storage.limit)
         }
         guard completion.status == "OK" else {
             logger.debug("GETQUOTAROOT refused", metadata: ["status": "\(completion.status)", "text": "\(Self.describe(completion.text))"])
