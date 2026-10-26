@@ -326,6 +326,44 @@ func testKeychain() -> KeychainStore {
         #expect(await unconfirmed.round().0 == .paused(ArchiveSetupError.recoveryNotConfirmed.description))
     }
 
+    /// R15 (D-442): the app's hold comes before power, is its own result, is
+    /// recorded for `stowmail status`, and clears once a round runs again.
+    @Test func theAppsHoldStopsARoundBeforePowerAndIsRecorded() async throws {
+        let (archive, location, keys) = try confirmedArchive()
+        defer { try? FileManager.default.removeItem(at: location.root) }
+        try archive.database.close()
+        final class Hold: @unchecked Sendable { var reason: String? = "Your trial has ended." }
+        let hold = Hold()
+        let power = Power()
+        power.state = PowerState(onBattery: true, batteryPercent: 5, lowPowerMode: false)
+        let scheduler = Scheduler(openArchive: { try Archive.open(location, keys: keys) },
+                                  makeSync: { _ in throw CocoaError(.fileNoSuchFile) },
+                                  power: { power.state },
+                                  hold: { hold.reason })
+        #expect(await scheduler.round() == (.held("Your trial has ended."), [:]))
+        #expect(Scheduler.heldReason(try Archive.open(location, keys: keys)) == "Your trial has ended.")
+
+        // A new reason replaces the old one.
+        hold.reason = "This licence is no longer valid."
+        #expect(await scheduler.round().0 == .held("This licence is no longer valid."))
+        #expect(Scheduler.heldReason(try Archive.open(location, keys: keys)) == "This licence is no longer valid.")
+
+        // Lifted: power decides again, and a round that runs clears the record.
+        hold.reason = nil
+        guard case .paused = await scheduler.round().0 else { Issue.record("power should pause once the hold lifts"); return }
+        power.state = PowerState(onBattery: false, batteryPercent: 100, lowPowerMode: false)
+        #expect(await scheduler.round().0 == .idle)
+        #expect(Scheduler.heldReason(try Archive.open(location, keys: keys)) == nil)
+    }
+
+    /// The CLI never holds: the default hold is nil (R15).
+    @Test func theDefaultSchedulerNeverHolds() async throws {
+        let scheduler = Scheduler(openArchive: { throw ArchiveLocationError.offline("/Volumes/Gone/Stow") },
+                                  makeSync: { _ in throw CocoaError(.fileNoSuchFile) },
+                                  power: { PowerState(onBattery: false, batteryPercent: nil, lowPowerMode: false) })
+        guard case .offline = await scheduler.round().0 else { Issue.record("should reach the archive, not hold"); return }
+    }
+
     /// D-036: after the budget runs out, wait only until there is room again, never under the minimum.
     @Test func aUsedUpBudgetWaitsOnlyUntilThereIsRoom() async throws {
         let (archive, location, keys) = try confirmedArchive()

@@ -126,6 +126,7 @@ struct Status: AsyncParsableCommand {
         } else {
             print("Background sync: \(daemon)\(heartbeat.map { ", last active \(CLI.time($0))" } ?? "")")
         }
+        if let reason = Scheduler.heldReason(archive) { print("Sync is held by the Stow app: \(reason)") }
         if let reason = pauseReason { print("Sync is paused: \(reason).") }
         print("Archive: \(location.root.path). Logs: \(LaunchAgent.logDirectory.path)")
     }

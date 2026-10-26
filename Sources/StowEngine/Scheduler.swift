@@ -51,6 +51,9 @@ public enum RoundResult: Sendable, Equatable {
     case cannotOpen(String)
     /// Another Stow process is writing to the archive.
     case busy
+    /// The Stow app is holding sync, for this reason (R15, D-442). Kept apart from
+    /// `paused` so the message points at the app, not at power (D-082).
+    case held(String)
 }
 
 /// Spreads sync across accounts, invisibly and gently (step 5, D-036).
@@ -67,6 +70,7 @@ public actor Scheduler {
     let openArchive: @Sendable () throws -> Archive
     let makeSync: @Sendable (Archive) throws -> EngineSync
     let power: @Sendable () -> PowerState
+    let hold: @Sendable () -> String?
     let now: @Sendable () -> Date
     let sleep: @Sendable (TimeInterval) async throws -> Void
     private let logger = Logger(label: "ee.getstow.engine.scheduler")
@@ -77,12 +81,17 @@ public actor Scheduler {
     private var nextStart = 0
     private var lastLogged: RoundResult?
     private var swept = false
+    private var recordedHold: String?
+
+    /// The `archive_meta` key holding the reason while the app holds sync, for `stowmail status`.
+    public static let heldMetaKey = "sync_held"
 
     public init(
         settings: SchedulerSettings = SchedulerSettings(),
         openArchive: @escaping @Sendable () throws -> Archive,
         makeSync: @escaping @Sendable (Archive) throws -> EngineSync,
         power: @escaping @Sendable () -> PowerState = { PowerState.current() },
+        hold: @escaping @Sendable () -> String? = { nil },
         now: @escaping @Sendable () -> Date = { Date() },
         sleep: @escaping @Sendable (TimeInterval) async throws -> Void = { try await Task.sleep(nanoseconds: UInt64($0 * 1_000_000_000)) }
     ) {
@@ -90,6 +99,7 @@ public actor Scheduler {
         self.openArchive = openArchive
         self.makeSync = makeSync
         self.power = power
+        self.hold = hold
         self.now = now
         self.sleep = sleep
     }
@@ -104,6 +114,7 @@ public actor Scheduler {
                 case .offline: logger.notice("Archive offline; sync paused until it is back")
                 case .cannotOpen(let reason): logger.error("Archive could not be opened; sync paused until it can", metadata: ["reason": "\(reason)"])
                 case .busy: logger.info("Archive busy; waiting")
+                case .held(let reason): logger.notice("Sync held by the Stow app", metadata: ["reason": "\(reason)"])
                 case .worked, .idle: if lastLogged != nil, lastLogged != .worked, lastLogged != .idle { logger.notice("Sync resumed") }
                 }
                 lastLogged = result
@@ -111,7 +122,7 @@ public actor Scheduler {
             let pause: TimeInterval = switch result {
             case .worked: 1
             case .idle: settings.idleInterval
-            case .paused, .offline, .cannotOpen: 60
+            case .paused, .offline, .cannotOpen, .held: 60
             case .busy: 30
             }
             do {
@@ -124,6 +135,11 @@ public actor Scheduler {
 
     /// One turn for every connected account that is not waiting.
     public func round() async -> (RoundResult, [AccountID: TurnOutcome]) {
+        // R15: the app's hold comes before power, so the reason shown is the app's.
+        if let reason = hold() {
+            recordHold(reason)
+            return (.held(reason), [:])
+        }
         if let reason = power().pauseReason { return (.paused(reason), [:]) }
         let archive: Archive
         do {
@@ -138,6 +154,11 @@ public actor Scheduler {
         guard ArchiveSetup.recoveryState(archive) == .confirmed else { return (.paused(ArchiveSetupError.recoveryNotConfirmed.description), [:]) }
         guard let lock = try? ArchiveLock.acquire(archive.location) else { return (.busy, [:]) }
         defer { lock.release() }
+        if recordedHold != nil || Self.heldReason(archive) != nil {
+            // The hold has lifted: `stowmail status` should stop showing it.
+            try? archive.setMeta(Self.heldMetaKey, nil)
+            recordedHold = nil
+        }
         if !swept {
             // Files written by a batch that was killed before it was recorded. Only
             // safe while holding the lock, so nothing is mid-write.
@@ -206,6 +227,24 @@ public actor Scheduler {
         }
         try? archive.setMeta("daemon_heartbeat", String(Int(now().timeIntervalSince1970)))
         return (worked ? .worked : .idle, outcomes)
+    }
+
+    /// Writes the hold's reason into the archive for `stowmail status`, once per
+    /// new reason. Best effort: an archive that cannot be opened or is busy is
+    /// tried again next round, and the hold applies either way.
+    private func recordHold(_ reason: String) {
+        guard reason != recordedHold, let archive = try? openArchive() else { return }
+        defer { try? archive.database.close() }
+        guard let lock = try? ArchiveLock.acquire(archive.location) else { return }
+        defer { lock.release() }
+        guard (try? archive.setMeta(Self.heldMetaKey, reason)) != nil else { return }
+        try? archive.setMeta("daemon_heartbeat", String(Int(now().timeIntervalSince1970)))
+        recordedHold = reason
+    }
+
+    /// The reason the app is holding sync, as the last held round recorded it (R15).
+    public static func heldReason(_ archive: Archive) -> String? {
+        (try? archive.meta(heldMetaKey)).flatMap { $0 }
     }
 
     /// When to try again after the byte budget ran out: as soon as enough of the
