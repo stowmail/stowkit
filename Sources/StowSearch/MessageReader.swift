@@ -39,7 +39,7 @@ public final class MessageReader: MessageReading, InlinePartReading, MessageBody
     func message(_ db: Database, _ id: StoredMessageID, bodyLimit: Int) throws -> MessageDetail? {
         let limit = max(0, bodyLimit)
         guard let row = try Row.fetchOne(db, sql: """
-            SELECT m.account_id, m.thread_key, m.internal_date, m.sent_date, m.subject, m.source_state,
+            SELECT m.account_id, m.thread_key, m.internal_date, m.sent_date, m.subject, m.source_state, m.imported_at, m.source_state_at,
                    b.text_plain IS NULL AND b.text_from_html IS NOT NULL AS from_html,
                    substr(coalesce(b.text_plain, b.text_from_html), 1, ?) AS body,
                    length(coalesce(b.text_plain, b.text_from_html)) AS body_length
@@ -72,7 +72,28 @@ public final class MessageReader: MessageReading, InlinePartReading, MessageBody
             bodyFromHTML: row["from_html"] ?? false,
             bodyLength: bodyLength,
             bodyTruncated: bodyLength > limit,
-            attachments: try attachments(db, message: id))
+            attachments: try attachments(db, message: id),
+            places: try places(db, message: id),
+            importedAt: Date(timeIntervalSince1970: TimeInterval(row["imported_at"] as Int64)),
+            sourceStateAt: (row["source_state_at"] as Int64?).map { Date(timeIntervalSince1970: TimeInterval($0)) })
+    }
+
+    /// Where the provider has the message now (R11): every folder or label holding a copy the
+    /// server has not dropped, in name order. A Gmail label counts only while the message still
+    /// has a folder copy (All Mail), so a deleted message never shows the labels it had.
+    func places(_ db: Database, message: StoredMessageID) throws -> [ArchiveFolder] {
+        try Row.fetchAll(db, sql: """
+            SELECT f.id, f.account_id, f.name, f.kind, f.special_use, f.delimiter FROM message_folders mf
+            JOIN folders f ON f.id = mf.folder_id
+            WHERE mf.message_id = ? AND mf.removed_from_server_at IS NULL
+                AND (f.kind = 'folder' OR EXISTS (SELECT 1 FROM message_folders c JOIN folders cf ON cf.id = c.folder_id
+                    WHERE c.message_id = mf.message_id AND cf.kind = 'folder' AND c.removed_from_server_at IS NULL))
+            ORDER BY f.kind, f.name
+            """, arguments: [message]).map { row in
+            ArchiveFolder(id: row["id"], accountID: AccountID(rawValue: row["account_id"]), name: row["name"],
+                          kind: ArchiveFolder.Kind(rawValue: row["kind"]) ?? .folder,
+                          specialUse: row["special_use"], delimiter: row["delimiter"])
+        }
     }
 
     /// The message's attachments in MIME part order, numbered from 1.

@@ -55,10 +55,21 @@ public struct MessageDetail: Hashable, Sendable, Codable, Identifiable {
     /// True when `body` is only the start of the body.
     public var bodyTruncated: Bool
     public var attachments: [AttachmentInfo]
+    /// The folders and Gmail labels the provider has this message in now (R11): copies the
+    /// server no longer has are left out, so a deleted or spam message has none. Gmail's All
+    /// Mail is included as stored; the app names and filters them as its sidebar does.
+    public var places: [ArchiveFolder]
+    /// When Stow stored the message (`messages.imported_at`, R11). Nil only when decoded from
+    /// a value encoded before this field existed.
+    public var importedAt: Date?
+    /// When `sourceState` last changed (`messages.source_state_at`, D-039), for "Deleted from
+    /// Gmail 1 Oct 2026" (UI-24). Nil while the message has always been present.
+    public var sourceStateAt: Date?
 
     public init(messageID: StoredMessageID, accountID: AccountID, threadKey: String?, date: Date, sentDate: Date?,
                 from: EmailAddress?, to: [EmailAddress], cc: [EmailAddress], subject: String?, sourceState: SourceState,
-                body: String?, bodyFromHTML: Bool, bodyLength: Int, bodyTruncated: Bool, attachments: [AttachmentInfo]) {
+                body: String?, bodyFromHTML: Bool, bodyLength: Int, bodyTruncated: Bool, attachments: [AttachmentInfo],
+                places: [ArchiveFolder] = [], importedAt: Date? = nil, sourceStateAt: Date? = nil) {
         self.messageID = messageID
         self.accountID = accountID
         self.threadKey = threadKey
@@ -74,6 +85,38 @@ public struct MessageDetail: Hashable, Sendable, Codable, Identifiable {
         self.bodyLength = bodyLength
         self.bodyTruncated = bodyTruncated
         self.attachments = attachments
+        self.places = places
+        self.importedAt = importedAt
+        self.sourceStateAt = sourceStateAt
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case messageID, accountID, threadKey, date, sentDate, from, to, cc, subject, sourceState, body, bodyFromHTML,
+             bodyLength, bodyTruncated, attachments, places, importedAt, sourceStateAt
+    }
+
+    /// `places`, `importedAt` and `sourceStateAt` decode with defaults when missing, so a value encoded before
+    /// R11 still reads (as D-418 did for `SearchHit.sourceState`).
+    public init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(messageID: try c.decode(StoredMessageID.self, forKey: .messageID),
+                  accountID: try c.decode(AccountID.self, forKey: .accountID),
+                  threadKey: try c.decodeIfPresent(String.self, forKey: .threadKey),
+                  date: try c.decode(Date.self, forKey: .date),
+                  sentDate: try c.decodeIfPresent(Date.self, forKey: .sentDate),
+                  from: try c.decodeIfPresent(EmailAddress.self, forKey: .from),
+                  to: try c.decode([EmailAddress].self, forKey: .to),
+                  cc: try c.decode([EmailAddress].self, forKey: .cc),
+                  subject: try c.decodeIfPresent(String.self, forKey: .subject),
+                  sourceState: try c.decode(SourceState.self, forKey: .sourceState),
+                  body: try c.decodeIfPresent(String.self, forKey: .body),
+                  bodyFromHTML: try c.decode(Bool.self, forKey: .bodyFromHTML),
+                  bodyLength: try c.decode(Int.self, forKey: .bodyLength),
+                  bodyTruncated: try c.decode(Bool.self, forKey: .bodyTruncated),
+                  attachments: try c.decode([AttachmentInfo].self, forKey: .attachments),
+                  places: try c.decodeIfPresent([ArchiveFolder].self, forKey: .places) ?? [],
+                  importedAt: try c.decodeIfPresent(Date.self, forKey: .importedAt),
+                  sourceStateAt: try c.decodeIfPresent(Date.self, forKey: .sourceStateAt))
     }
 }
 

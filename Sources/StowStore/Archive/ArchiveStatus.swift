@@ -22,6 +22,9 @@ public struct AccountStatus: Sendable, Equatable {
     public var coverageDate: Date?
     public var sourceStates: [SourceState: Int] = [:]
     public var removed = 0
+    /// Attachments of this account's mail whose text waits for OCR (D-207, R10).
+    /// `ArchiveStats.ocrPending` is the same count for the whole archive.
+    public var ocrPending = 0
 
     /// Share of known messages already archived, 0 to 1.
     public var progress: Double {
@@ -125,6 +128,11 @@ public enum ArchiveStatus {
                     if let state = SourceState(rawValue: row["source_state"]) { status.sourceStates[state] = row["n"] }
                 }
                 status.removed = try Int.fetchOne(db, sql: "SELECT count(*) FROM tombstones WHERE account_id = ?", arguments: [id]) ?? 0
+                status.ocrPending = try Int.fetchOne(db, sql: """
+                    SELECT count(DISTINCT t.id) FROM attachments t
+                    JOIN message_attachments x ON x.attachment_id = t.id JOIN messages m ON m.id = x.message_id
+                    WHERE m.account_id = ? AND t.text_status = 'ocr_pending'
+                    """, arguments: [id]) ?? 0
                 return status
             }
         }
