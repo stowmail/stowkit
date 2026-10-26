@@ -46,13 +46,15 @@ struct Remove: AsyncParsableCommand {
     @Option(help: "What the rules suggested: keep, deprioritise or consider-deleting.") var suggestion: SuggestionArgument?
     @Option(help: "An address, or a domain (which includes its subdomains).") var sender: String?
     @Option(help: "What happened in the mailbox: spam, trashed or gone.") var source: SourceStateArgument?
+    @Option(name: .customLong("message"), parsing: .upToNextOption,
+            help: "Message numbers, the first column of `stowmail search` (D-422).") var messages: [Int64] = []
     @Option(help: "One account only (ID, prefix, address or name).") var account: String?
     @Flag(help: "Show what would be removed, and remove nothing.") var dryRun = false
     @Flag(help: "Do not ask for confirmation.") var yes = false
 
     func validate() throws {
-        let given = [rule != nil, suggestion != nil, sender != nil, source != nil].filter { $0 }.count
-        guard given == 1 else { throw ValidationError("Give exactly one of --rule, --suggestion, --sender or --source.") }
+        let given = [rule != nil, suggestion != nil, sender != nil, source != nil, !messages.isEmpty].filter { $0 }.count
+        guard given == 1 else { throw ValidationError("Give exactly one of --rule, --suggestion, --sender, --source or --message.") }
         if let rule, SignalID(rawValue: rule) == nil {
             throw ValidationError("Unknown rule \(rule). Rules: \(SignalID.allCases.map(\.rawValue).joined(separator: ", ")).")
         }
@@ -62,6 +64,7 @@ struct Remove: AsyncParsableCommand {
         if let rule { return .signal(rule) }
         if let suggestion { return .suggestion(suggestion.stored) }
         if let sender { return .sender(sender) }
+        if !messages.isEmpty { return .messages(messages) }
         return .sourceState(source!.state)
     }
 
@@ -78,7 +81,7 @@ struct Remove: AsyncParsableCommand {
             print("\(plan.protectedLeftOut) protected message(s) left out: receipts, invoices, orders, payments, statements and senders you protect are never removed by a rule. `stowmail rules protected` lists your protected senders.")
         }
         if plan.protectedIncluded > 0 {
-            print("\(plan.protectedIncluded) of them are protected (receipts, invoices, orders and the like). They are included because you named this \(sender != nil ? "sender" : "group") yourself.")
+            print("\(plan.protectedIncluded) of them are protected (receipts, invoices, orders and the like). They are included because you \(messages.isEmpty ? "named this \(sender != nil ? "sender" : "group")" : "chose them") yourself.")
         }
         guard !plan.messageIDs.isEmpty else { return }
         if dryRun {
@@ -253,6 +256,44 @@ struct DeletionCheckCommand: AsyncParsableCommand {
             print("The mailbox now has nothing before \(CLI.day(check.before)), as expected.")
         } else {
             print("The mailbox still has \(check.stillAtProvider) email(s) before \(CLI.day(check.before)) (\(CLI.megabytes(check.stillAtProviderBytes))).")
+        }
+    }
+}
+
+/// What Tidy up would show (R13, D-058): suggestions grouped by sender, changes at the
+/// provider, and protected mail. Shows sender addresses on the terminal only, as `removed` does.
+struct Tidy: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        abstract: "Summarise what the rules suggest removing from the archive, by sender, and what changed in the mailbox.",
+        discussion: "Counts match `stowmail remove --dry-run` for the same selection. Nothing is removed."
+    )
+
+    @Option(help: "One account only (ID, prefix, address or name).") var account: String?
+    @Option(help: "Senders to list per suggestion.") var senders = 10
+    @Flag(help: "Print how long the summary took.") var time = false
+
+    func run() async throws {
+        let archive = try CLIArchive.open(readOnly: true)
+        let id = try account.map { try CLIArchive.accounts(archive).find($0).account.id }
+        let started = ContinuousClock.now
+        let summary = try TidySummary.compute(archive, account: id)
+        let elapsed = ContinuousClock.now - started
+        for group in summary.suggestions {
+            let name = group.suggestion == .considerDeleting ? "Consider deleting" : "Deprioritise"
+            print("\(name): \(group.messages) message(s), \(CLI.megabytes(group.bytes)), \(group.senders.count) sender(s) from \(group.senderDomains) domain(s).")
+            for sender in group.senders.prefix(senders) {
+                let protected = sender.protectedLeftOut > 0 ? ", \(sender.protectedLeftOut) protected left out" : ""
+                print("  \(sender.address.isEmpty ? "(no sender)" : sender.address): \(sender.messages), \(CLI.megabytes(sender.bytes)), newest \(CLI.day(sender.newest))\(protected). \(sender.reasons.joined(separator: " "))")
+            }
+        }
+        for group in summary.sourceStates where group.messages > 0 {
+            let retention = group.olderThanRetention > 0 ? ", \(group.olderThanRetention) older than your retention (expected)" : ""
+            print("\(group.state.rawValue.capitalized) at the provider: \(group.messages) message(s), \(CLI.megabytes(group.bytes)), \(group.protectedIncluded) protected\(retention).")
+        }
+        let kinds = summary.protectedByKind.sorted { $0.key.rawValue < $1.key.rawValue }.map { "\($0.key.rawValue) \($0.value)" }
+        print("Protected: \(summary.protectedTotal)\(kinds.isEmpty ? "" : " (\(kinds.joined(separator: ", ")))") of \(summary.messages) message(s).")
+        if time {
+            print("Summary took \(elapsed.components.seconds * 1000 + elapsed.components.attoseconds / 1_000_000_000_000_000) ms.")
         }
     }
 }

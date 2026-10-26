@@ -12,6 +12,9 @@ public enum RemovalSelector: Sendable, Equatable {
     case sender(String)
     /// Messages in this state at the provider, for example marked as spam (D-022).
     case sourceState(SourceState)
+    /// Emails the user picked from the list or the reader (D-422, R14). Protected
+    /// mail is included, since the user chose it; IDs no longer in the archive are skipped.
+    case messages([StoredMessageID])
 
     /// How the selector is recorded on each tombstone: no addresses for rules.
     public var reason: String {
@@ -20,6 +23,7 @@ public enum RemovalSelector: Sendable, Equatable {
         case .suggestion(let suggestion): "suggestion:\(suggestion.rawValue)"
         case .sender(let sender): "sender:\(sender.lowercased())"
         case .sourceState(let state): "source:\(state.rawValue)"
+        case .messages: "chosen"
         }
     }
 }
@@ -52,6 +56,8 @@ public struct RemovalResult: Sendable, Equatable {
     /// Message and attachment files deleted because nothing else used them.
     public var filesDeleted = 0
     public var bytesFreed = 0
+    /// The tombstone written for each removed message, for an immediate Undo (UI-20).
+    public var tombstones: [Int64] = []
 }
 
 /// One removed message, as `stowmail removed` lists it.
@@ -120,6 +126,9 @@ public struct ArchiveRemoval: Sendable {
             case .sourceState(let state):
                 conditions.append("m.source_state = ?")
                 arguments.append(state.rawValue)
+            case .messages(let ids):
+                // Bound as values, never spliced into the SQL; in chunks well under SQLite's variable limit.
+                return try Self.plan(db, chosen: ids, account: account)
             }
             let rows = try Row.fetchAll(db, sql: """
                 SELECT m.id, m.size, a.domain, \(Self.isProtectedSQL) AS protected
@@ -129,7 +138,7 @@ public struct ArchiveRemoval: Sendable {
             // Rules and suggestions never pick protected mail; a sender or source state the user names does (D-407).
             let leavesProtectedOut: Bool = switch selector {
             case .signal, .suggestion: true
-            case .sender, .sourceState: false
+            case .sender, .sourceState, .messages: false
             }
             let chosen = leavesProtectedOut ? rows.filter { !($0["protected"] as Bool) } : rows
             return RemovalPlan(
@@ -140,6 +149,32 @@ public struct ArchiveRemoval: Sendable {
                 protectedIncluded: chosen.filter { $0["protected"] as Bool }.count
             )
         }
+    }
+
+    /// The plan for chosen messages: every one still in the archive (and in `account`, if given),
+    /// protected or not, counted as `protectedIncluded`.
+    static func plan(_ db: Database, chosen ids: [StoredMessageID], account: AccountID?) throws -> RemovalPlan {
+        var rows: [Row] = []
+        let unique = Array(Set(ids)).sorted()
+        for start in stride(from: 0, to: unique.count, by: 500) {
+            let chunk = Array(unique[start..<min(start + 500, unique.count)])
+            var sql = """
+                SELECT m.id, m.size, a.domain, \(isProtectedSQL) AS protected
+                FROM messages m LEFT JOIN addresses a ON a.id = m.from_address_id
+                WHERE m.id IN (\(Array(repeating: "?", count: chunk.count).joined(separator: ", ")))
+                """
+            var arguments: [any DatabaseValueConvertible] = chunk
+            if let account {
+                sql += " AND m.account_id = ?"
+                arguments.append(account.rawValue)
+            }
+            rows += try Row.fetchAll(db, sql: sql + " ORDER BY m.id", arguments: StatementArguments(arguments))
+        }
+        return RemovalPlan(
+            messageIDs: rows.map { $0["id"] },
+            bytes: rows.reduce(0) { $0 + ($1["size"] as Int) },
+            senderDomains: Set(rows.compactMap { $0["domain"] as String? }).count,
+            protectedIncluded: rows.filter { $0["protected"] as Bool }.count)
     }
 
     /// Removes the messages, writing a tombstone for each. Database first, in
@@ -158,6 +193,7 @@ public struct ArchiveRemoval: Sendable {
                     raw += unused.raw
                     attachments += unused.attachments
                     result.messages += 1
+                    result.tombstones.append(unused.tombstone)
                 }
                 return (raw, attachments)
             }
@@ -169,7 +205,7 @@ public struct ArchiveRemoval: Sendable {
     }
 
     /// One message's rows out and its tombstone in. Returns the files it leaves unused.
-    private func removeOne(_ db: Database, id: StoredMessageID, reason: String) throws -> (raw: [Data], attachments: [Data])? {
+    private func removeOne(_ db: Database, id: StoredMessageID, reason: String) throws -> (raw: [Data], attachments: [Data], tombstone: Int64)? {
         guard let row = try Row.fetchOne(db, sql: """
             SELECT m.account_id, m.raw_hash, m.gmail_msgid, m.rfc822_message_id, m.internal_date, m.size, a.address
             FROM messages m LEFT JOIN addresses a ON a.id = m.from_address_id WHERE m.id = ?
@@ -211,7 +247,7 @@ public struct ArchiveRemoval: Sendable {
         }
         // The same bytes in another account share one message file.
         let rawUsed = try Bool.fetchOne(db, sql: "SELECT EXISTS (SELECT 1 FROM messages WHERE raw_hash = ?)", arguments: [rawHash]) ?? true
-        return (rawUsed ? [] : [rawHash], unusedAttachments)
+        return (rawUsed ? [] : [rawHash], unusedAttachments, tombstone)
     }
 
     private func deleteFiles(_ hashes: [Data], in store: EncryptedFileStore) -> Int {
