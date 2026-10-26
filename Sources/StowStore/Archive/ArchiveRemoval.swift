@@ -15,6 +15,11 @@ public enum RemovalSelector: Sendable, Equatable {
     /// Emails the user picked from the list or the reader (D-422, R14). Protected
     /// mail is included, since the user chose it; IDs no longer in the archive are skipped.
     case messages([StoredMessageID])
+    /// Mail in this state at the provider that the account's retention does not explain (D-022):
+    /// for trashed and gone, only mail from after the account's retention cutoff (all of it when no
+    /// retention is set); for spam, all of it. What Tidy up offers as "you deleted these recently".
+    /// Protected mail included, as for `sourceState`. Recorded like `sourceState`.
+    case recentSourceState(SourceState)
 
     /// How the selector is recorded on each tombstone: no addresses for rules.
     public var reason: String {
@@ -22,7 +27,7 @@ public enum RemovalSelector: Sendable, Equatable {
         case .signal(let signal): "rule:\(signal)"
         case .suggestion(let suggestion): "suggestion:\(suggestion.rawValue)"
         case .sender(let sender): "sender:\(sender.lowercased())"
-        case .sourceState(let state): "source:\(state.rawValue)"
+        case .sourceState(let state), .recentSourceState(let state): "source:\(state.rawValue)"
         case .messages: "chosen"
         }
     }
@@ -69,6 +74,9 @@ public struct Tombstone: Sendable, Equatable {
     public var reason: String
     public var removedAt: Date
     public var restoreRequestedAt: Date?
+    /// Whether `requestRestore` can queue it: a place where the server last had it is in a folder
+    /// still synced at the same UIDVALIDITY. False means Put back cannot find it.
+    public var restorable: Bool
 }
 
 /// Removing mail from the archive, and putting it back (D-020, D-033).
@@ -98,7 +106,7 @@ public struct ArchiveRemoval: Sendable {
     /// True for a message whose stored rules result marks it protected (D-407).
     static let isProtectedSQL = "(',' || coalesce(m.rule_signals, '') || ',') LIKE '%,\(StoredRuleResult.protectedMarker),%'"
 
-    public func plan(_ selector: RemovalSelector, account: AccountID? = nil) throws -> RemovalPlan {
+    public func plan(_ selector: RemovalSelector, account: AccountID? = nil, now: Date = Date()) throws -> RemovalPlan {
         try archive.database.read { db in
             var conditions: [String] = []
             var arguments: [any DatabaseValueConvertible] = []
@@ -126,6 +134,16 @@ public struct ArchiveRemoval: Sendable {
             case .sourceState(let state):
                 conditions.append("m.source_state = ?")
                 arguments.append(state.rawValue)
+            case .recentSourceState(let state):
+                conditions.append("m.source_state = ?")
+                arguments.append(state.rawValue)
+                if state != .spam {
+                    // Leave out what each account's retention explains (D-022, D-039), as TidySummary counts it.
+                    for (accountID, cutoff) in try Self.retentionCutoffs(db, now: now) {
+                        conditions.append("NOT (m.account_id = ? AND m.internal_date < ?)")
+                        arguments += [accountID, cutoff]
+                    }
+                }
             case .messages(let ids):
                 // Bound as values, never spliced into the SQL; in chunks well under SQLite's variable limit.
                 return try Self.plan(db, chosen: ids, account: account)
@@ -138,7 +156,7 @@ public struct ArchiveRemoval: Sendable {
             // Rules and suggestions never pick protected mail; a sender or source state the user names does (D-407).
             let leavesProtectedOut: Bool = switch selector {
             case .signal, .suggestion: true
-            case .sender, .sourceState, .messages: false
+            case .sender, .sourceState, .recentSourceState, .messages: false
             }
             let chosen = leavesProtectedOut ? rows.filter { !($0["protected"] as Bool) } : rows
             return RemovalPlan(
@@ -149,6 +167,20 @@ public struct ArchiveRemoval: Sendable {
                 protectedIncluded: chosen.filter { $0["protected"] as Bool }.count
             )
         }
+    }
+
+    /// Each account's retention cutoff (D-034) as a stored `internal_date`: `now` less its
+    /// retention months. Accounts without a retention setting are absent. Shared with
+    /// `TidySummary`, so "older than your retention" means the same thing in both.
+    public static func retentionCutoffs(_ db: Database, now: Date) throws -> [String: Int64] {
+        var cutoffs: [String: Int64] = [:]
+        for row in try Row.fetchAll(db, sql: "SELECT id, retention_months FROM accounts WHERE retention_months IS NOT NULL") {
+            if let months: Int = row["retention_months"],
+               let cutoff = Calendar(identifier: .gregorian).date(byAdding: .month, value: -months, to: now) {
+                cutoffs[row["id"]] = Int64(cutoff.timeIntervalSince1970)
+            }
+        }
+        return cutoffs
     }
 
     /// The plan for chosen messages: every one still in the archive (and in `account`, if given),
@@ -279,17 +311,27 @@ public struct ArchiveRemoval: Sendable {
     public func tombstones(account: AccountID? = nil) throws -> [Tombstone] {
         try archive.database.read { db in
             try Row.fetchAll(db, sql: """
-                SELECT * FROM tombstones WHERE ? IS NULL OR account_id = ? ORDER BY removed_at DESC, internal_date DESC
+                SELECT t.*, EXISTS (\(Self.restorablePlaceSQL)) AS restorable FROM tombstones t
+                WHERE ? IS NULL OR t.account_id = ? ORDER BY t.removed_at DESC, t.internal_date DESC
                 """, arguments: [account?.rawValue, account?.rawValue]).map { row in
                 Tombstone(
                     id: row["id"], account: AccountID(rawValue: row["account_id"]),
                     date: Date(timeIntervalSince1970: TimeInterval(row["internal_date"] as Int64)),
                     sender: row["sender"], reason: row["reason"],
                     removedAt: Date(timeIntervalSince1970: TimeInterval(row["removed_at"] as Int64)),
-                    restoreRequestedAt: (row["restore_requested_at"] as Int64?).map { Date(timeIntervalSince1970: TimeInterval($0)) })
+                    restoreRequestedAt: (row["restore_requested_at"] as Int64?).map { Date(timeIntervalSince1970: TimeInterval($0)) },
+                    restorable: row["restorable"])
             }
         }
     }
+
+    /// A place `requestRestore` can queue tombstone `t` at: its folder still synced, at the same UIDVALIDITY.
+    static let restorablePlaceSQL = """
+        SELECT 1 FROM tombstone_copies c
+        JOIN sync_state s ON s.folder_id = c.folder_id AND s.uid_validity = c.uid_validity
+        JOIN folders f ON f.id = c.folder_id AND f.skipped_reason IS NULL
+        WHERE c.tombstone_id = t.id
+        """
 
     /// Puts removed messages back in the download queue, at the place the
     /// server last had them. Messages whose folder has since changed

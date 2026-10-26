@@ -116,7 +116,12 @@ import Testing
             let plan = try removal.plan(.sourceState(state))
             #expect(byState[state]?.messages == plan.messageIDs.count && byState[state]?.bytes == plan.bytes)
             #expect(byState[state]?.protectedIncluded == plan.protectedIncluded)
+            // What Tidy up offers to remove leaves out what retention explains, and nothing else.
+            let recent = try removal.plan(.recentSourceState(state))
+            #expect(byState[state]?.recent == recent.messageIDs.count)
         }
+        #expect(try removal.plan(.recentSourceState(.trashed)).messageIDs == [newTrash])
+        #expect(RemovalSelector.recentSourceState(.trashed).reason == "source:trashed")
         // One account's scope.
         let other = try TidySummary.compute(f.archive, account: AccountID(rawValue: "nobody"), settings: f.settings)
         #expect(other.messages == 0 && other.sourceStates.allSatisfy { $0.messages == 0 })

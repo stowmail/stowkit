@@ -53,6 +53,8 @@ public struct TidySummary: Sendable, Equatable {
         /// Trashed or gone mail older than its account's retention cutoff (D-034): expected,
         /// since the user's retention deleted it. Never counts spam. 0 with no retention set.
         public var olderThanRetention: Int
+        /// The rest, which Tidy up offers to remove: equal to `plan(.recentSourceState(_:))`.
+        public var recent: Int { messages - olderThanRetention }
     }
 
     public var suggestions: [SuggestionGroup]
@@ -133,13 +135,7 @@ public struct TidySummary: Sendable, Equatable {
             }
 
             // "You changed these in Gmail": by source state, with what retention explains (D-022, D-039).
-            var cutoffs: [String: Int64] = [:]
-            for row in try Row.fetchAll(db, sql: "SELECT id, retention_months FROM accounts WHERE retention_months IS NOT NULL") {
-                if let months: Int = row["retention_months"],
-                   let cutoff = Calendar(identifier: .gregorian).date(byAdding: .month, value: -months, to: now) {
-                    cutoffs[row["id"]] = Int64(cutoff.timeIntervalSince1970)
-                }
-            }
+            let cutoffs = try ArchiveRemoval.retentionCutoffs(db, now: now)
             var states: [SourceGroup] = []
             for state in [SourceState.spam, .trashed, .gone] {
                 let rows = try Row.fetchAll(db, sql: """

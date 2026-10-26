@@ -71,6 +71,11 @@ import Testing
 
         let tombstones = try removal.tombstones()
         #expect(tombstones.count == 1)
+        #expect(tombstones.first?.restorable == true)
+        // A changed UIDVALIDITY means Put back cannot find it there; the Removed view says so before trying.
+        try await test.archive.database.write { try $0.execute(sql: "UPDATE sync_state SET uid_validity = 9") }
+        #expect(try removal.tombstones().first?.restorable == false)
+        try await test.archive.database.write { try $0.execute(sql: "UPDATE sync_state SET uid_validity = 1") }
         #expect(try removal.requestRestore(tombstones.map(\.id)) == (1, 0))
         #expect(try await store.nextDownloads(account, runID: "r", maxMessages: 10, maxBytes: 100_000).map(\.uid) == [1])
         try await store.write(test.raw(data, uid: 1))

@@ -46,6 +46,8 @@ struct Remove: AsyncParsableCommand {
     @Option(help: "What the rules suggested: keep, deprioritise or consider-deleting.") var suggestion: SuggestionArgument?
     @Option(help: "An address, or a domain (which includes its subdomains).") var sender: String?
     @Option(help: "What happened in the mailbox: spam, trashed or gone.") var source: SourceStateArgument?
+    @Flag(help: "With --source: leave out mail older than the account's retention, which your retention deleted (D-022).")
+    var recent = false
     @Option(name: .customLong("message"), parsing: .upToNextOption,
             help: "Message numbers, the first column of `stowmail search` (D-422).") var messages: [Int64] = []
     @Option(help: "One account only (ID, prefix, address or name).") var account: String?
@@ -55,6 +57,7 @@ struct Remove: AsyncParsableCommand {
     func validate() throws {
         let given = [rule != nil, suggestion != nil, sender != nil, source != nil, !messages.isEmpty].filter { $0 }.count
         guard given == 1 else { throw ValidationError("Give exactly one of --rule, --suggestion, --sender, --source or --message.") }
+        if recent, source == nil { throw ValidationError("--recent goes with --source.") }
         if let rule, SignalID(rawValue: rule) == nil {
             throw ValidationError("Unknown rule \(rule). Rules: \(SignalID.allCases.map(\.rawValue).joined(separator: ", ")).")
         }
@@ -65,7 +68,7 @@ struct Remove: AsyncParsableCommand {
         if let suggestion { return .suggestion(suggestion.stored) }
         if let sender { return .sender(sender) }
         if !messages.isEmpty { return .messages(messages) }
-        return .sourceState(source!.state)
+        return recent ? .recentSourceState(source!.state) : .sourceState(source!.state)
     }
 
     func run() async throws {
@@ -109,7 +112,8 @@ struct Removed: AsyncParsableCommand {
         let id = try account.map { try CLIArchive.accounts(archive).find($0).account.id }
         let tombstones = try ArchiveRemoval(archive: archive).tombstones(account: id)
         for tombstone in tombstones {
-            let restore = tombstone.restoreRequestedAt.map { "  [restore requested \(CLI.day($0))]" } ?? ""
+            let restore = tombstone.restoreRequestedAt.map { "  [restore requested \(CLI.day($0))]" }
+                ?? (tombstone.restorable ? "" : "  [cannot be put back]")
             print("\(tombstone.id)  \(CLI.day(tombstone.date))  \(tombstone.sender ?? "(no sender)")  \(tombstone.reason)  removed \(CLI.day(tombstone.removedAt))\(restore)")
         }
         print("\(tombstones.count) removed message(s).")
