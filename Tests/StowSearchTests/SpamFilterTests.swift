@@ -42,6 +42,10 @@ import Testing
         let states = try await searcher.search(QueryParser.parse("quince in:anywhere")).map { ($0.messageID, $0.sourceState) }
         #expect(Set(states.map { "\($0.0)=\($0.1.rawValue)" }) == ["\(ids[0])=spam", "\(ids[1])=present"])
         #expect(try await searcher.search(QueryParser.parse("in:anywhere")).count == 2)
+        // The window's count for All accounts, with and without "Show spam too".
+        #expect(try await searcher.count(SearchQuery(text: "")) == 1)
+        #expect(try await searcher.count(SearchQuery(text: "", spam: .include)) == 2)
+        #expect(try await searcher.count(SearchQuery(text: "", spam: .only)) == 1)
         #expect(QueryParser.parse("in:inbox quince").text == "quince")  // other in: values name a folder (D-079)
     }
 }
