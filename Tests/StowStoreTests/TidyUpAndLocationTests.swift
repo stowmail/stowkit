@@ -100,6 +100,7 @@ import Testing
         let account = test.account.id
         try await store.recordFolders(account, [SyncFolder(name: "INBOX")])
         #expect(try Coverage.compute(test.archive, account: account).coverageDate == nil)
+        #expect(try Coverage.report(test.archive, account: account).holdBack == .foldersNotListed)
 
         let day: TimeInterval = 86_400
         let now = Date()
@@ -112,6 +113,9 @@ import Testing
         // Held back by the queued message from 400 days ago, which is also at risk.
         #expect(report.coverageDate.map { abs($0.timeIntervalSince(now.addingTimeInterval(-400 * day))) < 2 } == true)
         #expect(report.queued == 1 && report.atRisk == 1 && !report.coversRetention && report.deleteBefore == nil)
+        #expect(report.holdBack == .notDownloaded(1) && report.heldBackBy == "1 message(s) not downloaded yet")
+        #expect(report.safeBefore == report.coverageDate)
+        #expect(report.atRiskBefore == report.retentionCutoff!.addingTimeInterval(TimeInterval(Coverage.warningDays * 86_400)))
 
         // Once it is archived, coverage reaches the last listing and covers the retention cutoff.
         try await store.write(RawMessage(key: RawMessageKey(accountID: account, folder: "INBOX", uidValidity: 1, uid: 1),
@@ -121,7 +125,29 @@ import Testing
         #expect(report.coversRetention && report.atRisk == 0)
         #expect(report.safeToDelete == 1)
         #expect(report.deleteBefore.map { $0 < report.retentionCutoff! } == true)
+        #expect(report.safeBefore == report.retentionCutoff && report.holdBack == nil)
         #expect(try test.count("accounts", "coverage_date IS NOT NULL") == 1)
+    }
+
+    @Test func theCoverageReportReadsWithoutStoring() async throws {
+        let test = try TestArchive()
+        defer { test.remove() }
+        let store = ArchiveSyncStore(archive: test.archive)
+        let account = test.account.id
+        let now = Date()
+        try await store.recordFolders(account, [SyncFolder(name: "INBOX")])
+        _ = try await store.beginFolder(account, folder: "INBOX", uidValidity: 1, exists: 1)
+        try await store.write(RawMessage(key: RawMessageKey(accountID: account, folder: "INBOX", uidValidity: 1, uid: 1),
+                                         internalDate: now.addingTimeInterval(-500 * 86_400), size: 10, bytes: try Fixtures.data("01-")))
+        try await store.folderWalked(account, folder: "INBOX", uidValidity: 1, at: now)
+        try Coverage.setRetention(test.archive, account: account, months: 12)
+
+        // The app opens the archive read-only, so its report must not write.
+        let read = try Coverage.report(test.archive, account: account, now: now)
+        #expect(try test.count("accounts", "coverage_date IS NOT NULL") == 0)
+        let computed = try Coverage.compute(test.archive, account: account, now: now)
+        #expect(read == computed)
+        #expect(read.retentionMonths == 12 && read.coversRetention && read.safeToDelete == 1)
     }
 
     @Test func accountsLiveInTheArchiveAndRemovalKeepsMail() async throws {

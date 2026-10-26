@@ -47,6 +47,16 @@ import Testing
         #expect(try Coverage.deletionCheck(harness.archive, account: harness.account.id, before: earlier, since: since).stillAtProvider == 0)
     }
 
+    @Test func theBoundaryIsTheWholeDayInAnyTimeZone() throws {
+        // deleteBefore carries the time of day it was worked out at; the search names only the day.
+        let deleteBefore = try #require(ISO8601DateFormatter().date(from: "2025-10-13T16:40:00Z"))
+        let start = Coverage.earliestStart(ofDayOf: deleteBefore)
+        #expect(start == ISO8601DateFormatter().date(from: "2025-10-12T10:00:00Z"))
+        // Midnight UTC and the last second of the day give the same boundary.
+        #expect(Coverage.earliestStart(ofDayOf: try #require(ISO8601DateFormatter().date(from: "2025-10-13T00:00:00Z"))) == start)
+        #expect(Coverage.earliestStart(ofDayOf: try #require(ISO8601DateFormatter().date(from: "2025-10-13T23:59:59Z"))) == start)
+    }
+
     @Test func messagesLeftUnclassifiedByACutShortRunAreClassifiedNextTime() async throws {
         let fixtures = try TestFixtures.small()
         let server = gmailServer(fixtures)

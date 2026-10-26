@@ -483,6 +483,19 @@ func testKeychain() -> KeychainStore {
         #expect(steps.first?.contains("Conversation view") == true)
         let warning = RetentionGuide.warning(count: 23_410, bytes: 9_800_000_000, lastBackup: Date().addingTimeInterval(-16 * 86_400))
         #expect(warning.contains("only copy of these 23410 emails") && warning.contains("16 days"))
+        #expect(RetentionGuide.search(.gmail, before: date) == "before:2025/10/13")
+        #expect(RetentionGuide.search(.googleWorkspace, before: date) == "before:2025/10/13")
+        #expect(RetentionGuide.search(.microsoft365, before: date) == "received:<2025-10-13")
+        #expect(RetentionGuide.search(.outlookCom, before: date) == "received:<2025-10-13")
+        // Every kind has exactly one step with the search text, for the app's Copy button.
+        for kind in [RetentionGuide.MailboxKind.gmail, .googleWorkspace, .microsoft365, .outlookCom] {
+            #expect(RetentionGuide.guide(kind, before: date).compactMap(\.search) == [RetentionGuide.search(kind, before: date)])
+        }
+        let now = Date()
+        #expect(RetentionGuide.backup(lastBackup: nil, now: now) == .unknown)
+        #expect(RetentionGuide.backup(lastBackup: now.addingTimeInterval(-3_600), now: now) == .recent(daysAgo: 0))
+        #expect(RetentionGuide.backup(lastBackup: now.addingTimeInterval(-30 * 3_600), now: now) == .recent(daysAgo: 1))
+        #expect(RetentionGuide.backup(lastBackup: now.addingTimeInterval(-7 * 86_400 - 60), now: now) == .overdue(days: 7))
         #expect(TimeMachineStatus.parse("/Volumes/Backup/2026-10-22-103000.backup") != nil)
         #expect(TimeMachineStatus.parse("nothing") == nil)
     }

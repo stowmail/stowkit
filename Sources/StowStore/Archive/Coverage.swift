@@ -9,8 +9,10 @@ public struct CoverageReport: Sendable, Equatable {
     /// Every message the server had before this date is archived and verified.
     /// Nil until every synced folder has been listed.
     public var coverageDate: Date?
-    /// Why the coverage date is held back, in plain words, when it is.
-    public var heldBackBy: String?
+    /// Why the coverage date is held back, when it is.
+    public var holdBack: CoverageHoldBack?
+    /// The same, in plain words, for the CLI.
+    public var heldBackBy: String? { holdBack?.description }
     /// Listed but not yet downloaded, and recorded as never downloadable (D-115).
     public var queued = 0
     public var unfetchable = 0
@@ -18,6 +20,10 @@ public struct CoverageReport: Sendable, Equatable {
     public var retentionMonths: Int?
     /// Mail older than this is what the user's retention would delete from the server.
     public var retentionCutoff: Date?
+    /// The earlier of the coverage date and the retention cutoff: everything before it is
+    /// safely stowed, and `safeToDelete` counts what the server still has from before it.
+    /// Nil without a coverage date.
+    public var safeBefore: Date?
     /// Archived messages older than the coverage date (and the retention cutoff,
     /// when one is set) that are still on the server: safe to delete there.
     public var safeToDelete = 0
@@ -28,9 +34,32 @@ public struct CoverageReport: Sendable, Equatable {
     /// Not yet archived, and within the warning window of the retention cutoff:
     /// retention would delete these from the server soon (D-021 step 4).
     public var atRisk = 0
+    /// The end of that warning window: the cutoff plus `Coverage.warningDays`. Nil without a retention setting.
+    public var atRiskBefore: Date?
     /// The date to put in deletion instructions: one day before the cutoff, to
     /// stay clear of time zone differences. Nil unless `coversRetention`.
     public var deleteBefore: Date?
+}
+
+/// Why the coverage date is held back (D-034), so the app can word each case.
+public enum CoverageHoldBack: Sendable, Equatable, CustomStringConvertible {
+    /// The first sync has not listed every synced folder, so no date can be claimed.
+    case foldersNotListed
+    /// Some listed messages have no arrival date yet, so no date can be claimed.
+    case undatedMessages
+    /// Messages listed but not downloaded yet (queued and unfetchable together).
+    case notDownloaded(Int)
+    /// Only messages the server lists but never returns (D-115).
+    case unfetchable(Int)
+
+    public var description: String {
+        switch self {
+        case .foldersNotListed: "the first sync has not listed every folder yet"
+        case .undatedMessages: "some listed messages have no arrival date yet"
+        case .notDownloaded(let count): "\(count) message(s) not downloaded yet"
+        case .unfetchable(let count): "\(count) message(s) the server would not return"
+        }
+    }
 }
 
 /// What the account overview says after the user deleted old mail at the
@@ -38,7 +67,8 @@ public struct CoverageReport: Sendable, Equatable {
 /// expected" or "Gmail still has 214 emails before 13 Oct 2025". Counts only.
 public struct DeletionCheck: Sendable, Equatable {
     public var account: AccountID
-    /// The date the user deleted before (the instructions' `deleteBefore`).
+    /// The date the user deleted before (the instructions' `deleteBefore`). Its whole day counts as
+    /// the boundary, in any time zone: mail is counted only from before that day began anywhere.
     public var before: Date
     /// Archived messages dated before `before` that the provider still had at the last full check.
     public var stillAtProvider: Int
@@ -63,34 +93,46 @@ public enum Coverage {
     public static func compute(_ archive: Archive, account: AccountID, retentionMonths override: Int? = nil,
                                now: Date = Date()) throws -> CoverageReport {
         try archive.database.write { db in
-            var report = CoverageReport(account: account)
-            report.retentionMonths = try override
-                ?? Int.fetchOne(db, sql: "SELECT retention_months FROM accounts WHERE id = ?", arguments: [account.rawValue])
-
-            try measure(db, into: &report)
+            let report = try build(db, account: account, retentionMonths: override, now: now)
             try db.execute(sql: "UPDATE accounts SET coverage_date = ?, coverage_computed_at = ? WHERE id = ?",
                            arguments: [report.coverageDate.map { Int($0.timeIntervalSince1970) }, Int(now.timeIntervalSince1970),
                                        account.rawValue])
-
-            if let months = report.retentionMonths {
-                report.retentionCutoff = Calendar(identifier: .gregorian).date(byAdding: .month, value: -months, to: now)
-            }
-            guard let coverage = report.coverageDate else { return report }
-            let limit = min(coverage, report.retentionCutoff ?? coverage)
-            (report.safeToDelete, report.safeToDeleteBytes) = try presentBefore(db, account: account, date: limit)
-            if let cutoff = report.retentionCutoff {
-                report.coversRetention = coverage >= cutoff
-                if report.coversRetention {
-                    report.deleteBefore = Calendar(identifier: .gregorian).date(byAdding: .day, value: -1, to: cutoff)
-                }
-                let warnUntil = cutoff.addingTimeInterval(TimeInterval(warningDays * 86_400))
-                report.atRisk = try Int.fetchOne(db, sql: """
-                    SELECT count(*) FROM download_queue q JOIN folders f ON f.id = q.folder_id
-                    WHERE f.account_id = ? AND q.internal_date < ?
-                    """, arguments: [account.rawValue, Int(warnUntil.timeIntervalSince1970)]) ?? 0
-            }
             return report
         }
+    }
+
+    /// The same report without storing anything, for an archive opened read-only (the app's
+    /// account overview and Free up space, D-053). Equal to what `compute` returns.
+    public static func report(_ archive: Archive, account: AccountID, now: Date = Date()) throws -> CoverageReport {
+        try archive.database.read { db in try build(db, account: account, retentionMonths: nil, now: now) }
+    }
+
+    static func build(_ db: Database, account: AccountID, retentionMonths override: Int?, now: Date) throws -> CoverageReport {
+        var report = CoverageReport(account: account)
+        report.retentionMonths = try override
+            ?? Int.fetchOne(db, sql: "SELECT retention_months FROM accounts WHERE id = ?", arguments: [account.rawValue])
+        try measure(db, into: &report)
+
+        if let months = report.retentionMonths {
+            report.retentionCutoff = Calendar(identifier: .gregorian).date(byAdding: .month, value: -months, to: now)
+        }
+        guard let coverage = report.coverageDate else { return report }
+        let limit = min(coverage, report.retentionCutoff ?? coverage)
+        report.safeBefore = limit
+        (report.safeToDelete, report.safeToDeleteBytes) = try presentBefore(db, account: account, date: limit)
+        if let cutoff = report.retentionCutoff {
+            report.coversRetention = coverage >= cutoff
+            if report.coversRetention {
+                report.deleteBefore = Calendar(identifier: .gregorian).date(byAdding: .day, value: -1, to: cutoff)
+            }
+            let warnUntil = cutoff.addingTimeInterval(TimeInterval(warningDays * 86_400))
+            report.atRiskBefore = warnUntil
+            report.atRisk = try Int.fetchOne(db, sql: """
+                SELECT count(*) FROM download_queue q JOIN folders f ON f.id = q.folder_id
+                WHERE f.account_id = ? AND q.internal_date < ?
+                """, arguments: [account.rawValue, Int(warnUntil.timeIntervalSince1970)]) ?? 0
+        }
+        return report
     }
 
     /// The coverage date and what holds it back, from the folders' listings and
@@ -114,16 +156,16 @@ public enum Coverage {
         report.oldestNotArchived = (queue["oldest"] as Int64?).map { Date(timeIntervalSince1970: TimeInterval($0)) }
 
         if folders.isEmpty || listedAt.contains(where: { $0 == nil }) {
-            report.heldBackBy = "the first sync has not listed every folder yet"
+            report.holdBack = .foldersNotListed
         } else if queue["undated"] as Int > 0 {
-            report.heldBackBy = "some listed messages have no arrival date yet"
+            report.holdBack = .undatedMessages
         } else {
             let lastListed = Date(timeIntervalSince1970: TimeInterval(listedAt.compactMap { $0 }.min()!))
             if let oldest = report.oldestNotArchived, oldest < lastListed {
                 report.coverageDate = oldest
-                report.heldBackBy = report.unfetchable > 0 && report.queued == 0
-                    ? "\(report.unfetchable) message(s) the server would not return"
-                    : "\(report.queued + report.unfetchable) message(s) not downloaded yet"
+                report.holdBack = report.unfetchable > 0 && report.queued == 0
+                    ? .unfetchable(report.unfetchable)
+                    : .notDownloaded(report.queued + report.unfetchable)
             } else {
                 report.coverageDate = lastListed
             }
@@ -153,7 +195,7 @@ public enum Coverage {
     /// before the deletion and must not be shown as its result.
     public static func deletionCheck(_ archive: Archive, account: AccountID, before: Date, since: Date) throws -> DeletionCheck {
         try archive.database.read { db in
-            let (count, bytes) = try presentBefore(db, account: account, date: before)
+            let (count, bytes) = try presentBefore(db, account: account, date: earliestStart(ofDayOf: before))
             let checks = try Row.fetchAll(db, sql: """
                 SELECT s.last_full_sync_at FROM folders f LEFT JOIN sync_state s ON s.folder_id = f.id
                 WHERE f.account_id = ? AND f.kind = 'folder' AND f.skipped_reason IS NULL AND f.is_selectable = 1
@@ -166,6 +208,16 @@ public enum Coverage {
                                  // Times are stored in whole seconds: a check in the same second as `since` does not count.
                                  isCurrent: lastFullCheck.map { $0.timeIntervalSince1970 > since.timeIntervalSince1970.rounded(.down) } ?? false)
         }
+    }
+
+    /// The instructions name a whole day (`before:2025/10/13`, the UTC day of `deleteBefore`), and the
+    /// provider reads it in its own time zone: Gmail in Pacific time, Outlook in the user's. The earliest
+    /// that day can begin anywhere is midnight UTC less 14 hours (UTC+14). Counting from there, mail the
+    /// search rightly left (later on the day before, or earlier the same day) is never counted as left over.
+    public static func earliestStart(ofDayOf date: Date) -> Date {
+        var utc = Calendar(identifier: .gregorian)
+        utc.timeZone = TimeZone(identifier: "UTC")!
+        return utc.startOfDay(for: date).addingTimeInterval(-14 * 3_600)
     }
 
     /// Stores how many months the user keeps mail on the server, or nil for "not set".

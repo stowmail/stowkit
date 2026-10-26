@@ -198,7 +198,7 @@ struct Coverage: AsyncParsableCommand {
         }
         print("You keep \(months) month(s) of mail in the mailbox: mail before \(CLI.day(cutoff)) can go.")
         if report.atRisk > 0 {
-            print("WARNING: \(report.atRisk) message(s) from before \(CLI.day(cutoff.addingTimeInterval(TimeInterval(StowStore.Coverage.warningDays * 86_400)))) are not archived yet. If your mailbox deletes old mail automatically, they could be lost. Let sync finish first.")
+            print("WARNING: \(report.atRisk) message(s) from before \(CLI.day(report.atRiskBefore ?? cutoff)) are not archived yet. If your mailbox deletes old mail automatically, they could be lost. Let sync finish first.")
         }
         guard report.coversRetention, let before = report.deleteBefore else {
             print("Not yet safe: the coverage date does not reach \(CLI.day(cutoff)). Stow will offer the steps once it does.")

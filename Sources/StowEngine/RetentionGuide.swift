@@ -3,8 +3,8 @@ import StowCore
 
 /// The provider-specific steps for deleting old mail from the server, offered
 /// once the coverage date covers the whole range (D-021, D-024, D-034). Stow
-/// itself never deletes from a mailbox. Draft wording; the app's version lives
-/// in `docs/ui-notes/retention-and-deleting-from-gmail.md`.
+/// itself never deletes from a mailbox. The steps' wording is the app's, from
+/// `docs/ui-notes/retention-and-deleting-from-gmail.md`.
 public enum RetentionGuide {
     public enum MailboxKind: Sendable, Equatable {
         case gmail
@@ -26,46 +26,105 @@ public enum RetentionGuide {
         }
     }
 
-    /// Step-by-step instructions to delete mail received before `before`.
-    public static func steps(_ kind: MailboxKind, before: Date) -> [String] {
+    /// One step of the instructions. `search` is the text to type into the provider's search,
+    /// shown on its own with a Copy button in the app, after `text` in the CLI.
+    public struct Step: Sendable, Equatable {
+        public var text: String
+        public var search: String?
+
+        public init(_ text: String, search: String? = nil) {
+            self.text = text
+            self.search = search
+        }
+
+        /// The step as one line.
+        public var line: String { search.map { "\(text) \($0)" } ?? text }
+    }
+
+    /// What to type into the provider's search to find mail received before `before`:
+    /// `before:2025/10/13` in Gmail, `received:<2025-10-13` in Outlook.
+    public static func search(_ kind: MailboxKind, before: Date) -> String {
         let day = Self.day(before)
+        switch kind {
+        case .gmail, .googleWorkspace: return "before:\(day.replacingOccurrences(of: "-", with: "/"))"
+        case .microsoft365, .outlookCom: return "received:<\(day)"
+        }
+    }
+
+    /// Step-by-step instructions to delete mail received before `before`. The wording is the
+    /// app's, from `docs/ui-notes/retention-and-deleting-from-gmail.md`.
+    public static func guide(_ kind: MailboxKind, before: Date) -> [Step] {
+        let search = search(kind, before: before)
         switch kind {
         case .gmail:
             return [
-                "In Gmail on the web, turn off Conversation view first (Settings, See all settings, General, Conversation view off, Save). Otherwise deleting an old conversation also deletes newer replies in it, which may not be archived yet.",
-                "Search for: before:\(day.replacingOccurrences(of: "-", with: "/"))",
-                "Tick the box to select all, then click \"Select all conversations that match this search\".",
-                "Click Delete. The messages go to the Bin, where Gmail deletes them after 30 days; empty the Bin to free the space now.",
-                "Turn Conversation view back on if you use it.",
+                Step("Open Gmail on the web and turn off Conversation view (Settings, See all settings, General). Otherwise deleting an old conversation also deletes newer replies in it."),
+                Step("Search for:", search: search),
+                Step("Select all, then \"Select all conversations that match this search\"."),
+                Step("Delete. To get the space back straight away, empty Bin."),
+                Step("Turn Conversation view back on if you use it."),
             ]
         case .googleWorkspace:
             return [
-                "A Google Workspace administrator can set Gmail to delete mail older than a set age (Admin console, Apps, Google Workspace, Gmail, Compliance, Email and chat auto-deletion). It applies to everyone in the organisation, so agree it first.",
-                "Or delete it yourself as for personal Gmail: turn off Conversation view, search for before:\(day.replacingOccurrences(of: "-", with: "/")), select all matching conversations and delete them.",
+                Step("Open Gmail on the web and turn off Conversation view (Settings, See all settings, General). Otherwise deleting an old conversation also deletes newer replies in it."),
+                Step("Search for:", search: search),
+                Step("Select all, then \"Select all conversations that match this search\"."),
+                Step("Delete. To get the space back straight away, empty Bin."),
+                Step("Turn Conversation view back on if you use it."),
+                Step("Or ask your Google Workspace administrator to set Gmail to delete mail after a set age (Email and chat auto-deletion). It applies to everyone in your organisation."),
             ]
         case .microsoft365:
             return [
-                "Your Microsoft 365 administrator can apply a retention policy that deletes mail older than a set age (Microsoft Purview). Ask them before changing anything.",
-                "Or in Outlook on the web, search for received:<\(day), select the results and delete them, then empty Deleted Items.",
+                Step("Open Outlook on the web and search for:", search: search),
+                Step("Select all the results and delete them."),
+                Step("Empty Deleted Items to get the space back straight away."),
+                Step("Or ask your Microsoft 365 administrator for a retention policy that deletes mail after a set age. Ask before changing anything."),
             ]
         case .outlookCom:
             return [
-                "In Outlook.com, search for received:<\(day), select all results and delete them.",
-                "Empty Deleted Items to free the space now.",
+                Step("Open Outlook.com and search for:", search: search),
+                Step("Select all the results and delete them."),
+                Step("Empty Deleted Items to get the space back straight away."),
             ]
         }
+    }
+
+    /// The same steps as lines, for the CLI.
+    public static func steps(_ kind: MailboxKind, before: Date) -> [String] {
+        guide(kind, before: before).map(\.line)
+    }
+
+    /// What Time Machine says, for the line above the steps (D-024).
+    public enum Backup: Sendable, Equatable {
+        /// Stow cannot read Time Machine's status (not set up, or `tmutil` not allowed).
+        case unknown
+        /// The last backup finished this many whole days ago, under a week.
+        case recent(daysAgo: Int)
+        /// No backup for a week or more.
+        case overdue(days: Int)
+    }
+
+    /// A week or more without a backup is worth saying.
+    public static let overdueDays = 7
+
+    public static func backup(lastBackup: Date?, now: Date = Date()) -> Backup {
+        guard let lastBackup else { return .unknown }
+        let days = max(0, Int(now.timeIntervalSince(lastBackup) / 86_400))
+        return days >= overdueDays ? .overdue(days: days) : .recent(daysAgo: days)
     }
 
     /// The one line of warning above the steps (D-024): Stow will hold the only copy.
     public static func warning(count: Int, bytes: Int, lastBackup: Date?, now: Date = Date()) -> String {
         let size = ByteCountFormatter.string(fromByteCount: Int64(bytes), countStyle: .file)
         let base = "After you delete this, Stow will hold the only copy of these \(count) emails (\(size))."
-        guard let lastBackup else {
+        switch backup(lastBackup: lastBackup, now: now) {
+        case .unknown:
             return base + " Make sure this Mac is backed up and your recovery key is saved."
+        case .overdue(let days):
+            return base + " Time Machine has not backed up for \(days) days. Back up first, and make sure your recovery key is saved."
+        case .recent(let days):
+            return base + " Backed up by Time Machine \(days == 0 ? "today" : days == 1 ? "yesterday" : "\(days) days ago"). Make sure your recovery key is saved."
         }
-        let days = Int(now.timeIntervalSince(lastBackup) / 86_400)
-        if days >= 7 { return base + " Time Machine has not backed up for \(days) days. Back up first, and make sure your recovery key is saved." }
-        return base + " Backed up by Time Machine \(days == 0 ? "today" : days == 1 ? "yesterday" : "\(days) days ago"). Make sure your recovery key is saved."
     }
 
     /// `YYYY-MM-DD` in UTC.
