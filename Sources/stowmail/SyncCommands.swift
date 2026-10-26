@@ -279,7 +279,8 @@ struct Export: AsyncParsableCommand {
         abstract: "Write archived mail to mbox files, exactly as downloaded: one account, or every account with --all.",
         discussion: """
             One account: `stowmail export <account> --mbox <file>`. Everything: `stowmail export --all --mbox-dir <folder>` \
-            writes one file per account, named after its address. Files are never overwritten. They are unencrypted \
+            writes one file per account, named after its address. One email: `stowmail export --eml <number> --to <folder>` \
+            writes it as an .eml file (D-419). Files are never overwritten. They are unencrypted \
             (permissions 0600): keep them somewhere safe, and delete them when done.
             """
     )
@@ -296,8 +297,18 @@ struct Export: AsyncParsableCommand {
     @Option(name: .long, help: "With --all: the folder to write into (created if missing).")
     var mboxDir: String?
 
+    @Option(name: .long, help: "One email, by the number in the first column of `stowmail search`, as an .eml file.")
+    var eml: Int64?
+
+    @Option(name: .long, help: "With --eml: the folder to save into. An existing file gets \" 2\" in its name.")
+    var to: String?
+
     func validate() throws {
-        if all {
+        if eml != nil || to != nil {
+            guard eml != nil, to != nil, account == nil, mbox == nil, !all, mboxDir == nil else {
+                throw ValidationError("With --eml, give --to <folder> and nothing else.")
+            }
+        } else if all {
             guard account == nil, mbox == nil, mboxDir != nil else {
                 throw ValidationError("With --all, give --mbox-dir <folder> and no account or --mbox.")
             }
@@ -311,6 +322,13 @@ struct Export: AsyncParsableCommand {
     func run() async throws {
         CLI.bootstrapLogging()
         let archive = try CLIArchive.open(readOnly: true)
+        if let eml, let to {
+            let folder = URL(fileURLWithPath: (to as NSString).expandingTildeInPath, isDirectory: true)
+            let file = try await EmlExport.export(archive, message: eml, into: folder)
+            print("Saved \(file.lastPathComponent) in \(folder.path).")
+            print("This file is not encrypted. Keep it safe and delete it when you no longer need it.")
+            return
+        }
         if all, let mboxDir {
             let folder = URL(fileURLWithPath: (mboxDir as NSString).expandingTildeInPath, isDirectory: true)
             let results = try MboxExport.exportAll(archive, to: folder) { _, done, total in
