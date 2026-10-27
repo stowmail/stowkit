@@ -142,6 +142,8 @@ import Testing
         }
         let elapsed = ContinuousClock.now - started
         #expect(found == 30_000)
-        #expect(elapsed < .milliseconds(500), "\(elapsed)")
+        // About 0.35 s alone in a debug build, but up to 1.3 s while the whole suite runs in
+        // parallel (D-463). 2 s still catches a change of order, such as checks going quadratic.
+        #expect(elapsed < .seconds(2), "\(elapsed)")
     }
 }
