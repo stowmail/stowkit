@@ -197,9 +197,9 @@ public final class LoopbackListener: @unchecked Sendable {
         let result = Self.evaluate(request.query, expectedState: expectedState)
         switch result {
         case .success:
-            send(status: "200 OK", body: Self.page("Signed in to Stow. You can close this window and return to the terminal."), on: connection)
+            send(status: "200 OK", body: Self.page("You can close this tab and go back to the terminal. Stow can now download a copy of your mail to this Mac, and never changes anything in your mailbox.", heading: "You're signed in"), on: connection)
         case .failure(let error):
-            send(status: "400 Bad Request", body: Self.page("Sign-in did not complete: \(error.description) Return to the terminal for details."), on: connection)
+            send(status: "400 Bad Request", body: Self.page("\(error.description) Go back to the terminal for details. Nothing was saved.", heading: "Sign-in didn't finish"), on: connection)
         }
         finish(result)
     }
@@ -236,20 +236,65 @@ public final class LoopbackListener: @unchecked Sendable {
         head += "Content-Length: \(bodyData.count)\r\n"
         head += "Cache-Control: no-store\r\n"
         head += "Referrer-Policy: no-referrer\r\n"
+        head += "Content-Security-Policy: default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'\r\n"
+        head += "X-Content-Type-Options: nosniff\r\n"
         head += "Connection: close\r\n\r\n"
         connection.send(content: Data(head.utf8) + bodyData, completion: .contentProcessed { _ in
             connection.cancel()
         })
     }
 
-    static func page(_ message: String) -> String {
-        let escaped = message
-            .replacingOccurrences(of: "&", with: "&amp;")
+    /// The page the browser shows after sign-in: the Stow mark, a heading and
+    /// one line of text, styled like getstow.ee (Paper and Stow Teal, Ink and
+    /// Night Teal in dark mode). Everything is inline and nothing is loaded
+    /// from anywhere, so the page works offline and tells no server that a
+    /// sign-in happened (the Content-Security-Policy header enforces it).
+    static func page(_ message: String, heading: String = "Stow") -> String {
+        """
+        <!doctype html><html lang="en"><head><meta charset="utf-8">\
+        <meta name="viewport" content="width=device-width, initial-scale=1">\
+        <meta name="color-scheme" content="light dark">\
+        <title>\(escape(heading)) · Stow</title><style>\(pageStyle)</style></head>\
+        <body><main><div class="brand">\(pageMark)<span class="word">stow</span></div>\
+        <h1>\(escape(heading))</h1><p>\(escape(message))</p></main>\
+        <footer>Stow: Email Archive for Mac · getstow.ee</footer></body></html>
+        """
+    }
+
+    static func escape(_ text: String) -> String {
+        text.replacingOccurrences(of: "&", with: "&amp;")
             .replacingOccurrences(of: "<", with: "&lt;")
             .replacingOccurrences(of: ">", with: "&gt;")
-        return "<!doctype html><html><head><meta charset=\"utf-8\"><title>Stow</title></head>"
-            + "<body style=\"font-family: -apple-system, sans-serif; margin: 3em\"><p>\(escaped)</p></body></html>"
+            .replacingOccurrences(of: "\"", with: "&quot;")
     }
+
+    /// The Stow mark (`site/img/stow-mark-small.svg`), coloured by CSS so it follows dark mode.
+    static let pageMark = """
+        <svg class="mark" viewBox="6 6 84 84" aria-hidden="true">\
+        <path class="lid" d="M27 20H69Q71.5 20 73 22L82.6 34.8Q83.5 36 82 36H14Q12.5 36 13.4 34.8L23 22Q24.5 20 27 20Z"/>\
+        <path class="lid" d="M19.5 42H76.5Q77.6 42 78.3 42.9L83.4 49.2Q84 50 84 51V70Q84 76 78 76H18Q12 76 12 70V51Q12 50 12.6 49.2L17.7 42.9Q18.4 42 19.5 42Z"/>\
+        <rect class="slot" x="22" y="42" width="52" height="20" rx="2"/>\
+        <path class="fold" d="M22 42H74L50.7 58.5Q48 60.3 45.3 58.5Z"/></svg>
+        """
+
+    static let pageStyle = """
+        :root{--bg:#F7F8F6;--card:#FFFFFF;--text:#0B2E33;--muted:#3E5B5F;--border:#CBD6D4;\
+        --teal:#037079;--slot:#FFFFFF;--fold:#BFF5D6}\
+        @media (prefers-color-scheme: dark){:root{--bg:#0B2E33;--card:#10393F;--text:#F7F8F6;\
+        --muted:#B7C9C8;--border:#2B565B;--teal:#3FB8AC;--slot:#10393F;--fold:#BFF5D6}}\
+        *{box-sizing:border-box}html,body{margin:0;height:100%}\
+        body{background:var(--bg);color:var(--text);display:flex;flex-direction:column;\
+        align-items:center;justify-content:center;padding:24px;\
+        font:17px/1.5 -apple-system,BlinkMacSystemFont,"Helvetica Neue",sans-serif}\
+        main{background:var(--card);border:1px solid var(--border);border-radius:16px;\
+        max-width:440px;width:100%;padding:40px 36px;text-align:center}\
+        .brand{display:flex;align-items:center;justify-content:center;gap:10px;margin-bottom:28px}\
+        .mark{width:44px;height:44px}.lid{fill:var(--teal)}.slot{fill:var(--slot)}.fold{fill:var(--fold)}\
+        .word{font-size:30px;font-weight:700;letter-spacing:-0.5px;color:var(--teal)}\
+        h1{font-size:24px;line-height:1.25;margin:0 0 12px}\
+        p{margin:0;color:var(--muted)}\
+        footer{margin-top:24px;font-size:13px;color:var(--muted)}
+        """
 }
 
 /// The first line of an HTTP request, split into method, path and query.

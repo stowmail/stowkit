@@ -332,3 +332,18 @@ import Testing
         #expect(SyncError.needsSignIn(account.id).description.contains("stowmail account signin"))
     }
 }
+
+@Suite struct CallbackPageTests {
+    /// The branded sign-in page loads nothing from anywhere and escapes what it shows.
+    @Test func pageIsSelfContainedAndEscaped() {
+        let html = LoopbackListener.page("<script>x</script> & \"y\"", heading: "You're <b>in</b>")
+        #expect(html.hasPrefix("<!doctype html>"))
+        #expect(!html.contains("<script>"))
+        #expect(html.contains("&lt;script&gt;x&lt;/script&gt; &amp; &quot;y&quot;"))
+        #expect(html.contains("You're &lt;b&gt;in&lt;/b&gt;"))
+        for remote in ["http://", "https://", "src=", "<link", "@import", "url("] {
+            #expect(!html.contains(remote), "page must not load \(remote)")
+        }
+        #expect(html.contains("class=\"word\">stow<"))
+    }
+}
