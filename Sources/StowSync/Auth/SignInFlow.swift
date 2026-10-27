@@ -21,6 +21,13 @@ public struct SignInFlow: Sendable {
         self.timeout = timeout
     }
 
+    /// What `stowmail` prints before opening the browser, so the client ID and
+    /// scopes stay readable after Google rewrites the address bar (D-465). The
+    /// URL holds only public values: the PKCE challenge, never the verifier.
+    public static func addressNotice(_ url: URL) -> String {
+        "Sign-in address (opening it in your browser now):\n\(url.absoluteString)"
+    }
+
     public func run(
         loginHint: String? = nil,
         openBrowser: @Sendable (URL) async throws -> Void

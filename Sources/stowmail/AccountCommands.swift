@@ -33,7 +33,7 @@ struct AccountCommand: AsyncParsableCommand {
             let archive = try CLIArchive.open()
             let accounts = CLIArchive.accounts(archive)
 
-            print("Opening the browser to sign in to \(provider.rawValue). Waiting up to five minutes...")
+            print("Signing in to \(provider.rawValue) in the browser. Waiting up to five minutes...")
             let grant = try await SignInFlow(client: OAuthClient(config: oauth)).run(loginHint: email, openBrowser: CLI.openBrowser)
             guard let address = grant.email ?? email else { throw OAuthError.noEmailAddress }
             if let email, email.lowercased() != address.lowercased() {
@@ -89,7 +89,7 @@ struct AccountCommand: AsyncParsableCommand {
             let record = try accounts.find(account)
             let config = try AppConfig.load()
             let oauth = OAuthProviderConfig.forProvider(record.account.provider, config: config)
-            print("Opening the browser to sign in as \(record.account.email). Waiting up to five minutes...")
+            print("Signing in as \(record.account.email) in the browser. Waiting up to five minutes...")
             let grant = try await SignInFlow(client: OAuthClient(config: oauth))
                 .run(loginHint: record.account.email, openBrowser: CLI.openBrowser)
             if let address = grant.email, address.lowercased() != record.account.email.lowercased() {

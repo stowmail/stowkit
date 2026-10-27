@@ -261,6 +261,43 @@ import Testing
         }
         #expect(await endpoint.requests.isEmpty)
     }
+
+    /// The printed address shows the client ID and scopes but no secret (D-465).
+    @Test func printedAddressShowsClientIDAndScopeOnly() async throws {
+        struct StopBeforeBrowser: Error {}
+        let notices = Notices()
+        let flow = SignInFlow(client: OAuthClient(config: .google(testAppConfig), http: FakeTokenEndpoint { _ in (200, OAuthClientTests.tokenJSON) }), timeout: 30)
+        await #expect(throws: StopBeforeBrowser.self) {
+            _ = try await flow.run { url in
+                await notices.add(SignInFlow.addressNotice(url))
+                throw StopBeforeBrowser()
+            }
+        }
+        let notice = try #require(await notices.all.first)
+        let lines = notice.split(separator: "\n").map(String.init)
+        #expect(lines.count == 2)
+        #expect(lines[0] == "Sign-in address (opening it in your browser now):")
+        #expect(notice.contains("client_id=test-client.apps.googleusercontent.com"))
+        #expect(notice.contains("scope="))
+        let items = try #require(URLComponents(string: lines[1])?.queryItems)
+        #expect(items.first { $0.name == "scope" }?.value == "https://mail.google.com/ openid email")
+        #expect(Array(items.prefix(4).map(\.name)) == ["client_id", "response_type", "redirect_uri", "scope"])
+        for secret in ["code_verifier", "client_secret", "test-secret-value", "code=", "token"] {
+            #expect(!notice.contains(secret))
+        }
+
+        // The verifier itself never appears, only its challenge.
+        let config = OAuthProviderConfig.google(testAppConfig)
+        let pkce = PKCE.generate()
+        let known = SignInFlow.addressNotice(config.authorizationURL(redirectURI: config.redirectURI(port: 51234), state: "s", pkce: pkce))
+        #expect(known.contains(pkce.challenge))
+        #expect(!known.contains(pkce.verifier))
+    }
+
+    private actor Notices {
+        var all: [String] = []
+        func add(_ notice: String) { all.append(notice) }
+    }
 }
 
 @Suite struct AccountAndTokenTests {

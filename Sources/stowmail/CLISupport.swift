@@ -54,11 +54,13 @@ enum CLI {
         }
     }
 
-    /// Opens the user's default browser (brief step 1: NSWorkspace).
+    /// Prints the sign-in address (D-465), then opens it in the user's default
+    /// browser (brief step 1: NSWorkspace).
     @Sendable static func openBrowser(_ url: URL) async throws {
+        print(SignInFlow.addressNotice(url))
         let opened = await MainActor.run { NSWorkspace.shared.open(url) }
         if !opened {
-            print("Could not open the browser. Open this address yourself to continue:\n\(url.absoluteString)")
+            print("Could not open the browser. Open the sign-in address above yourself to continue.")
         }
     }
 
