@@ -1,0 +1,45 @@
+# CodeQL for Swift on pushes to main and weekly (R-01, D-498). Not a
+# required check: findings go to the repository's Security tab.
+name: codeql
+
+on:
+  push:
+    branches: [main, "ci/**"]
+  schedule:
+    - cron: "23 5 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  analyse:
+    name: analyse
+    runs-on: xcode-27
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      security-events: write # to upload the results; nothing else
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Select Xcode 27.1
+        run: |
+          sudo xcode-select -s /Applications/Xcode_27.1.app
+          swift --version
+
+      - name: Fetch SQLCipher (checksum and Zetetic signature)
+        run: scripts/fetch-sqlcipher.sh
+
+      - uses: github/codeql-action/init@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
+        with:
+          languages: swift
+          build-mode: manual
+
+      - name: swift build
+        run: swift build
+
+      - uses: github/codeql-action/analyze@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
+        with:
+          category: /language:swift
