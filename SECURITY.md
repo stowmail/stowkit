@@ -13,6 +13,15 @@ Include what you found, how to reproduce it, and the version or commit. We will 
 
 Never send real email content or anyone's credentials in a report. A synthetic message that triggers the problem is ideal.
 
+## How fixes are disclosed
+
+A fix is released first and disclosed second, never the other way round:
+
+- **Medium or worse:** a GitHub security advisory on this repository, with a CVE requested through GitHub, published once the fix is on `main`.
+- **Low:** a line in the changelog.
+
+Reporters are credited in both, as above. An advisory says who found the problem and how, including when it came from our own AI-assisted review rather than an independent one.
+
 ## Scope
 
 In scope: this engine (`StowKit` and the `stowmail` command-line tool), including sync, the encrypted archive, search, the recovery key, the OAuth sign-in and the local MCP server.
