@@ -46,6 +46,10 @@ jobs:
           pkgutil --check-signature "$PKG" | grep -q "Developer ID Installer: Swift Open Source (V9AUD2URP3)"
           installer -pkg "$PKG" -target CurrentUserHomeDirectory
 
+      # The imap target's SwiftPM build resolves the whole package, SQLCipher included.
+      - name: Fetch SQLCipher (checksum and Zetetic signature)
+        run: scripts/fetch-sqlcipher.sh
+
       - name: Fixtures (seeds for the mime target)
         run: scripts/make-fixtures
 
