@@ -181,7 +181,7 @@ cannot write to the archive or decrypt the stored message and attachment files.
 | `scripts/vendor-grdb.sh` | Regenerates `Vendor/GRDB` from an upstream GRDB release. |
 | `scripts/make-fixtures` | Generates synthetic `.eml` fixtures into `Tests/Fixtures/eml/`. |
 | `scripts/mcp-check.py` | Checks `stowmail mcp` against an archive and prints only counts and PASS or FAIL. |
-| `scripts/fuzz-mime.sh` | Fuzzes the MIME parser, skeletons and the .docx reader with libFuzzer and AddressSanitizer. Needs a swift.org toolchain (Xcode's Swift cannot build fuzzers on macOS); see the script. |
+| `scripts/fuzz.sh <target> [seconds]` | Fuzzes one parser with libFuzzer and AddressSanitizer, with inputs up to 1 MB so slow paths show up: `mime` (the MIME parser, skeletons and the .docx reader), `html`, `words` (encoded words), `query` (the search box), `zip` and `imap` (server replies). Needs a swift.org toolchain (Xcode's Swift cannot build fuzzers on macOS); see the script. `scripts/fuzz-mime.sh` is the same as `fuzz.sh mime`. |
 
 ## Licence
 

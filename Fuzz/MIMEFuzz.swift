@@ -3,7 +3,7 @@ import Foundation
 import StowCore
 
 // libFuzzer target for everything that reads bytes a stranger wrote (Phase 4).
-// Built by scripts/fuzz-mime.sh, never by Package.swift, so nothing here can
+// Built by scripts/fuzz.sh mime, never by Package.swift, so nothing here can
 // reach a release build.
 //
 // Each input is treated as a raw message, as sync hands it to the importer:
