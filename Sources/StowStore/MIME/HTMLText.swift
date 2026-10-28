@@ -28,6 +28,12 @@ public enum HTMLText {
         let chars = Array(html.unicodeScalars)
         var i = 0
         var skipUntil: String?
+        // Linear time (A-01): every scan for a tag's end or a comment's end
+        // either jumps `i` past what it read or ends the search for tags
+        // for good, so no stretch of the input is scanned twice, apart from
+        // the one rescan when a quote first runs to the end.
+        var tagsPossible = true
+        var honourQuotes = true
 
         while i < chars.count {
             let c = chars[i]
@@ -37,21 +43,30 @@ public enum HTMLText {
                     i = find("-->", in: chars, from: i + 4).map { $0 + 3 } ?? chars.count
                     continue
                 }
-                guard let close = findTagEnd(chars, from: i + 1) else {
+                let end = tagsPossible ? findTagEnd(chars, from: i + 1, honourQuotes: &honourQuotes) : .none
+                guard case .at(let close) = end else {
+                    // No `>` before the end means no later `<` can close
+                    // either: the rest is text (or still inside a dropped
+                    // element), exactly as before, without looking again.
+                    if case .none = end { tagsPossible = false }
                     if skipUntil == nil { output.unicodeScalars.append(c) }
                     i += 1
                     continue
                 }
-                let inner = String(String.UnicodeScalarView(chars[(i + 1)..<close]))
-                let isClosing = inner.hasPrefix("/")
-                let name = String(inner.drop(while: { $0 == "/" })
+                let inner = chars[(i + 1)..<close]
+                let isClosing = inner.first == "/"
+                // The name ends at the first space at the latest, and no name
+                // that matters is anywhere near 64 scalars, so a long tag is
+                // never copied whole.
+                let head = inner.prefix(64).prefix(while: { !$0.properties.isWhitespace })
+                let name = String(String(String.UnicodeScalarView(head)).drop(while: { $0 == "/" })
                     .prefix(while: { $0.isLetter || $0.isNumber })).lowercased()
                 i = close + 1
                 if let waiting = skipUntil {
                     if isClosing, name == waiting { skipUntil = nil }
                     continue
                 }
-                if !isClosing, dropContent.contains(name), !inner.hasSuffix("/") {
+                if !isClosing, dropContent.contains(name), inner.last != "/" {
                     skipUntil = name
                     continue
                 }
@@ -73,25 +88,41 @@ public enum HTMLText {
         return tidy(output)
     }
 
-    private static func findTagEnd(_ chars: [Unicode.Scalar], from start: Int) -> Int? {
+    private enum TagEnd {
+        case at(Int)
+        /// A `<` straight after the `<`: the first one is text.
+        case notATag
+        /// No `>` before the end of the input.
+        case none
+    }
+
+    /// Finds the `>` that closes the tag opened just before `start`. A quote
+    /// hides any `>` inside it. The first time a quote runs unclosed to the
+    /// end, quotes stop counting for the rest of the input and this tag is
+    /// read again without them, so that end-to-end scan happens only once
+    /// (A-01). Before, every later `<` repeated it.
+    private static func findTagEnd(_ chars: [Unicode.Scalar], from start: Int, honourQuotes: inout Bool) -> TagEnd {
         var quote: Unicode.Scalar?
         var i = start
         while i < chars.count {
             let c = chars[i]
             if let q = quote {
                 if c == q { quote = nil }
-            } else if c == "\"" || c == "'" {
+            } else if honourQuotes, c == "\"" || c == "'" {
                 quote = c
             } else if c == ">" {
-                return i
+                return .at(i)
             } else if c == "<", i == start {
-                return nil
+                return .notATag
             }
             i += 1
         }
-        return nil
+        guard quote != nil else { return .none }
+        honourQuotes = false
+        return findTagEnd(chars, from: start, honourQuotes: &honourQuotes)
     }
 
+    /// Linear: on a match the caller jumps past it, and on no match it jumps to the end.
     private static func find(_ needle: String, in chars: [Unicode.Scalar], from start: Int) -> Int? {
         let n = Array(needle.unicodeScalars)
         guard n.count <= chars.count else { return nil }
@@ -103,6 +134,7 @@ public enum HTMLText {
         return nil
     }
 
+    /// Reads at most 11 scalars, so it costs the same however long the input.
     private static func entity(_ chars: [Unicode.Scalar], from start: Int) -> (String, Int)? {
         var i = start + 1
         var name = ""
@@ -121,7 +153,7 @@ public enum HTMLText {
         return (decoded, i + 1)
     }
 
-    /// Collapses spaces within lines and limits blank lines to one.
+    /// Collapses spaces within lines and limits blank lines to one, in one pass.
     private static func tidy(_ text: String) -> String {
         var lines: [String] = []
         var blank = 0
