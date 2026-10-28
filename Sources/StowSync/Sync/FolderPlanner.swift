@@ -21,10 +21,15 @@ public enum FolderPlanner {
     ///   people often treat it as storage. Exchange's non-mail folders
     ///   (Calendar, Contacts, Journal, Notes, Tasks, Conversation History,
     ///   Outbox) are skipped (D-112).
+    /// - iCloud: every selectable folder except Junk and Deleted Messages,
+    ///   found by SPECIAL-USE flag, by name only when no folder has the flag.
+    ///   iCloud erases Deleted Messages after 30 days, as Gmail does Bin, so
+    ///   it is skipped for the same reason (D-104, D-469).
     public static func plan(provider: Provider, folders: [IMAPFolder], capabilities: Set<String>) throws -> FolderPlan {
         switch provider {
         case .gmail: try planGmail(folders: folders, capabilities: capabilities)
         case .microsoft: planMicrosoft(folders: folders)
+        case .icloud: planICloud(folders: folders)
         }
     }
 
@@ -88,6 +93,35 @@ public enum FolderPlanner {
                 plan.skipped.append(.init(folder: folder, reason: reason))
             } else if folder.has("\\Junk") {
                 plan.skipped.append(.init(folder: folder, reason: "Junk: not archived (D-104)"))
+            } else {
+                plan.toSync.append(folder)
+            }
+        }
+        return plan
+    }
+
+    /// iCloud's names for its Junk and Deleted Messages folders, used only
+    /// when no folder carries the SPECIAL-USE flag (D-469).
+    static let icloudJunkName = "Junk"
+    static let icloudTrashName = "Deleted Messages"
+
+    static func planICloud(folders: [IMAPFolder]) -> FolderPlan {
+        let flagsJunk = folders.contains { $0.has("\\Junk") }
+        let flagsTrash = folders.contains { $0.has("\\Trash") }
+        func isJunk(_ folder: IMAPFolder) -> Bool {
+            flagsJunk ? folder.has("\\Junk") : folder.name.caseInsensitiveCompare(icloudJunkName) == .orderedSame
+        }
+        func isTrash(_ folder: IMAPFolder) -> Bool {
+            flagsTrash ? folder.has("\\Trash") : folder.name.caseInsensitiveCompare(icloudTrashName) == .orderedSame
+        }
+        var plan = FolderPlan(toSync: [], skipped: [])
+        for folder in folders {
+            if !folder.isSelectable {
+                plan.skipped.append(.init(folder: folder, reason: "cannot be opened (\\Noselect)"))
+            } else if isJunk(folder) {
+                plan.skipped.append(.init(folder: folder, reason: "Junk: not archived (D-104)"))
+            } else if isTrash(folder) {
+                plan.skipped.append(.init(folder: folder, reason: "Deleted Messages: iCloud erases it after 30 days, not archived (D-104, D-469)"))
             } else {
                 plan.toSync.append(folder)
             }

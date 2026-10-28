@@ -11,6 +11,8 @@ public enum RetentionGuide {
         case googleWorkspace
         case microsoft365
         case outlookCom
+        /// iCloud Mail, on any of its domains or a custom domain (D-466).
+        case icloud
     }
 
     static let consumerGoogle: Set<String> = ["gmail.com", "googlemail.com"]
@@ -23,6 +25,7 @@ public enum RetentionGuide {
         switch provider {
         case .gmail: return consumerGoogle.contains(domain) ? .gmail : .googleWorkspace
         case .microsoft: return consumerMicrosoft.contains(domain) ? .outlookCom : .microsoft365
+        case .icloud: return .icloud
         }
     }
 
@@ -42,12 +45,15 @@ public enum RetentionGuide {
     }
 
     /// What to type into the provider's search to find mail received before `before`:
-    /// `before:2025/10/13` in Gmail, `received:<2025-10-13` in Outlook.
+    /// `before:2025/10/13` in Gmail, `received:<2025-10-13` in Outlook. iCloud
+    /// has no search syntax for dates, so it is the date for Mail's smart
+    /// mailbox condition, for example `13 October 2025` (D-470).
     public static func search(_ kind: MailboxKind, before: Date) -> String {
         let day = Self.day(before)
         switch kind {
         case .gmail, .googleWorkspace: return "before:\(day.replacingOccurrences(of: "-", with: "/"))"
         case .microsoft365, .outlookCom: return "received:<\(day)"
+        case .icloud: return longDay(before)
         }
     }
 
@@ -85,6 +91,16 @@ public enum RetentionGuide {
                 Step("Open Outlook.com and search for:", search: search),
                 Step("Select all the results and delete them."),
                 Step("Empty Deleted Items to get the space back straight away."),
+            ]
+        case .icloud:
+            // Mail on the Mac, because iCloud Mail on the web cannot select by
+            // date (D-470). Checked on the test account, 28 Oct 2026.
+            return [
+                Step("Open Mail on your Mac with this iCloud account added to it. iCloud Mail on the web cannot find mail by date."),
+                Step("Choose Mailbox, New Smart Mailbox. Set \"Account\" to this iCloud account, add \"Date received\", \"is before the date\":", search: search),
+                Step("In the same window, tick \"Include messages from Sent\", so your sent mail goes too, then click OK."),
+                Step("Open the smart mailbox, select all the messages in it and delete them. They move to this account's Trash."),
+                Step("Open this account's Trash, select all the messages and click Delete, to get the space back. With thousands of messages this can take half an hour or more."),
             ]
         }
     }
@@ -125,6 +141,15 @@ public enum RetentionGuide {
         case .recent(let days):
             return base + " Backed up by Time Machine \(days == 0 ? "today" : days == 1 ? "yesterday" : "\(days) days ago"). Make sure your recovery key is saved."
         }
+    }
+
+    /// `13 October 2025` in UTC, for iCloud's steps.
+    static func longDay(_ date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_GB")
+        formatter.timeZone = TimeZone(identifier: "UTC")
+        formatter.dateFormat = "d MMMM yyyy"
+        return formatter.string(from: date)
     }
 
     /// `YYYY-MM-DD` in UTC.

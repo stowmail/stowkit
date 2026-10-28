@@ -88,12 +88,13 @@ struct Status: AsyncParsableCommand {
         }
         let now = Date()
         let statuses = try ArchiveStatus.collect(archive, now: now)
-        if statuses.isEmpty { print("No accounts yet. Add one with `stowmail account add gmail` or `stowmail account add microsoft`.") }
+        if statuses.isEmpty { print("No accounts yet. Add one with `stowmail account add gmail`, `stowmail account add microsoft` or `stowmail account add icloud --email <address>`.") }
         for status in statuses {
             let record = status.account
             print("\(record.account.email) (\(record.account.provider.rawValue), \(record.account.id.rawValue.prefix(8)))")
             if !record.isConnected { print("  Disconnected: no longer syncs. Its \(status.archivedMessages) archived messages are kept.") }
             if record.needsSignIn { print("  Needs sign-in: run `stowmail account signin \(record.account.id.rawValue.prefix(8))`.") }
+            print("  Signs in with: \(record.account.provider.credentialKind.label), kept in the Keychain")
             print("  Last sync: \(status.lastSyncAt.map(CLI.time) ?? "never")\(status.lastError == nil ? "" : " (failed)")")
             if let error = status.lastError { print("  Last error: \(error)") }
             print("  Archived: \(status.archivedMessages) messages, \(CLI.megabytes(status.archivedBytes))")

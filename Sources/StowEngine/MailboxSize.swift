@@ -51,7 +51,18 @@ extension MailboxSize {
             let provider = try String.fetchOne(db, sql: "SELECT provider FROM accounts WHERE id = ?", arguments: [account.rawValue])
             return MailboxSize(account: account, messages: (queued["n"] as Int) + (archived["n"] as Int),
                                bytes: (queued["bytes"] as Int64) + (archived["bytes"] as Int64),
-                               sizesAreEstimates: provider == Provider.microsoft.rawValue, quota: nil, quotaAdvertised: false)
+                               sizesAreEstimates: Self.sizesAreEstimates(provider), quota: nil, quotaAdvertised: false)
+        }
+    }
+}
+
+extension MailboxSize {
+    /// Whether a provider's RFC822.SIZE values are estimates: Exchange's are
+    /// (D-120). iCloud's are exact: measured on 1,500 messages, none differed (D-475).
+    static func sizesAreEstimates(_ provider: String?) -> Bool {
+        switch provider.flatMap(Provider.init(rawValue:)) {
+        case .microsoft?: true
+        case .gmail?, .icloud?, nil: false
         }
     }
 }

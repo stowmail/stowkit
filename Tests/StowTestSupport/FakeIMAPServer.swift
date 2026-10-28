@@ -59,6 +59,14 @@ public final class FakeIMAPServer: @unchecked Sendable {
     public var mailboxes: [Mailbox] { get { sync { _mailboxes } } set { sync { _mailboxes = newValue } } }
     public var capabilities: [String] { get { sync { _capabilities } } set { sync { _capabilities = newValue } } }
     public var acceptedTokens: Set<String> { get { sync { _acceptedTokens } } set { sync { _acceptedTokens = newValue } } }
+    /// `user\0password` pairs AUTHENTICATE PLAIN accepts (D-467), as "user password".
+    public var acceptedPasswords: Set<String> { get { sync { _acceptedPasswords } } set { sync { _acceptedPasswords = newValue } } }
+    /// The usernames AUTHENTICATE PLAIN was sent, in order (never the passwords).
+    public var plainUsers: [String] { sync { _plainUsers } }
+    /// How many AUTHENTICATE PLAIN responses arrived as a continuation (no SASL-IR).
+    public var plainContinuations: Int { sync { _plainContinuations } }
+    /// Every byte received, for checking that nothing at all arrived.
+    public var bytesReceived: Int { sync { _bytesReceived } }
     /// Drop the connection without replying when this many body fetches have been received (counted across connections).
     public var dropOnBodyFetchNumber: Int? { get { sync { _dropOn } } set { sync { _dropOn = newValue } } }
     /// Drop the connection on every body fetch.
@@ -104,6 +112,10 @@ public final class FakeIMAPServer: @unchecked Sendable {
     private var _mailboxes: [Mailbox] = []
     private var _capabilities = ["IMAP4rev1", "X-GM-EXT-1", "AUTH=XOAUTH2", "SASL-IR", "UIDPLUS"]
     private var _acceptedTokens: Set<String> = ["good-token"]
+    private var _acceptedPasswords: Set<String> = []
+    private var _plainUsers: [String] = []
+    private var _plainContinuations = 0
+    private var _bytesReceived = 0
     private var _dropOn: Int?
     private var _byeOn: (Int, String)?
     private var _readWrite = false
@@ -164,6 +176,8 @@ public final class FakeIMAPServer: @unchecked Sendable {
         var buffer = Data()
         var selected: Int?
         var pendingAuthTag: String?
+        /// AUTHENTICATE PLAIN without an initial response, waiting for the credentials.
+        var pendingPlainTag: String?
         var closed = false
         init(_ connection: NWConnection) { self.connection = connection }
     }
@@ -179,7 +193,10 @@ public final class FakeIMAPServer: @unchecked Sendable {
     private func receive(_ client: Client) {
         client.connection.receive(minimumIncompleteLength: 1, maximumLength: 65536) { [weak self] data, _, isComplete, error in
             guard let self, !client.closed else { return }
-            if let data { client.buffer.append(data) }
+            if let data {
+                client.buffer.append(data)
+                self._bytesReceived += data.count
+            }
             while let range = client.buffer.range(of: Data("\r\n".utf8)) {
                 let line = String(decoding: client.buffer[client.buffer.startIndex..<range.lowerBound], as: UTF8.self)
                 client.buffer.removeSubrange(client.buffer.startIndex..<range.upperBound)
@@ -223,6 +240,13 @@ public final class FakeIMAPServer: @unchecked Sendable {
     }
 
     private func handle(_ line: String, _ client: Client) {
+        if let tag = client.pendingPlainTag {
+            // The credentials, answering our "+" (never logged).
+            client.pendingPlainTag = nil
+            _plainContinuations += 1
+            checkPlain(tag: tag, base64: line, client)
+            return
+        }
         if let tag = client.pendingAuthTag {
             // The client's empty reply to our failure challenge.
             client.pendingAuthTag = nil
@@ -292,6 +316,15 @@ public final class FakeIMAPServer: @unchecked Sendable {
 
     private func authenticate(tag: String, rest: String, _ client: Client) {
         let pieces = rest.split(separator: " ")
+        if pieces.first?.uppercased() == "PLAIN" {
+            if pieces.count == 2 {
+                checkPlain(tag: tag, base64: String(pieces[1]), client)
+            } else {
+                client.pendingPlainTag = tag
+                send("+ \r\n", to: client)
+            }
+            return
+        }
         guard pieces.count == 2, pieces[0].uppercased() == "XOAUTH2",
               let decoded = Data(base64Encoded: String(pieces[1]))
         else {
@@ -311,6 +344,27 @@ public final class FakeIMAPServer: @unchecked Sendable {
             client.pendingAuthTag = tag
             let challenge = Data(#"{"status":"400","schemes":"Bearer","scope":"https://mail.google.com/"}"#.utf8).base64EncodedString()
             send("+ \(challenge)\r\n", to: client)
+        }
+    }
+
+    /// RFC 4616: `authzid NUL user NUL password`, base64.
+    private func checkPlain(tag: String, base64: String, _ client: Client) {
+        guard let decoded = Data(base64Encoded: base64) else {
+            send("\(tag) BAD Malformed AUTHENTICATE PLAIN\r\n", to: client)
+            return
+        }
+        let parts = decoded.split(separator: 0, omittingEmptySubsequences: false).map { String(decoding: $0, as: UTF8.self) }
+        guard parts.count == 3, parts[0].isEmpty else {
+            send("\(tag) BAD Malformed AUTHENTICATE PLAIN\r\n", to: client)
+            return
+        }
+        _plainUsers.append(parts[1])
+        if let failure = _authFailure {
+            send("\(tag) NO \(failure)\r\n", to: client)
+        } else if _acceptedPasswords.contains("\(parts[1]) \(parts[2])") {
+            send("\(tag) OK [CAPABILITY \(_capabilities.joined(separator: " "))] Authentication successful\r\n", to: client)
+        } else {
+            send("\(tag) NO Authentication Failed\r\n", to: client) // iCloud's reply, measured 28 Oct 2026
         }
     }
 

@@ -71,6 +71,18 @@ struct Doctor: AsyncParsableCommand {
             print("  not created yet (run `stowmail init`)")
         }
 
+        if let archive = try? CLIArchive.open(readOnly: true), let records = try? CLIArchive.accounts(archive).all(), !records.isEmpty {
+            // The kind of credential and whether it is there; never its value or length (D-467 item 7).
+            print("Accounts:")
+            for record in records where record.isConnected {
+                let id = record.account.id
+                let present = record.account.provider.oauth == nil
+                    ? (try? CLI.passwordStore().hasPassword(for: id)) == true
+                    : ((try? CLI.tokenStore().tokens(for: id)) ?? nil) != nil
+                print("  \(id.rawValue.prefix(8)) \(record.account.provider.rawValue): \(record.account.provider.credentialKind.label) \(present ? "in the Keychain" : "MISSING (run `stowmail account signin \(id.rawValue.prefix(8))`)")")
+            }
+        }
+
         print("Background sync: \(LaunchAgent.isInstalled ? (LaunchAgent.isLoaded() ? "installed and running" : "installed, not running") : "not installed (`stowmail daemon install`)")")
         print("Logs: \(LaunchAgent.logDirectory.path)")
         print("Power: \(PowerState.current().pauseReason.map { "sync would pause now (\($0))" } ?? "sync may run")")

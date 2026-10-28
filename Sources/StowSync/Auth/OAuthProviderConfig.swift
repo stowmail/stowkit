@@ -86,7 +86,9 @@ public struct OAuthProviderConfig: Sendable, Equatable {
         )
     }
 
-    public static func forProvider(_ provider: Provider, config: AppConfig) -> OAuthProviderConfig {
+    /// Takes an `OAuthProvider`, not a `Provider`: iCloud has no OAuth (D-467),
+    /// so there is nothing to ask for. Use `Provider.oauth` to get one.
+    public static func forProvider(_ provider: OAuthProvider, config: AppConfig) -> OAuthProviderConfig {
         switch provider {
         case .gmail: google(config)
         case .microsoft: microsoft(config)

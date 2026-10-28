@@ -1,6 +1,7 @@
 import Foundation
 import NIOIMAPCore
 import StowCore
+import StowSecrets
 import StowTestSupport
 import Testing
 @testable import StowSync
@@ -124,6 +125,17 @@ import Testing
         #expect(ProviderProfile.microsoft.endpoint == IMAPEndpoint(host: "outlook.office365.com", port: 993))
         #expect(ProviderProfile.gmail.endpoint.useTLS && ProviderProfile.microsoft.endpoint.useTLS)
     }
+
+    @Test func icloudKeepsToTwoConnectionsOnImplicitTLS() {
+        #expect(ProviderProfile.forProvider(.icloud) == .icloud)
+        #expect(ProviderProfile.icloud.endpoint == IMAPEndpoint(host: "imap.mail.me.com", port: 993))
+        #expect(ProviderProfile.icloud.endpoint.useTLS && ProviderProfile.icloud.endpoint.allowsPassword)
+        #expect(ProviderProfile.icloud.maxConnections == 2) // D-475
+        #expect(ProviderProfile.icloud.dailyByteLimit == nil)
+        // A password goes only over implicit TLS on 993 (D-467).
+        #expect(!IMAPEndpoint(host: "imap.mail.me.com", port: 143).allowsPassword)
+        #expect(!IMAPEndpoint.plaintextLoopback(port: 993).allowsPassword)
+    }
 }
 
 @Suite struct RetryPolicyTests {
@@ -139,7 +151,10 @@ import Testing
     /// Every command the session can build, mapped back to its IMAP verb.
     @Test func everyCommandIsReadOnly() {
         let all: [ReadOnlyCommand] = [
-            .capability, .authenticateXOAUTH2(user: "u@example.com", accessToken: "t"), .listAll,
+            .capability, .authenticateXOAUTH2(user: "u@example.com", accessToken: "t"),
+            .authenticatePlain(user: "u@example.com", password: try! AppSpecificPassword(typed: "abcd-efgh-ijkl-mnop"), initialResponse: true),
+            .authenticatePlain(user: "u@example.com", password: try! AppSpecificPassword(typed: "abcd-efgh-ijkl-mnop"), initialResponse: false),
+            .listAll,
             .examine(rawName: Array("INBOX".utf8), condstore: false), .examine(rawName: Array("INBOX".utf8), condstore: true),
             .fetchSummaries(1...10, gmail: false), .fetchSummaries(1...10, gmail: true), .fetchSummariesOf(uids: [4, 9]),
             .fetchHeaderFields(.list([3, 4]), fields: ["From", "List-Unsubscribe"]), .fetchHeaderFields(.range(1...9), fields: ["Message-ID"]),
@@ -147,8 +162,9 @@ import Testing
             .fetchStates(1...10, gmail: false, changedSince: 42), .fetchGmailIDs(1...10),
             .getQuotaRoot(rawName: Array("INBOX".utf8)), .logout,
         ]
-        // GETQUOTAROOT is the only command added since D-109 (D-404); nothing else may appear.
-        #expect(Set(all.map(\.verb)) == ["CAPABILITY", "AUTHENTICATE XOAUTH2", "LIST", "EXAMINE", "UID FETCH", "GETQUOTAROOT", "LOGOUT"])
+        // GETQUOTAROOT (D-404) and AUTHENTICATE PLAIN (D-467) are the only commands added since D-109; nothing else may appear.
+        #expect(Set(all.map(\.verb)) == ["CAPABILITY", "AUTHENTICATE XOAUTH2", "AUTHENTICATE PLAIN", "LIST", "EXAMINE", "UID FETCH", "GETQUOTAROOT", "LOGOUT"])
+        #expect(all.filter(\.carriesPassword).map(\.verb) == ["AUTHENTICATE PLAIN", "AUTHENTICATE PLAIN"])
         for command in all {
             #expect(!mailboxWriteVerbs.contains(command.verb), "\(command.verb)")
             switch command.command {

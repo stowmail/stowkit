@@ -13,6 +13,15 @@ public enum SyncError: Error, Equatable, CustomStringConvertible {
     /// example a personal Microsoft account made with a non-Microsoft address,
     /// or IMAP is turned off. Signing in again cannot help (D-116).
     case mailboxUnavailable(String)
+    /// iCloud refused the app-specific password. The account is marked as
+    /// needing sign-in and never retried: there is nothing to refresh (D-467 item 5).
+    case passwordRefused(AccountID)
+    /// The server's TLS certificate did not pass the system's check. Never
+    /// skipped or overridden (D-467 item 2).
+    case certificateRejected(String)
+    /// A password was about to go over a connection without implicit TLS.
+    /// Refused before anything was sent (D-467 item 2).
+    case insecureConnection
     case connectionFailed(String)
     /// The server closed the connection, usually with a BYE.
     case connectionClosed(String?)
@@ -47,6 +56,12 @@ public enum SyncError: Error, Equatable, CustomStringConvertible {
             "The mail server rejected the sign-in (\(text)). Try `stowmail account signin`."
         case .mailboxUnavailable(let text):
             "Signed in, but the server would not open this account's mailbox over IMAP (\(text)). This can be a fault on Microsoft's side that clears by itself, or the account may have no Outlook.com or Exchange Online mailbox (for example one created with a non-Microsoft address), or IMAP may be turned off for it. Signing in again will not help. The background sync tries again once a day."
+        case .passwordRefused(let id):
+            "iCloud refused the app-specific password. It may have been revoked, your Apple Account password may have changed (which revokes every app-specific password), or it was mistyped. Make a new one at account.apple.com (Sign-In and Security, App-Specific Passwords) and enter it with `stowmail account signin \(id)`. Stow will not try again until then."
+        case .certificateRejected(let text):
+            "The mail server's security certificate did not pass this Mac's check (\(text)), so Stow did not connect. Something on the network may be intercepting the connection; try another network. Stow never skips this check."
+        case .insecureConnection:
+            "Refused to send a password over a connection that is not encrypted. Nothing was sent."
         case .connectionFailed(let text): "Could not connect to the mail server: \(text)"
         case .connectionClosed(let text): "The mail server closed the connection\(text.map { ": \($0)" } ?? ".")"
         case .timedOut: "The mail server stopped responding."

@@ -5,6 +5,7 @@ import NIOIMAP
 import NIOIMAPCore
 import NIOTransportServices
 import StowCore
+import StowSecrets
 
 /// One TCP (normally TLS) connection to an IMAP server, built on
 /// swift-nio-imap and Network.framework.
@@ -15,10 +16,13 @@ import StowCore
 final class IMAPConnection: Sendable {
     let channel: Channel
     let responses: AsyncThrowingStream<Response, Error>
+    /// Where this connection goes, so `send` can refuse a password without TLS.
+    let endpoint: IMAPEndpoint
 
-    private init(channel: Channel, responses: AsyncThrowingStream<Response, Error>) {
+    private init(channel: Channel, responses: AsyncThrowingStream<Response, Error>, endpoint: IMAPEndpoint) {
         self.channel = channel
         self.responses = responses
+        self.endpoint = endpoint
     }
 
     /// One event loop group for every connection in the process.
@@ -35,6 +39,9 @@ final class IMAPConnection: Sendable {
         let readTimeout = TimeAmount.milliseconds(Int64(timeouts.read * 1000))
         var bootstrap = NIOTSConnectionBootstrap(group: group)
             .connectTimeout(.milliseconds(Int64(timeouts.connect * 1000)))
+            // Fail at once with Network.framework's own error instead of waiting
+            // out the timeout, so a refused certificate is reported as one.
+            .channelOption(NIOTSChannelOptions.waitForActivity, value: false)
             .channelInitializer { channel in
                 channel.eventLoop.makeCompletedFuture {
                     try channel.pipeline.syncOperations.addHandlers([
@@ -57,20 +64,37 @@ final class IMAPConnection: Sendable {
             channel = try await bootstrap.connect(host: endpoint.host, port: endpoint.port).get()
         } catch {
             continuation.finish(throwing: error)
+            if let network = error as? NWError, case .tls = network {
+                throw SyncError.certificateRejected(Redact.scrub(String(describing: error)))
+            }
             throw SyncError.connectionFailed(Redact.scrub(String(describing: error)))
         }
         continuation.onTermination = { _ in channel.close(promise: nil) }
-        return IMAPConnection(channel: channel, responses: stream)
+        return IMAPConnection(channel: channel, responses: stream, endpoint: endpoint)
     }
 
+    /// Refuses, before writing a byte, to send a password anywhere but an
+    /// implicit-TLS connection to port 993 (D-467). Network.framework reports
+    /// the channel active only once the TLS handshake and certificate check
+    /// have passed, so on a TLS endpoint TLS is up by the time this runs.
     func send(tag: String, _ command: ReadOnlyCommand) async throws {
+        guard !command.carriesPassword || endpoint.allowsPassword else {
+            throw SyncError.insecureConnection
+        }
         try await write(.tagged(TaggedCommand(tag: tag, command: command.command)))
     }
 
-    /// Answers a SASL challenge. Only ever sent empty: XOAUTH2 uses a challenge
+    /// Answers a SASL challenge with an empty line: XOAUTH2 uses a challenge
     /// to report failure, and the client must reply with an empty line.
     func sendEmptyContinuation() async throws {
         try await write(.continuationResponse(ByteBuffer()))
+    }
+
+    /// Answers the server's `+` to `AUTHENTICATE PLAIN` sent without an
+    /// initial response (no SASL-IR). Same TLS rule as `send` (D-467).
+    func sendPlainResponse(user: String, password: AppSpecificPassword) async throws {
+        guard endpoint.allowsPassword else { throw SyncError.insecureConnection }
+        try await write(.continuationResponse(ByteBuffer(bytes: SASLPlain.response(user: user, password: password))))
     }
 
     private func write(_ part: CommandStreamPart) async throws {

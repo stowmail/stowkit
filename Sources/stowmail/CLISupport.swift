@@ -45,12 +45,15 @@ enum CLI {
     /// Phase 1's account list in the Keychain; only read to move it into the archive (D-032).
     static func keychainRegistry() -> AccountRegistry { AccountRegistry(keychain: keychain()) }
     static func tokenStore() -> TokenStore { TokenStore(keychain: keychain()) }
+    /// iCloud app-specific passwords, in the same Keychain as tokens (D-467, D-471).
+    static func passwordStore() -> PasswordStore { PasswordStore(keychain: keychain()) }
     static func keyManager() -> KeyManager { KeyManager(keychain: keychain()) }
 
+    /// The app configuration (OAuth client IDs) is read only when a Google or
+    /// Microsoft token needs refreshing, so iCloud accounts need no `.env` (D-472).
     static func tokenProvider(accounts: any AccountDirectory) throws -> TokenProvider {
-        let config = try AppConfig.load()
-        return TokenProvider(tokenStore: tokenStore(), registry: accounts) { provider in
-            OAuthClient(config: OAuthProviderConfig.forProvider(provider, config: config))
+        TokenProvider(tokenStore: tokenStore(), passwordStore: passwordStore(), registry: accounts) { provider in
+            OAuthClient(config: OAuthProviderConfig.forProvider(provider, config: try AppConfig.load()))
         }
     }
 
@@ -104,6 +107,14 @@ enum CLI {
         return ["y", "yes"].contains(answer.lowercased())
     }
 
+    /// Reads a secret without showing it as it is typed (`readpassphrase`,
+    /// which reads the terminal itself), or one line from standard input when
+    /// that is not a terminal, so a script or test can pipe it in.
+    static func askSecretOrReadLine(_ prompt: String) -> String? {
+        guard isatty(STDIN_FILENO) == 1 else { return readLine(strippingNewline: true) }
+        return askSecret(prompt)
+    }
+
     /// Reads a secret without showing it as it is typed.
     static func askSecret(_ prompt: String) -> String? {
         var buffer = [CChar](repeating: 0, count: 256)
@@ -155,11 +166,13 @@ enum CLIArchive {
 enum ProviderArgument: String, ExpressibleByArgument, CaseIterable {
     case gmail
     case microsoft
+    case icloud
 
     var provider: Provider {
         switch self {
         case .gmail: .gmail
         case .microsoft: .microsoft
+        case .icloud: .icloud
         }
     }
 }

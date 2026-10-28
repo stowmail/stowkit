@@ -25,10 +25,17 @@ public struct ProviderProfile: Sendable, Equatable {
     /// small number of connections and backs off when told to (D-004).
     public static let microsoft = ProviderProfile(provider: .microsoft, endpoint: .office365, maxConnections: 2, dailyByteLimit: nil)
 
+    /// iCloud publishes no IMAP connection or download limits. Measured on the
+    /// test account (28 Oct 2026): eight connections at once all accepted, and
+    /// one connection downloaded 1,500 messages in 22 s with no slow-down, so
+    /// Stow keeps to two, as for Microsoft, and sets no daily cap (D-475).
+    public static let icloud = ProviderProfile(provider: .icloud, endpoint: .icloud, maxConnections: 2, dailyByteLimit: nil)
+
     public static func forProvider(_ provider: Provider) -> ProviderProfile {
         switch provider {
         case .gmail: gmail
         case .microsoft: microsoft
+        case .icloud: icloud
         }
     }
 }

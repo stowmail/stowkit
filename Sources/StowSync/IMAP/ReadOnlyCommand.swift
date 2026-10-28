@@ -1,5 +1,6 @@
 import NIOCore
 import NIOIMAPCore
+import StowSecrets
 
 /// Which UIDs a command is about.
 enum UIDSelection: Sendable, Equatable {
@@ -14,7 +15,8 @@ enum UIDSelection: Sendable, Equatable {
     }
 }
 
-/// The complete list of IMAP commands Stow can send (D-109; GETQUOTAROOT added by D-404).
+/// The complete list of IMAP commands Stow can send (D-109; GETQUOTAROOT added by D-404,
+/// AUTHENTICATE PLAIN by D-467).
 ///
 /// This is the only way `IMAPSession` builds a command, and the connection
 /// only accepts values of this type, so a command that changes the mailbox
@@ -25,6 +27,13 @@ enum UIDSelection: Sendable, Equatable {
 enum ReadOnlyCommand: Sendable {
     case capability
     case authenticateXOAUTH2(user: String, accessToken: String)
+    /// `AUTHENTICATE PLAIN` (RFC 4616) with an iCloud app-specific password
+    /// (D-467). With `initialResponse` (the server offers SASL-IR) the
+    /// credentials go on the command line; without it they answer the
+    /// server's `+` instead. `IMAPConnection` refuses to send either unless
+    /// the connection is implicit TLS (`IMAPEndpoint.allowsPassword`).
+    /// Signing in changes nothing in the mailbox.
+    case authenticatePlain(user: String, password: AppSpecificPassword, initialResponse: Bool)
     /// `LIST "" "*"`: every mailbox.
     case listAll
     /// `EXAMINE <mailbox> [(CONDSTORE)]`: read-only; CONDSTORE asks for HIGHESTMODSEQ (D-038).
@@ -53,12 +62,19 @@ enum ReadOnlyCommand: Sendable {
     case getQuotaRoot(rawName: [UInt8])
     case logout
 
+    /// Whether this command carries a password, so may only be sent over implicit TLS (D-467).
+    var carriesPassword: Bool {
+        if case .authenticatePlain = self { return true }
+        return false
+    }
+
     /// The command verb, for logs. Never includes arguments, which may hold a
     /// token or a folder name.
     var verb: String {
         switch self {
         case .capability: "CAPABILITY"
         case .authenticateXOAUTH2: "AUTHENTICATE XOAUTH2"
+        case .authenticatePlain: "AUTHENTICATE PLAIN"
         case .listAll: "LIST"
         case .examine: "EXAMINE"
         case .fetchSummaries, .fetchSummariesOf, .fetchHeaderFields, .fetchMessages, .fetchStates, .fetchGmailIDs: "UID FETCH"
@@ -76,6 +92,11 @@ enum ReadOnlyCommand: Sendable {
             return .authenticate(
                 mechanism: AuthenticationMechanism("XOAUTH2"),
                 initialResponse: InitialResponse(ByteBuffer(bytes: XOAUTH2.initialResponse(user: user, accessToken: accessToken)))
+            )
+        case .authenticatePlain(let user, let password, let initialResponse):
+            return .authenticate(
+                mechanism: .plain,
+                initialResponse: initialResponse ? InitialResponse(ByteBuffer(bytes: SASLPlain.response(user: user, password: password))) : nil
             )
         case .listAll:
             return .list(nil, reference: MailboxName(Array("".utf8)), .mailbox(ByteBuffer(string: "*")), [])
@@ -135,5 +156,15 @@ enum XOAUTH2 {
     /// Contains the access token: never log it.
     static func initialResponse(user: String, accessToken: String) -> [UInt8] {
         Array("user=\(user)\u{01}auth=Bearer \(accessToken)\u{01}\u{01}".utf8)
+    }
+}
+
+/// The SASL PLAIN response (RFC 4616): an empty authorisation identity, the
+/// username and the password, separated by NUL bytes. swift-nio-imap knows
+/// the mechanism's name but has no encoder for it. swift-nio-imap base64-encodes
+/// the result. Contains the password: never log it.
+enum SASLPlain {
+    static func response(user: String, password: AppSpecificPassword) -> [UInt8] {
+        password.withBytes { [0] + Array(user.utf8) + [0] + $0 }
     }
 }

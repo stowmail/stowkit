@@ -14,10 +14,11 @@ struct AccountCommand: AsyncParsableCommand {
 
     struct Add: AsyncParsableCommand {
         static let configuration = CommandConfiguration(
-            abstract: "Sign in to a Gmail or Microsoft account in the browser and add it."
+            abstract: "Sign in to a Gmail or Microsoft account in the browser, or an iCloud account with an app-specific password, and add it.",
+            discussion: "For icloud, --email is required and the app-specific password is asked for at a prompt that does not show it, or read as one line from standard input when that is not a terminal. There is no flag or environment variable for it."
         )
 
-        @Argument(help: "gmail or microsoft")
+        @Argument(help: "gmail, microsoft or icloud")
         var provider: ProviderArgument
 
         @Option(name: .long, help: "A friendly name, for example \"Personal\".")
@@ -28,8 +29,11 @@ struct AccountCommand: AsyncParsableCommand {
 
         func run() async throws {
             CLI.bootstrapLogging()
+            guard let oauthProvider = provider.provider.oauth else {
+                return try await ICloudSignIn.add(email: email, name: name)
+            }
             let config = try AppConfig.load()
-            let oauth = OAuthProviderConfig.forProvider(provider.provider, config: config)
+            let oauth = OAuthProviderConfig.forProvider(oauthProvider, config: config)
             let archive = try CLIArchive.open()
             let accounts = CLIArchive.accounts(archive)
 
@@ -66,7 +70,7 @@ struct AccountCommand: AsyncParsableCommand {
             CLI.bootstrapLogging()
             let records = try CLIArchive.accounts(try CLIArchive.open(readOnly: true)).all()
             if records.isEmpty {
-                print("No accounts. Add one with `stowmail account add gmail` or `stowmail account add microsoft`.")
+                print("No accounts. Add one with `stowmail account add gmail`, `stowmail account add microsoft` or `stowmail account add icloud --email <address>`.")
             }
             for record in records {
                 print(CLI.describe(record))
@@ -87,8 +91,11 @@ struct AccountCommand: AsyncParsableCommand {
             CLI.bootstrapLogging()
             let accounts = CLIArchive.accounts(try CLIArchive.open())
             let record = try accounts.find(account)
+            guard let oauthProvider = record.account.provider.oauth else {
+                return try await ICloudSignIn.signInAgain(record, accounts: accounts)
+            }
             let config = try AppConfig.load()
-            let oauth = OAuthProviderConfig.forProvider(record.account.provider, config: config)
+            let oauth = OAuthProviderConfig.forProvider(oauthProvider, config: config)
             print("Signing in as \(record.account.email) in the browser. Waiting up to five minutes...")
             let grant = try await SignInFlow(client: OAuthClient(config: oauth))
                 .run(loginHint: record.account.email, openBrowser: CLI.openBrowser)
@@ -107,7 +114,7 @@ struct AccountCommand: AsyncParsableCommand {
 
     struct Remove: AsyncParsableCommand {
         static let configuration = CommandConfiguration(
-            abstract: "Disconnect an account: stop syncing it and delete its tokens. Its archived mail is kept."
+            abstract: "Disconnect an account: stop syncing it and delete its tokens or app-specific password. Its archived mail is kept."
         )
 
         @Argument(help: "Account ID, ID prefix, address or name.")
@@ -120,10 +127,16 @@ struct AccountCommand: AsyncParsableCommand {
             let accounts = CLIArchive.accounts(archive)
             let record = try accounts.find(account)
             try CLI.tokenStore().delete(for: record.account.id)
+            try CLI.passwordStore().delete(for: record.account.id)
             try accounts.disconnect(record.account.id)
-            print("Disconnected account \(record.account.id). It no longer syncs and its tokens are deleted.")
+            print("Disconnected account \(record.account.id). It no longer syncs and its \(record.account.provider.credentialKind.label) \(record.account.provider.oauth == nil ? "is" : "are") deleted from this Mac.")
             print("Its archived mail is kept and still searchable. Adding the same address again reconnects it.")
-            print("Stow's access is still listed in the account's security settings until you revoke it there.")
+            if record.account.provider.oauth == nil {
+                // D-467 item 6: the password still works until revoked at Apple.
+                print(ICloudSignIn.revokeSteps)
+            } else {
+                print("Stow's access is still listed in the account's security settings until you revoke it there.")
+            }
         }
     }
 }

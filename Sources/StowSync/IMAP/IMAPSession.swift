@@ -4,6 +4,7 @@ import NIOCore
 import NIOIMAP
 import NIOIMAPCore
 import StowCore
+import StowSecrets
 
 /// A read-only conversation with one IMAP server (D-109).
 ///
@@ -20,6 +21,11 @@ public actor IMAPSession {
     private var knownCapabilities: Set<String>?
     private var lastBye: String?
     private var loggedOut = false
+    /// iCloud answers EXAMINE with `[READ-WRITE]` (measured 28 Oct 2026, D-474).
+    /// Only `SessionFactory` turns this on, only for iCloud accounts.
+    private var acceptsReadWriteExamineLabel = false
+    /// Held only while `AUTHENTICATE PLAIN` without SASL-IR waits for the server's `+`.
+    private var plainCredentials: (user: String, password: AppSpecificPassword)?
     private let logger = Logger(label: "ee.getstow.sync.imap")
 
     private init(connection: IMAPConnection) {
@@ -50,6 +56,28 @@ public actor IMAPSession {
                 knownCapabilities = Set(list.map { $0.name.uppercased() })
             } else {
                 knownCapabilities = nil // They change after sign-in; ask again when needed.
+            }
+        } catch SyncError.commandFailed(_, let status, let text) {
+            throw Self.classifyAuthenticationFailure("\(status) \(text)")
+        }
+    }
+
+    /// Signs in with SASL PLAIN and an iCloud app-specific password (D-467),
+    /// only over implicit TLS (the connection checks). Sends the credentials
+    /// as an initial response when the server offers SASL-IR, otherwise in
+    /// answer to its `+`. Throws `SyncError.authenticationFailed` if refused.
+    public func authenticate(user: String, password: AppSpecificPassword) async throws {
+        // Checked here before anything is sent, and again by the connection before it writes.
+        guard connection.endpoint.allowsPassword else { throw SyncError.insecureConnection }
+        let initialResponse = try await capabilities().contains("SASL-IR")
+        plainCredentials = initialResponse ? nil : (user, password)
+        defer { plainCredentials = nil }
+        do {
+            let text = try await run(.authenticatePlain(user: user, password: password, initialResponse: initialResponse)) { _ in }
+            if case .capability(let list)? = text.code {
+                knownCapabilities = Set(list.map { $0.name.uppercased() })
+            } else {
+                knownCapabilities = nil
             }
         } catch SyncError.commandFailed(_, let status, let text) {
             throw Self.classifyAuthenticationFailure("\(status) \(text)")
@@ -107,8 +135,16 @@ public actor IMAPSession {
         return folders
     }
 
+    /// iCloud's EXAMINE says `[READ-WRITE]` although nothing Stow sends can
+    /// write (D-474). Called by `SessionFactory` for iCloud accounts only; there
+    /// is no way to turn it off again for the session.
+    func acceptReadWriteExamineLabel() {
+        acceptsReadWriteExamineLabel = true
+    }
+
     /// Opens a folder read-only. Refuses to continue unless the server confirms
-    /// READ-ONLY. With `condstore`, also asks for HIGHESTMODSEQ (D-038).
+    /// READ-ONLY (an iCloud session also accepts its `[READ-WRITE]` label to
+    /// EXAMINE, D-474). With `condstore`, also asks for HIGHESTMODSEQ (D-038).
     public func examine(_ folder: IMAPFolder, condstore: Bool = false) async throws -> FolderStatus {
         var uidValidity: UInt32?
         var uidNext: UInt32?
@@ -129,7 +165,13 @@ public actor IMAPSession {
                 break
             }
         }
-        guard case .readOnly? = text.code else {
+        switch text.code {
+        case .readOnly?:
+            break
+        case .readWrite? where acceptsReadWriteExamineLabel:
+            // Still EXAMINE, never SELECT; nothing Stow can send writes (D-109, D-474).
+            logger.debug("EXAMINE answered READ-WRITE; accepted for iCloud (D-474)")
+        default:
             // EXAMINE must always answer [READ-ONLY]. Anything else and we stop.
             throw SyncError.protocolViolation("EXAMINE was not confirmed as read-only")
         }
@@ -362,9 +404,16 @@ public actor IMAPSession {
                 case .bad(let text): return ("BAD", text)
                 }
             case .authenticationChallenge:
-                // XOAUTH2 reports failure as a challenge carrying JSON; the
-                // client must answer with an empty line to get the final NO.
-                try await connection.sendEmptyContinuation()
+                if let credentials = plainCredentials {
+                    // PLAIN without SASL-IR: the first `+` asks for the credentials (once).
+                    plainCredentials = nil
+                    try await connection.sendPlainResponse(user: credentials.user, password: credentials.password)
+                } else {
+                    // XOAUTH2 reports failure as a challenge carrying JSON; the
+                    // client must answer with an empty line to get the final NO.
+                    // A second challenge to PLAIN is answered the same way.
+                    try await connection.sendEmptyContinuation()
+                }
             case .untagged(.conditionalState(.bye(let text))), .fatal(let text):
                 lastBye = Redact.scrub(text.text)
                 if case .logout = command { continue }

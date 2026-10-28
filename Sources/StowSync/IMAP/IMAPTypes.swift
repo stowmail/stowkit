@@ -13,6 +13,7 @@ public struct IMAPEndpoint: Sendable, Equatable {
         self.host = host
         self.port = port
         self.useTLS = true
+        self.passwordsOverLoopbackForTests = false
     }
 
     /// A plain-text endpoint, allowed only on 127.0.0.1 (for the fake server in tests).
@@ -20,15 +21,38 @@ public struct IMAPEndpoint: Sendable, Equatable {
         IMAPEndpoint(host: "127.0.0.1", port: port, useTLS: false)
     }
 
-    private init(host: String, port: Int, useTLS: Bool) {
+    private init(host: String, port: Int, useTLS: Bool, passwordsOverLoopbackForTests: Bool = false) {
         precondition(useTLS || host == "127.0.0.1", "Plain-text IMAP is only allowed on 127.0.0.1")
         self.host = host
         self.port = port
         self.useTLS = useTLS
+        self.passwordsOverLoopbackForTests = passwordsOverLoopbackForTests
     }
+
+    /// Set only by the debug-build test endpoint below.
+    let passwordsOverLoopbackForTests: Bool
+
+    /// Whether a password may be sent here: only on implicit TLS to port 993
+    /// (D-467). No STARTTLS, no port 143, no plain text. `IMAPConnection`
+    /// checks this before it writes `AUTHENTICATE PLAIN`.
+    var allowsPassword: Bool {
+        (useTLS && port == 993) || passwordsOverLoopbackForTests
+    }
+
+    #if DEBUG
+    /// The fake server in tests is plain text on 127.0.0.1. This endpoint lets
+    /// it receive a password so sign-in can be tested; it exists only in debug
+    /// builds and only inside the module, so the release `stowmail` and app
+    /// cannot send a password without TLS at all (D-471).
+    static func plaintextLoopbackAcceptingPasswordsForTests(port: Int) -> IMAPEndpoint {
+        IMAPEndpoint(host: "127.0.0.1", port: port, useTLS: false, passwordsOverLoopbackForTests: true)
+    }
+    #endif
 
     public static let gmail = IMAPEndpoint(host: "imap.gmail.com")
     public static let office365 = IMAPEndpoint(host: "outlook.office365.com")
+    /// iCloud Mail: implicit TLS on 993, the only way Stow reaches it (D-467).
+    public static let icloud = IMAPEndpoint(host: "imap.mail.me.com")
 }
 
 /// How long to wait before giving up on the server.
