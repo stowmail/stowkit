@@ -9,7 +9,18 @@ import Foundation
 /// - adjacent encoded words in the same charset are joined as bytes before
 ///   decoding, so a multi-byte character split across two words still decodes;
 /// - an encoded word that cannot be decoded is left exactly as written.
+///
+/// Decoding takes time in proportion to the input (A-02): every attempt to
+/// read a word stops `maximumWordBytes` after its `=?`, and words are looked
+/// for only in the first `maximumScannedBytes` (D-494).
 public enum EncodedWords {
+    /// RFC 2047 allows 75 bytes per word; one more is allowed for slack.
+    /// A longer "word" is kept as written.
+    static let maximumWordBytes = 76
+    /// Encoded words after this many bytes of a value are kept as written,
+    /// and the result is marked as having a problem.
+    static let maximumScannedBytes = 16 << 10
+
     public struct Decoded: Sendable, Equatable {
         public var text: String
         /// True if any encoded word was malformed, used an unknown charset or
@@ -77,7 +88,7 @@ public enum EncodedWords {
         var segments: [Segment] = []
         var literalStart = 0
         var i = 0
-        while i + 1 < bytes.count {
+        while i + 1 < bytes.count, i < maximumScannedBytes {
             guard bytes[i] == UInt8(ascii: "="), bytes[i + 1] == UInt8(ascii: "?") else {
                 i += 1
                 continue
@@ -92,30 +103,33 @@ public enum EncodedWords {
                 i += 2
             }
         }
+        if i + 1 < bytes.count, containsMarker(bytes[i...]) { problem = true }
         if literalStart < bytes.count { segments.append(.literal(bytes[literalStart...])) }
         return segments
     }
 
     /// Parses `=?charset?X?text?=` starting at `start`. Returns the charset,
     /// decoded bytes and the index just past `?=`, or nil if it is not a valid word.
+    /// Reads at most `maximumWordBytes` from `start`.
     private static func parseWord(_ bytes: [UInt8], from start: Int) -> (String, [UInt8], Int)? {
+        let limit = min(bytes.count, start + maximumWordBytes)
         var i = start + 2
         let charsetStart = i
-        while i < bytes.count, bytes[i] != UInt8(ascii: "?"), !isWhitespace(bytes[i]) { i += 1 }
-        guard i < bytes.count, bytes[i] == UInt8(ascii: "?"), i > charsetStart else { return nil }
+        while i < limit, bytes[i] != UInt8(ascii: "?"), !isWhitespace(bytes[i]) { i += 1 }
+        guard i < limit, bytes[i] == UInt8(ascii: "?"), i > charsetStart else { return nil }
         let charset = String(decoding: bytes[charsetStart..<i], as: UTF8.self)
         i += 1
-        guard i + 1 < bytes.count, bytes[i + 1] == UInt8(ascii: "?") else { return nil }
+        guard i + 1 < limit, bytes[i + 1] == UInt8(ascii: "?") else { return nil }
         let mode = bytes[i] | 0x20  // lowercase
         guard mode == UInt8(ascii: "b") || mode == UInt8(ascii: "q") else { return nil }
         i += 2
         let textStart = i
         // The encoded text runs to the next "?=" and may not contain whitespace.
-        while i + 1 < bytes.count, !(bytes[i] == UInt8(ascii: "?") && bytes[i + 1] == UInt8(ascii: "=")) {
+        while i + 1 < limit, !(bytes[i] == UInt8(ascii: "?") && bytes[i + 1] == UInt8(ascii: "=")) {
             if isWhitespace(bytes[i]) { return nil }
             i += 1
         }
-        guard i + 1 < bytes.count else { return nil }
+        guard i + 1 < limit else { return nil }
         let text = bytes[textStart..<i]
         let end = i + 2
         let decoded = mode == UInt8(ascii: "b") ? decodeBase64(text) : decodeQ(text)
@@ -125,14 +139,20 @@ public enum EncodedWords {
 
     /// True if the bytes at `start` look like an attempt at an encoded word,
     /// so a parse failure is worth a warning rather than being ordinary text.
+    /// Reads at most `maximumWordBytes` from `start`.
     private static func looksLikeWord(_ bytes: [UInt8], from start: Int) -> Bool {
+        let limit = min(bytes.count, start + maximumWordBytes)
         var questionMarks = 0
         var i = start + 2
-        while i < bytes.count, !isWhitespace(bytes[i]) {
+        while i < limit, !isWhitespace(bytes[i]) {
             if bytes[i] == UInt8(ascii: "?") { questionMarks += 1 }
             i += 1
         }
         return questionMarks >= 3
+    }
+
+    private static func containsMarker(_ bytes: ArraySlice<UInt8>) -> Bool {
+        zip(bytes, bytes.dropFirst()).contains { $0 == UInt8(ascii: "=") && $1 == UInt8(ascii: "?") }
     }
 
     static func decodeBase64(_ text: ArraySlice<UInt8>) -> [UInt8]? {
