@@ -101,16 +101,22 @@ public typealias RuleClassifier = @Sendable (_ headers: MessageHeaders, _ ownAdd
 public final class Importer: Sendable {
     public let archive: Archive
     let parser = MIMEParser()
-    let extractor = TextExtractor()
+    let extractor: TextExtractor
     /// False only for measuring import speed without inline extraction (QA checklist).
     let extractText: Bool
     let classifier: RuleClassifier?
     let logger = Logger(label: "ee.getstow.store.import")
 
-    public init(archive: Archive, extractText: Bool = true, classifier: RuleClassifier? = nil) {
+    public convenience init(archive: Archive, extractText: Bool = true, classifier: RuleClassifier? = nil) {
+        self.init(archive: archive, extractText: extractText, classifier: classifier, extractor: TextExtractor())
+    }
+
+    /// Tests pass an extractor with a stand-in for PDFKit.
+    init(archive: Archive, extractText: Bool = true, classifier: RuleClassifier? = nil, extractor: TextExtractor) {
         self.archive = archive
         self.extractText = extractText
         self.classifier = classifier
+        self.extractor = extractor
     }
 
     // MARK: - Bulk

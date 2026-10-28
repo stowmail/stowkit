@@ -220,10 +220,17 @@ public struct MIMEParser: Sendable {
         if isBodyText {
             let decoded = Charset.decode(data, charset: contentType?[parameter: "charset"])
             if decoded.usedFallback { state.warn("body text not in its declared charset") }
+            // Search text reads at most a fixed amount per part (D-495); the
+            // part is still stored whole, and shown whole when read.
+            var text = decoded.text
+            if !state.keepHTMLSource, text.utf8.count > TextExtractor.maximumTextBytes {
+                text = TextExtractor.capped(text)
+                state.warn("body text cut for search at \(TextExtractor.maximumTextBytes >> 20) MB")
+            }
             if type == "text/html" {
-                state.html.append(state.keepHTMLSource ? decoded.text : HTMLText.text(fromHTML: decoded.text))
+                state.html.append(state.keepHTMLSource ? text : HTMLText.text(fromHTML: text))
             } else {
-                state.plain.append(decoded.text.replacingOccurrences(of: "\r\n", with: "\n"))
+                state.plain.append(text.replacingOccurrences(of: "\r\n", with: "\n"))
             }
             return
         }

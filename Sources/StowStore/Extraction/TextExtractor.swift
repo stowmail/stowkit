@@ -1,4 +1,5 @@
 import Foundation
+import os
 import PDFKit
 import StowCore
 
@@ -44,21 +45,44 @@ public struct TextExtractor: Sendable {
     /// Longest text kept per attachment, in characters. Search quality does not
     /// improve past this, and it keeps a pathological file from bloating the index.
     public static let maximumCharacters = 1_000_000
-    static let maximumPlainBytes = 10 << 20
+    /// Most decoded text read from one body part or text attachment (D-495).
+    /// The part itself is always stored whole; only its search text is cut.
+    static let maximumTextBytes = 10 << 20
+    /// Longest PDFKit may spend on one attachment at import (D-495).
+    static let pdfTimeLimit: Duration = .seconds(30)
+    /// PDFKit calls still running past their limit. A thread cannot be
+    /// stopped from outside, so a stuck one is abandoned; past this many,
+    /// PDFs get no text rather than another thread (D-495).
+    static let maximumAbandoned = 4
+    private static let sharedAbandoned = OSAllocatedUnfairLock(initialState: 0)
     static let ocrImageTypes: Set<String> = [
         "image/png", "image/jpeg", "image/jpg", "image/tiff", "image/heic", "image/heif", "image/gif", "image/bmp", "image/webp",
     ]
     static let docxType = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 
-    public init() {}
+    let pdfText: @Sendable (Data) -> ExtractionResult
+    let pdfLimit: Duration
+    /// Shared by every extractor in the process, except in tests.
+    let abandoned: OSAllocatedUnfairLock<Int>
+
+    public init() {
+        self.init(pdfText: Self.pdfKitText, pdfLimit: Self.pdfTimeLimit, abandoned: Self.sharedAbandoned)
+    }
+
+    /// Tests pass a stand-in for PDFKit, a shorter limit and their own count.
+    init(pdfText: @escaping @Sendable (Data) -> ExtractionResult, pdfLimit: Duration,
+         abandoned: OSAllocatedUnfairLock<Int> = OSAllocatedUnfairLock(initialState: 0)) {
+        self.pdfText = pdfText
+        self.pdfLimit = pdfLimit
+        self.abandoned = abandoned
+    }
 
     public func extract(_ attachment: ParsedAttachment) -> ExtractionResult {
         let type = Self.effectiveType(attachment)
         if type == "application/pdf" { return pdf(attachment.data) }
         if type == Self.docxType { return docx(attachment.data) }
         if type.hasPrefix("text/") || type == "application/ics" || type == "application/json" {
-            guard attachment.data.count <= Self.maximumPlainBytes else { return .unsupported }
-            let text = Charset.decode(attachment.data, charset: nil).text
+            let text = Self.capped(Charset.decode(attachment.data, charset: nil).text)
             let cleaned = type == "text/html" ? HTMLText.text(fromHTML: text) : text
             return Self.result(cleaned, method: .plain)
         }
@@ -84,7 +108,39 @@ public struct TextExtractor: Sendable {
         return byExtension[(name as NSString).pathExtension] ?? declared
     }
 
+    /// Runs PDFKit on its own thread under `pdfLimit`, so a PDF that hangs it
+    /// cannot stall import. On timeout the attachment is stored with no text
+    /// (`unsupported` until D-481's mark exists) and the thread is left to
+    /// finish or hang on its own: there is no safe way to stop it.
     func pdf(_ data: Data) -> ExtractionResult {
+        enum Run { case running, finished(ExtractionResult), abandoned }
+        let abandoned = abandoned
+        guard abandoned.withLock({ $0 }) < Self.maximumAbandoned else { return .unsupported }
+        let run = OSAllocatedUnfairLock(initialState: Run.running)
+        let done = DispatchSemaphore(value: 0)
+        let work = pdfText
+        // A thread of its own, not a shared queue, so a stuck call holds no pool thread.
+        Thread.detachNewThread {
+            let result = work(data)
+            let wasAbandoned = run.withLock { state in
+                if case .abandoned = state { return true }
+                state = .finished(result)
+                return false
+            }
+            if wasAbandoned { abandoned.withLock { $0 -= 1 } }
+            done.signal()
+        }
+        let seconds = Double(pdfLimit.components.seconds) + Double(pdfLimit.components.attoseconds) / 1e18
+        _ = done.wait(timeout: .now() + seconds)
+        return run.withLock { state in
+            if case .finished(let result) = state { return result }
+            state = .abandoned
+            abandoned.withLock { $0 += 1 }
+            return .unsupported
+        }
+    }
+
+    static func pdfKitText(_ data: Data) -> ExtractionResult {
         guard let document = PDFDocument(data: data) else { return .unsupported }
         if document.isLocked { return .unsupported }
         let text = document.string ?? ""
@@ -102,6 +158,13 @@ public struct TextExtractor: Sendable {
         parser.shouldResolveExternalEntities = false
         _ = parser.parse()
         return Self.result(collector.text, method: .docx)
+    }
+
+    /// `text` cut to at most `maximumTextBytes` of UTF-8, at a character boundary.
+    static func capped(_ text: String) -> String {
+        guard text.utf8.count > maximumTextBytes else { return text }
+        let end = text.utf8.index(text.utf8.startIndex, offsetBy: maximumTextBytes)
+        return String(text[..<end])
     }
 
     static func result(_ text: String, method: ExtractionResult.Method) -> ExtractionResult {
