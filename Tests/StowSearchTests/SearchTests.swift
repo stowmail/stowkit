@@ -1,9 +1,12 @@
+import CoreGraphics
+import CoreText
 import CryptoKit
 import Foundation
 import GRDB
 import StowCore
 import StowSecrets
 import Testing
+import Vision
 @testable import StowSearch
 @testable import StowStore
 
@@ -136,7 +139,30 @@ final class SearchFixture: @unchecked Sendable {
 
     // MARK: OCR
 
-    @Test func scannedPDFIsFoundAfterOCR() async throws {
+    /// Whether Apple Vision can read any text on this machine: a word drawn
+    /// with Core Text, recognised by Vision directly, not through Stow's code.
+    /// GitHub's macOS virtual machines cannot (D-498), so the OCR test runs
+    /// only where Vision itself works, and a fault in Stow's OCR still fails it.
+    static let visionReadsText: Bool = {
+        let width = 480, height = 120
+        guard let context = CGContext(data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: 0,
+                                      space: CGColorSpaceCreateDeviceGray(), bitmapInfo: CGImageAlphaInfo.none.rawValue)
+        else { return false }
+        context.setFillColor(gray: 1, alpha: 1)
+        context.fill(CGRect(x: 0, y: 0, width: width, height: height))
+        let attributes: [NSAttributedString.Key: Any] = [
+            NSAttributedString.Key(kCTFontAttributeName as String): CTFontCreateWithName("Helvetica" as CFString, 64, nil),
+        ]
+        context.textPosition = CGPoint(x: 20, y: 35)
+        CTLineDraw(CTLineCreateWithAttributedString(NSAttributedString(string: "HERON", attributes: attributes)), context)
+        guard let image = context.makeImage() else { return false }
+        let request = VNRecognizeTextRequest()
+        guard (try? VNImageRequestHandler(cgImage: image).perform([request])) != nil else { return false }
+        return request.results?.contains { $0.topCandidates(1).first?.string.uppercased().contains("HERON") == true } ?? false
+    }()
+
+    @Test(.enabled(if: SearchTests.visionReadsText, "Apple Vision reads no text on this machine"))
+    func scannedPDFIsFoundAfterOCR() async throws {
         let before = try await fixture.search("Your letter")
         #expect(before.first?.ocrPending == true)
         #expect(try await fixture.search("SCANNED-HERON-2208").isEmpty)

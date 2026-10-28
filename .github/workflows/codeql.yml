@@ -32,6 +32,11 @@ jobs:
       - name: Fetch SQLCipher (checksum and Zetetic signature)
         run: scripts/fetch-sqlcipher.sh
 
+      # CodeQL's Swift bundle is built for Intel, and the xcode-27 image has
+      # no Rosetta, so the traced build could not start a single process.
+      - name: Install Rosetta
+        run: sudo softwareupdate --install-rosetta --agree-to-license
+
       - uses: github/codeql-action/init@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
         with:
           languages: swift
