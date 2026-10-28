@@ -60,10 +60,15 @@ public struct IMAPTimeouts: Sendable {
     public var connect: TimeInterval
     /// Longest silence allowed while a reply is expected.
     public var read: TimeInterval
+    /// Longest any one command may take from sending to its completion, however
+    /// steadily the reply arrives (A-13, D-496). Message fetches get longer, by
+    /// the bytes asked for: see `IMAPSession.messageFetchRate`.
+    public var command: TimeInterval
 
-    public init(connect: TimeInterval = 30, read: TimeInterval = 90) {
+    public init(connect: TimeInterval = 30, read: TimeInterval = 90, command: TimeInterval = 300) {
         self.connect = connect
         self.read = read
+        self.command = command
     }
 
     public static let `default` = IMAPTimeouts()

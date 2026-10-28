@@ -89,6 +89,12 @@ public final class FakeIMAPServer: @unchecked Sendable {
     /// Splits each message FETCH reply into separate writes, paced so they
     /// arrive as separate reads, at the offsets this returns (D-120).
     public var splitFetchReply: (@Sendable (Data) -> [Int])? { get { sync { _split } } set { sync { _split = newValue } } }
+    /// Untagged FETCH responses for UIDs nobody asked for, sent before the
+    /// real ones in every UID FETCH reply, each with a body of `bodyBytes`
+    /// when a body was asked for (A-13).
+    public var unrequestedFetches: (count: Int, bodyBytes: Int)? { get { sync { _unrequested } } set { sync { _unrequested = newValue } } }
+    /// Sends every UID FETCH reply one byte at a time, this many seconds apart (A-13).
+    public var trickleInterval: TimeInterval? { get { sync { _trickle } } set { sync { _trickle = newValue } } }
     /// Reported RFC822.SIZE for a message of the given length, in every reply,
     /// as Exchange does with its estimates. The literal length is always exact.
     public var reportedSize: (@Sendable (Int) -> Int)? { get { sync { _reportedSize } } set { sync { _reportedSize = newValue } } }
@@ -123,6 +129,8 @@ public final class FakeIMAPServer: @unchecked Sendable {
     private var _authFailure: String?
     private var _refusals: [UInt32: Int] = [:]
     private var _split: (@Sendable (Data) -> [Int])?
+    private var _unrequested: (count: Int, bodyBytes: Int)?
+    private var _trickle: TimeInterval?
     private var _reportedSize: (@Sendable (Int) -> Int)?
     private var _partialCompletion: String?
     private var _partialUntagged: String?
@@ -221,14 +229,14 @@ public final class FakeIMAPServer: @unchecked Sendable {
         client.connection.send(content: data, completion: .contentProcessed { _ in })
     }
 
-    /// Sends `data` cut at `cuts`, 15 ms apart, so each piece is its own read.
-    private func sendInPieces(_ data: Data, cuts: [Int], to client: Client) {
+    /// Sends `data` cut at `cuts`, `interval` apart, so each piece is its own read.
+    private func sendInPieces(_ data: Data, cuts: [Int], interval: TimeInterval = 0.015, to client: Client) {
         let bounds = ([0] + cuts.filter { $0 > 0 && $0 < data.count }.sorted() + [data.count])
         var delay = 0.0
         for index in 0..<(bounds.count - 1) where bounds[index] < bounds[index + 1] {
             let piece = data.subdata(in: bounds[index]..<bounds[index + 1])
             queue.asyncAfter(deadline: .now() + delay) { [weak self] in self?.send(piece, to: client) }
-            delay += 0.015
+            delay += interval
         }
     }
 
@@ -408,6 +416,17 @@ public final class FakeIMAPServer: @unchecked Sendable {
         let maxUID = mailbox.messages.map(\.uid).max() ?? 0
         let wanted = Self.parseSet(set, maxUID: maxUID)
         var out = Data()
+        if let (count, bodyBytes) = _unrequested {
+            let body = Data(repeating: UInt8(ascii: "x"), count: bodyBytes)
+            for offset in 0..<count {
+                out.append(Data("* \(mailbox.messages.count + offset + 1) FETCH (UID \(maxUID + 1000 + UInt32(offset)) FLAGS ()".utf8))
+                if wantsBody {
+                    out.append(Data(" INTERNALDATE \"01-Sep-2025 10:00:00 +0000\" BODY[] {\(bodyBytes)}\r\n".utf8))
+                    out.append(body)
+                }
+                out.append(Data(")\r\n".utf8))
+            }
+        }
         var omitted = false
         for (index, message) in mailbox.messages.enumerated() where wanted(message.uid) {
             if let changedSince, message.modSeq <= changedSince { continue }
@@ -450,7 +469,9 @@ public final class FakeIMAPServer: @unchecked Sendable {
         } else {
             out.append(Data("\(tag) OK UID FETCH completed\r\n".utf8))
         }
-        if wantsBody, let split = _split {
+        if let trickle = _trickle {
+            sendInPieces(out, cuts: Array(1..<max(out.count, 1)), interval: trickle, to: client)
+        } else if wantsBody, let split = _split {
             sendInPieces(out, cuts: split(out), to: client)
         } else {
             send(out, to: client)

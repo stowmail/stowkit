@@ -27,16 +27,38 @@ public actor IMAPSession {
     /// Held only while `AUTHENTICATE PLAIN` without SASL-IR waits for the server's `+`.
     private var plainCredentials: (user: String, password: AppSpecificPassword)?
     private let logger = Logger(label: "ee.getstow.sync.imap")
+    private let timeouts: IMAPTimeouts
+    /// The tag of a command whose deadline passed; its connection is closed.
+    private var expiredTag: String?
+    private var runningTag: String?
+    /// FETCH responses for UIDs that were not asked for, over the session (A-13).
+    private(set) var droppedResponses = 0
 
-    private init(connection: IMAPConnection) {
+    /// Bytes per second a message fetch is allowed on top of `IMAPTimeouts.command`
+    /// before its deadline, about 0.4 Mbit/s (D-496).
+    static let messageFetchRate = 50_000
+    /// Most bytes one message fetch may bring in: twice what was asked for
+    /// plus a margin, as Exchange's sizes are estimates (D-120), never past
+    /// the ceiling (D-496).
+    static func messageByteLimit(expected: Int) -> Int {
+        min(maximumReplyBytes, expected.multipliedReportingOverflow(by: 2).partialValue + (16 << 20))
+    }
+    static let maximumReplyBytes = 1 << 30
+    /// Literal bytes allowed in a reply to any command that fetches no message bodies.
+    static let nonBodyReplyBytes = 64 << 20
+    /// Assumed size of a message when the caller gives none, for the limits above.
+    static let assumedMessageBytes = 32 << 20
+
+    private init(connection: IMAPConnection, timeouts: IMAPTimeouts) {
         self.connection = connection
         self.responses = ResponseInbox(connection.responses)
+        self.timeouts = timeouts
     }
 
     /// Connects and reads the server's greeting.
     public static func connect(to endpoint: IMAPEndpoint, timeouts: IMAPTimeouts = .default) async throws -> IMAPSession {
         let connection = try await IMAPConnection.connect(to: endpoint, timeouts: timeouts)
-        let session = IMAPSession(connection: connection)
+        let session = IMAPSession(connection: connection, timeouts: timeouts)
         do {
             try await session.readGreeting()
         } catch {
@@ -184,8 +206,9 @@ public actor IMAPSession {
     /// UIDs, sizes, arrival dates and (for Gmail) message IDs of the messages
     /// whose UID is in `range`, in UID order. Downloads no message content.
     public func fetchUIDs(_ range: ClosedRange<UInt32>, gmail: Bool = false) async throws -> [MessageSummary] {
-        var builder = FetchAssembler()
+        var builder = FetchAssembler(wanted: .range(range))
         _ = try await run(.fetchSummaries(range, gmail: gmail)) { try builder.consume($0) }
+        noteDropped(builder)
         return builder.finished
             .compactMap { message in
                 message.uid.map {
@@ -199,8 +222,9 @@ public actor IMAPSession {
     /// UIDs and sizes of whichever of `uids` still exist. Downloads no content.
     public func fetchUIDs(_ uids: [UInt32]) async throws -> [MessageSummary] {
         guard !uids.isEmpty else { return [] }
-        var builder = FetchAssembler()
+        var builder = FetchAssembler(wanted: .uids(Set(uids)))
         _ = try await run(.fetchSummariesOf(uids: uids)) { try builder.consume($0) }
+        noteDropped(builder)
         let wanted = Set(uids)
         return builder.finished
             .compactMap { message in
@@ -214,17 +238,18 @@ public actor IMAPSession {
     /// Read only, and only those fields.
     public func fetchHeaderFields(uids: [UInt32], fields: [String]) async throws -> [UInt32: Data] {
         guard !uids.isEmpty else { return [:] }
-        return try await headerFields(.list(uids), fields: fields)
+        return try await headerFields(.list(uids), wanted: .uids(Set(uids)), fields: fields)
     }
 
     /// Like `fetchHeaderFields(uids:fields:)`, for every message in a UID range.
     public func fetchHeaderFields(_ range: ClosedRange<UInt32>, fields: [String]) async throws -> [UInt32: Data] {
-        try await headerFields(.range(range), fields: fields)
+        try await headerFields(.range(range), wanted: .range(range), fields: fields)
     }
 
-    private func headerFields(_ selection: UIDSelection, fields: [String]) async throws -> [UInt32: Data] {
-        var builder = FetchAssembler()
+    private func headerFields(_ selection: UIDSelection, wanted: FetchAssembler.Wanted, fields: [String]) async throws -> [UInt32: Data] {
+        var builder = FetchAssembler(wanted: wanted)
         _ = try await run(.fetchHeaderFields(selection, fields: fields)) { try builder.consume($0) }
+        noteDropped(builder)
         var result: [UInt32: Data] = [:]
         for message in builder.finished {
             if let uid = message.uid { result[uid] = message.headerFields ?? Data() }
@@ -235,8 +260,9 @@ public actor IMAPSession {
     /// Flags (and Gmail labels) of the messages in `range`: all of them, or with
     /// `changedSince` only those whose CONDSTORE mod-sequence is higher (D-038).
     public func fetchStates(_ range: ClosedRange<UInt32>, gmail: Bool, changedSince: UInt64? = nil) async throws -> [CopyState] {
-        var builder = FetchAssembler()
+        var builder = FetchAssembler(wanted: .range(range))
         _ = try await run(.fetchStates(range, gmail: gmail, changedSince: changedSince)) { try builder.consume($0) }
+        noteDropped(builder)
         return builder.finished
             .compactMap { message in
                 message.uid.map { CopyState(uid: $0, flags: message.flags, labels: gmail ? message.labels : nil) }
@@ -247,33 +273,43 @@ public actor IMAPSession {
 
     /// The Gmail message IDs in the open folder's `range` (D-039). Identifiers only.
     public func fetchGmailIDs(_ range: ClosedRange<UInt32>) async throws -> Set<UInt64> {
-        var builder = FetchAssembler()
+        var builder = FetchAssembler(wanted: .range(range))
         _ = try await run(.fetchGmailIDs(range)) { try builder.consume($0) }
+        noteDropped(builder)
         return Set(builder.finished.compactMap(\.gmailMessageID))
     }
 
     /// Downloads complete messages with BODY.PEEK[]. Messages deleted on the
     /// server in the meantime are simply absent from the result.
-    public func fetchMessages(uids: [UInt32], gmail: Bool) async throws -> [FetchedMessage] {
-        try await fetchMessagesWithDiagnostics(uids: uids, gmail: gmail).messages
+    public func fetchMessages(uids: [UInt32], gmail: Bool, expectedBytes: Int? = nil) async throws -> [FetchedMessage] {
+        try await fetchMessagesWithDiagnostics(uids: uids, gmail: gmail, expectedBytes: expectedBytes).messages
     }
 
     /// Like `fetchMessages`, plus how the server completed the command, for
     /// diagnosing partial replies (D-118). A NO completion is treated as a
     /// partial reply rather than an error: whatever arrived is returned. Only a
     /// quota reply still throws.
-    public func fetchMessagesWithDiagnostics(uids: [UInt32], gmail: Bool) async throws -> (messages: [FetchedMessage], diagnostics: FetchDiagnostics) {
+    ///
+    /// `expectedBytes`, the sizes the server listed for these messages, sets
+    /// how many bytes the reply may bring and how long it may take (D-496).
+    public func fetchMessagesWithDiagnostics(
+        uids: [UInt32], gmail: Bool, expectedBytes: Int? = nil
+    ) async throws -> (messages: [FetchedMessage], diagnostics: FetchDiagnostics) {
         guard !uids.isEmpty else { return ([], FetchDiagnostics(status: "OK")) }
-        var builder = FetchAssembler()
+        let expected = min(expectedBytes ?? uids.count.multipliedReportingOverflow(by: Self.assumedMessageBytes).partialValue,
+                           Self.maximumReplyBytes)
+        var builder = FetchAssembler(wanted: .uids(Set(uids)), byteLimit: Self.messageByteLimit(expected: expected))
         var untagged: [String] = []
         let byeBefore = lastBye
-        let completion = try await runForCompletion(.fetchMessages(uids: uids, gmail: gmail)) { response in
+        let deadline = timeouts.command + Double(expected / Self.messageFetchRate)
+        let completion = try await runForCompletion(.fetchMessages(uids: uids, gmail: gmail), deadline: deadline) { response in
             switch response {
             case .untagged(.conditionalState(.no(let text))): untagged.append("NO " + Self.describe(text))
             case .untagged(.conditionalState(.bad(let text))): untagged.append("BAD " + Self.describe(text))
             default: try builder.consume(response)
             }
         }
+        noteDropped(builder)
         if lastBye != byeBefore, let bye = lastBye { untagged.append("BYE " + bye) }
         switch completion.status {
         case "OK":
@@ -317,6 +353,12 @@ public actor IMAPSession {
             )
         }.sorted { $0.uid < $1.uid }
         return (messages, diagnostics)
+    }
+
+    private func noteDropped(_ builder: FetchAssembler) {
+        guard builder.dropped > 0 else { return }
+        droppedResponses += builder.dropped
+        logger.notice("Dropped FETCH responses for UIDs that were not asked for", metadata: ["count": "\(builder.dropped)"])
     }
 
     /// Server free text for logs: scrubbed (D-014) and kept short.
@@ -382,13 +424,49 @@ public actor IMAPSession {
 
     /// Sends one command and feeds every reply to `handle` until the tagged
     /// completion, which it returns whether OK, NO or BAD. Throws on BYE or a lost connection.
-    private func runForCompletion(_ command: ReadOnlyCommand, handle: (Response) throws -> Void) async throws -> (status: String, text: ResponseText) {
+    ///
+    /// The command must finish within `deadline` (default `IMAPTimeouts.command`),
+    /// separately from the idle timer, which a reply trickling in never trips.
+    /// At the deadline the connection is closed and the command fails with a
+    /// retryable error (A-13, D-496). If `handle` throws, the rest of the reply
+    /// is still on its way, so the connection is closed too.
+    private func runForCompletion(
+        _ command: ReadOnlyCommand, deadline: TimeInterval? = nil, handle: (Response) throws -> Void
+    ) async throws -> (status: String, text: ResponseText) {
         if Task.isCancelled {
             await disconnect()
             throw SyncError.cancelled
         }
         let tag = "S\(nextTag)"
         nextTag += 1
+        let limit = deadline ?? timeouts.command
+        let verb = command.verb
+        let watchdog = Task { [weak self] in
+            try await Task.sleep(nanoseconds: UInt64(limit * 1_000_000_000))
+            await self?.deadlinePassed(tag: tag, command: verb, seconds: limit)
+        }
+        defer { watchdog.cancel() }
+        do {
+            return try await exchange(command, tag: tag, handle: handle)
+        } catch {
+            if expiredTag == tag {
+                throw SyncError.connectionClosed("\(verb) took longer than \(Int(limit)) s, so Stow closed the connection")
+            }
+            throw error
+        }
+    }
+
+    private func deadlinePassed(tag: String, command: String, seconds: TimeInterval) async {
+        guard runningTag == tag else { return }
+        expiredTag = tag
+        logger.warning("IMAP command passed its deadline; closing the connection",
+                       metadata: ["command": "\(command)", "seconds": "\(Int(seconds))"])
+        await connection.close()
+    }
+
+    private func exchange(_ command: ReadOnlyCommand, tag: String, handle: (Response) throws -> Void) async throws -> (status: String, text: ResponseText) {
+        runningTag = tag
+        defer { runningTag = nil }
         logger.debug("IMAP command", metadata: ["tag": "\(tag)", "command": "\(command.verb)"])
         try await connection.send(tag: tag, command)
         while true {
@@ -419,7 +497,12 @@ public actor IMAPSession {
                 if case .logout = command { continue }
                 logger.notice("Server sent BYE", metadata: ["text": "\(lastBye ?? "")"])
             default:
-                try handle(response)
+                do {
+                    try handle(response)
+                } catch {
+                    await disconnect()
+                    throw error
+                }
             }
         }
     }
@@ -487,8 +570,23 @@ private final class ResponseInbox: @unchecked Sendable {
 ///
 /// Sizes and literal lengths come from the server, so they are bounded before
 /// use: a hostile or broken server must not be able to trap an addition or a
-/// memory reservation (security review M-4, M-5).
+/// memory reservation (security review M-4, M-5). A response for a UID that
+/// was not asked for is counted and dropped as it arrives, its bytes never
+/// kept, and every streamed byte counts towards `byteLimit` (A-13, D-496).
 struct FetchAssembler {
+    /// The UIDs a command asked for.
+    enum Wanted {
+        case range(ClosedRange<UInt32>)
+        case uids(Set<UInt32>)
+
+        func contains(_ uid: UInt32) -> Bool {
+            switch self {
+            case .range(let range): range.contains(uid)
+            case .uids(let uids): uids.contains(uid)
+            }
+        }
+    }
+
     /// RFC822.SIZE values above this are taken as this. Far above any real
     /// message (the parser refuses bodies over `IMAPConnection.bodySizeLimit`),
     /// and small enough that adding millions of them cannot overflow.
@@ -519,8 +617,23 @@ struct FetchAssembler {
     }
 
     private(set) var finished: [Partial] = []
+    private(set) var dropped = 0
+    private(set) var bytes = 0
     private var current: Partial?
     private var streaming = Streaming.none
+    let wanted: Wanted?
+    let byteLimit: Int
+
+    init(wanted: Wanted? = nil, byteLimit: Int = IMAPSession.nonBodyReplyBytes) {
+        self.wanted = wanted
+        self.byteLimit = byteLimit
+    }
+
+    /// False once the current response's UID is known and was not asked for.
+    private var keepingCurrent: Bool {
+        guard let wanted, let uid = current?.uid else { return true }
+        return wanted.contains(uid)
+    }
 
     mutating func consume(_ response: Response) throws {
         guard case .fetch(let part) = response else { return }
@@ -559,6 +672,11 @@ struct FetchAssembler {
                 streaming = .none
             }
         case .streamingBytes(let buffer):
+            bytes += buffer.readableBytes
+            guard bytes <= byteLimit else {
+                throw SyncError.connectionClosed("FETCH reply passed its byte limit of \(byteLimit >> 20) MB")
+            }
+            guard keepingCurrent else { return }
             switch streaming {
             case .body: current?.body?.append(contentsOf: buffer.readableBytesView)
             case .headerFields: current?.headerFields?.append(contentsOf: buffer.readableBytesView)
@@ -567,7 +685,13 @@ struct FetchAssembler {
         case .streamingEnd:
             streaming = .none
         case .finish:
-            if let current { finished.append(current) }
+            if let current {
+                if let wanted, !(current.uid.map(wanted.contains) ?? false) {
+                    dropped += 1
+                } else {
+                    finished.append(current)
+                }
+            }
             current = nil
         }
     }

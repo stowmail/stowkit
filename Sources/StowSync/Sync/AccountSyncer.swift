@@ -203,6 +203,10 @@ public struct AccountSyncer: Sendable {
             } catch let error as SyncError where error.isRetryable {
                 failuresWithoutProgress = report.messagesWritten > before ? 1 : failuresWithoutProgress + 1
                 guard failuresWithoutProgress <= retry.maxAttempts else { throw error }
+                // Past the turn's deadline, retrying here would hold up every
+                // other account: give the turn back and let the scheduler's own
+                // back-off retry later (A-13, D-496).
+                if let deadline = options.deadline, now() >= deadline { throw error }
                 let delay = retry.delay(forAttempt: failuresWithoutProgress)
                 logger.notice("Sync interrupted; will reconnect", metadata: [
                     "account": "\(account.id)", "reason": "\(error)", "delay": "\(delay)",
@@ -286,7 +290,7 @@ public struct AccountSyncer: Sendable {
             // 4. Compare archived copies with the server, once nothing is waiting.
             if report.outcome == .complete, options.checkChanges != .skip, try await state.queueTotals(account.id).queued == 0 {
                 try await checkChanges(options.checkChanges, plan: plan, listed: listed, opened: opened, condstore: condstore,
-                                       session: session, report: &report, onEvent: onEvent)
+                                       window: options.listWindow, session: session, report: &report, onEvent: onEvent)
             }
             await session.logout()
         } catch {
@@ -384,7 +388,8 @@ public struct AccountSyncer: Sendable {
             guard try await budget.allows(planned) else {
                 return .budgetExhausted(usedBytes: try await budget.used(), limitBytes: budget.limit ?? 0, neededBytes: planned)
             }
-            let messages = try await fetchRetryingPartial(uids, session: session, options: options, folderIndex: folder.index)
+            let sizes = Dictionary(batch.map { ($0.uid, $0.size) }, uniquingKeysWith: max)
+            let messages = try await fetchRetryingPartial(uids, sizes: sizes, session: session, options: options, folderIndex: folder.index)
             var bytes: Int64 = 0
             for message in messages {
                 try await sink.write(RawMessage(
@@ -449,8 +454,12 @@ public struct AccountSyncer: Sendable {
     /// just those in smaller chunks, as `options.partialRetry` says, logging what
     /// the server said each time (D-118). Whatever is still missing afterwards
     /// is left to the D-113 and D-115 handling.
-    private func fetchRetryingPartial(_ uids: [UInt32], session: IMAPSession, options: SyncOptions, folderIndex: Int) async throws -> [FetchedMessage] {
-        let first = try await session.fetchMessagesWithDiagnostics(uids: uids, gmail: gmail)
+    /// `sizes` are the listed sizes, which bound each reply's bytes and time (D-496).
+    private func fetchRetryingPartial(
+        _ uids: [UInt32], sizes: [UInt32: Int], session: IMAPSession, options: SyncOptions, folderIndex: Int
+    ) async throws -> [FetchedMessage] {
+        func expected(_ uids: [UInt32]) -> Int { uids.reduce(0) { $0 + min(sizes[$1] ?? 0, Int(IMAPConnection.bodySizeLimit)) } }
+        let first = try await session.fetchMessagesWithDiagnostics(uids: uids, gmail: gmail, expectedBytes: expected(uids))
         var messages = checked(first.messages, folderIndex: folderIndex)
         var missing = Self.missing(uids, from: messages)
         guard !missing.isEmpty else { return messages }
@@ -464,7 +473,7 @@ public struct AccountSyncer: Sendable {
             }
             for start in stride(from: 0, to: missing.count, by: round.chunkSize) {
                 let chunk = Array(missing[start..<min(start + round.chunkSize, missing.count)])
-                let reply = try await session.fetchMessagesWithDiagnostics(uids: chunk, gmail: gmail)
+                let reply = try await session.fetchMessagesWithDiagnostics(uids: chunk, gmail: gmail, expectedBytes: expected(chunk))
                 let accepted = checked(reply.messages, folderIndex: folderIndex)
                 messages += accepted
                 if accepted.count < chunk.count {
@@ -515,7 +524,7 @@ public struct AccountSyncer: Sendable {
 
     private func checkChanges(
         _ mode: ChangeCheck, plan: FolderPlan, listed: [IMAPFolder], opened: [String: OpenedFolder], condstore: Bool,
-        session: IMAPSession, report: inout SyncReport, onEvent: @Sendable (SyncEvent) -> Void
+        window: UInt32, session: IMAPSession, report: inout SyncReport, onEvent: @Sendable (SyncEvent) -> Void
     ) async throws {
         var vanished: [VanishedMessage] = []
         var flagsUpdated = 0
@@ -558,7 +567,15 @@ public struct AccountSyncer: Sendable {
                                               highestModSeq: current, fullCheck: false, at: at)
             case .full:
                 let status = try await session.examine(folder, condstore: condstore)
-                let states = try await session.fetchStates(range, gmail: gmail)
+                // In windows, so no one command asks for a whole folder (A-13, D-496).
+                var states: [CopyState] = []
+                var windowStart = range.lowerBound
+                while windowStart <= range.upperBound {
+                    let windowEnd = range.upperBound - windowStart < window ? range.upperBound : windowStart + window - 1
+                    states += try await session.fetchStates(windowStart...windowEnd, gmail: gmail)
+                    guard windowEnd < range.upperBound else { break }
+                    windowStart = windowEnd + 1
+                }
                 var present = Set(states.map(\.uid))
                 let stored = try await state.storedUIDs(account.id, folder: folder.name, uidValidity: saved.uidValidity)
                 let storedSet = Set(stored)
