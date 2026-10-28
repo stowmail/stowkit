@@ -69,8 +69,10 @@ public struct OAuthProviderConfig: Sendable, Equatable {
         )
     }
 
-    /// Microsoft identity platform v2. The app registration's public client
-    /// redirect is `http://localhost`, so the redirect host is `localhost` (D-102).
+    /// Microsoft identity platform v2. The redirect host is `127.0.0.1`, the
+    /// address the listener binds, so a browser that tries `::1` first for
+    /// `localhost` cannot hand the reply to another process (D-483, audit A-07).
+    /// Entra ignores the port for loopback addresses.
     public static func microsoft(_ config: AppConfig) -> OAuthProviderConfig {
         let tenant = config.microsoftTenant
         let base = "https://login.microsoftonline.com/\(tenant)/oauth2/v2.0"
@@ -81,7 +83,7 @@ public struct OAuthProviderConfig: Sendable, Equatable {
             clientID: config.microsoftClientID,
             clientSecret: nil,
             scopes: ["https://outlook.office.com/IMAP.AccessAsUser.All", "offline_access", "openid", "email"],
-            redirectHost: "localhost",
+            redirectHost: "127.0.0.1",
             extraAuthorizationParameters: [("prompt", "select_account")]
         )
     }

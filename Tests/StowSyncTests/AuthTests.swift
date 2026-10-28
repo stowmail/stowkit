@@ -51,7 +51,7 @@ import Testing
         let url = config.authorizationURL(redirectURI: config.redirectURI(port: 50000), state: "s", pkce: .generate(), loginHint: "sam@example.com")
         #expect(url.absoluteString.hasPrefix("https://login.microsoftonline.com/common/oauth2/v2.0/authorize?"))
         let q = query(url)
-        #expect(q["redirect_uri"] == "http://localhost:50000/")
+        #expect(q["redirect_uri"] == "http://127.0.0.1:50000/")
         #expect(q["scope"] == "https://outlook.office.com/IMAP.AccessAsUser.All offline_access openid email")
         #expect(q["login_hint"] == "sam@example.com")
         #expect(config.clientSecret == nil)
