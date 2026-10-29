@@ -1,13 +1,14 @@
-# A short libFuzzer pass over every parser on pushes to main and weekly
-# (R-02, D-499). Not a required check. Longer runs are local:
-# scripts/fuzz.sh <target> [seconds].
+# A short libFuzzer pass over every parser on pushes to main, weekly and
+# by hand (R-02, D-499). Not a required check, and not run on ci/**
+# branches. Longer runs are local: scripts/fuzz.sh <target> [seconds].
 name: fuzz
 
 on:
   push:
-    branches: [main, "ci/**"]
+    branches: [main]
   schedule:
     - cron: "41 5 * * 1"
+  workflow_dispatch:
 
 permissions:
   contents: read

@@ -1,10 +1,11 @@
 # CodeQL for Swift on pushes to main and weekly (R-01, D-498). Not a
-# required check: findings go to the repository's Security tab.
+# required check: findings go to the repository's Security tab. Not run
+# on ci/** branches, so proving a change there waits only for check.
 name: codeql
 
 on:
   push:
-    branches: [main, "ci/**"]
+    branches: [main]
   schedule:
     - cron: "23 5 * * 1"
 
