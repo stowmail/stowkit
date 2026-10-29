@@ -2,6 +2,7 @@ import ArgumentParser
 import Foundation
 import StowCore
 import StowEngine
+import StowRules
 import StowSecrets
 import StowStore
 import StowSync
@@ -86,6 +87,9 @@ struct Doctor: AsyncParsableCommand {
             print("App configuration:")
             print("  \(error)")
         }
+
+        let rules = RulesData.bundled
+        print("Protection lists: \(rules.loadProblem.map(\.description) ?? "\(rules.billingSenders.count) billing senders, \(rules.protectedSubjectKeywords.count) subject and \(rules.protectedSenderKeywords.count) sender keywords")")
 
         let location = CLIArchive.location()
         print("Archive: \(location.root.path)")

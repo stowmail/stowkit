@@ -1,7 +1,30 @@
 import Foundation
 import StowCore
 
+/// Why the protection lists could not be used (A-19, D-517).
+public enum RulesDataProblem: Error, Hashable, Sendable, CustomStringConvertible {
+    case missing
+    case unreadable
+    /// The named list is empty in the file.
+    case emptyList(String)
+
+    /// What `stowmail rules`, `doctor` and Tidy up show.
+    public static let message = "Stow could not read its list of protected senders, so it is not suggesting anything to remove. Reinstall Stow to fix this."
+
+    public var description: String {
+        switch self {
+        case .missing: "\(Self.message) (rules-data.json is missing.)"
+        case .unreadable: "\(Self.message) (rules-data.json could not be read.)"
+        case .emptyList(let name): "\(Self.message) (rules-data.json has an empty \(name) list.)"
+        }
+    }
+}
+
 /// The plain data behind the sender signals and protected mail, loaded from `Resources/rules-data.json`.
+///
+/// Fails closed (A-19, D-517): if the file is missing, does not decode, lacks a
+/// list or has an empty one, `loadProblem` says so and the lists are empty, and
+/// `RuleSet.assess` then suggests nothing for removal at all.
 public struct RulesData: Codable, Hashable, Sendable {
     public var version: Int
     public var noReplyLocalParts: [String]
@@ -13,6 +36,8 @@ public struct RulesData: Codable, Hashable, Sendable {
     public var protectedSenderKeywords: [String]
     /// Known billing senders: a full address, or a domain (that domain only, as overrides match).
     public var billingSenders: [String]
+    /// Set when the data could not be loaded; never encoded.
+    public var loadProblem: RulesDataProblem?
 
     public init(version: Int = 2, noReplyLocalParts: [String], listProviderDomains: [String],
                 protectedSubjectKeywords: [String] = [], protectedSenderKeywords: [String] = [], billingSenders: [String] = []) {
@@ -28,26 +53,45 @@ public struct RulesData: Codable, Hashable, Sendable {
         case version, noReplyLocalParts, listProviderDomains, protectedSubjectKeywords, protectedSenderKeywords, billingSenders
     }
 
-    /// The protection lists are optional in the file, so a version 1 file still reads.
+    /// Every list is required: a missing one is an error, not an empty list (A-19).
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         version = try c.decode(Int.self, forKey: .version)
         noReplyLocalParts = try c.decode([String].self, forKey: .noReplyLocalParts)
         listProviderDomains = try c.decode([String].self, forKey: .listProviderDomains)
-        protectedSubjectKeywords = try c.decodeIfPresent([String].self, forKey: .protectedSubjectKeywords) ?? []
-        protectedSenderKeywords = try c.decodeIfPresent([String].self, forKey: .protectedSenderKeywords) ?? []
-        billingSenders = try c.decodeIfPresent([String].self, forKey: .billingSenders) ?? []
+        protectedSubjectKeywords = try c.decode([String].self, forKey: .protectedSubjectKeywords)
+        protectedSenderKeywords = try c.decode([String].self, forKey: .protectedSenderKeywords)
+        billingSenders = try c.decode([String].self, forKey: .billingSenders)
     }
 
-    /// The data file shipped with the package. A missing or broken file is a packaging bug,
-    /// so it degrades to empty lists (those two signals never fire) rather than crashing.
-    public static let bundled: RulesData = {
-        guard let url = Bundle.module.url(forResource: "rules-data", withExtension: "json"),
-              let data = try? Data(contentsOf: url),
-              let decoded = try? JSONDecoder().decode(RulesData.self, from: data)
-        else { return RulesData(noReplyLocalParts: [], listProviderDomains: []) }
+    /// Lists with nothing in them, by their name in the file.
+    var emptyLists: [String] {
+        [("noReplyLocalParts", noReplyLocalParts), ("listProviderDomains", listProviderDomains),
+         ("protectedSubjectKeywords", protectedSubjectKeywords), ("protectedSenderKeywords", protectedSenderKeywords),
+         ("billingSenders", billingSenders)].filter { $0.1.isEmpty }.map(\.0)
+    }
+
+    /// Empty lists carrying `problem`: what a failed load gives.
+    public static func unusable(_ problem: RulesDataProblem) -> RulesData {
+        var data = RulesData(noReplyLocalParts: [], listProviderDomains: [])
+        data.loadProblem = problem
+        return data
+    }
+
+    /// Loads and checks a data file. Never throws: a problem is carried in `loadProblem`.
+    public static func load(from url: URL?) -> RulesData {
+        guard let url, FileManager.default.fileExists(atPath: url.path) else { return .unusable(.missing) }
+        guard let bytes = try? Data(contentsOf: url), let decoded = try? JSONDecoder().decode(RulesData.self, from: bytes) else {
+            return .unusable(.unreadable)
+        }
+        if let empty = decoded.emptyLists.first { return .unusable(.emptyList(empty)) }
         return decoded
-    }()
+    }
+
+    /// The data file shipped with the package. A missing or broken file is a
+    /// packaging bug; it never crashes, and it never lets protected mail be
+    /// suggested for removal: check `loadProblem`.
+    public static let bundled: RulesData = load(from: Bundle.module.url(forResource: "rules-data", withExtension: "json"))
 
     /// True when `domain` is a listed provider domain or a subdomain of one.
     public func isListProvider(_ domain: String) -> Bool {

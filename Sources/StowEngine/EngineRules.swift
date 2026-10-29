@@ -37,8 +37,8 @@ public enum EngineRules {
     }
 
     /// The verdict stored with each imported message.
-    public static func classifier(_ set: RuleSet) -> RuleClassifier {
-        { headers, own in stored(set.assess(headers, ownAddresses: own)) }
+    public static func classifier(_ set: RuleSet, data: RulesData = .bundled) -> RuleClassifier {
+        { headers, own in stored(set.assess(headers, ownAddresses: own, data: data)) }
     }
 
     public static func priority(_ suggestion: Suggestion) -> Int {
@@ -50,6 +50,9 @@ public enum EngineRules {
     }
 
     public static func stored(_ assessment: Assessment) -> StoredRuleResult {
+        // Without the protection lists nothing stored may select this message for removal,
+        // by suggestion or by rule (A-19, D-517): keep, and no signals.
+        if assessment.rulesUnavailable { return StoredRuleResult(suggestion: .keep, score: 0, signals: []) }
         let suggestion: StoredRuleResult.Suggestion = switch assessment.suggestion {
         case .keep: .keep
         case .deprioritise: .deprioritise

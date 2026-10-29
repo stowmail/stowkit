@@ -94,6 +94,9 @@ public struct Assessment: Hashable, Sendable {
     public var overriddenBy: String?
     /// Set when the message is protected: its suggestion is always keep (D-407).
     public var protection: Protection?
+    /// True when the protection lists could not be loaded: the suggestion is
+    /// keep and nothing about this message may select it for removal (D-517).
+    public var rulesUnavailable = false
 }
 
 /// The full, user-editable rule configuration. Saved as versioned JSON.
@@ -208,6 +211,12 @@ public struct RuleSet: Codable, Hashable, Sendable {
             reasons.insert(protection.reason, at: 0)
         }
         if reasons.isEmpty { reasons.append("No bulk-mail signals found.") }
+
+        // Without the protection lists nothing is suggested for removal (A-19, D-517).
+        if data.loadProblem != nil {
+            return Assessment(score: score, suggestion: .keep, outcomes: outcomes, reasons: [RulesDataProblem.message],
+                              overriddenBy: nil, protection: nil, rulesUnavailable: true)
+        }
 
         return Assessment(score: score, suggestion: suggestion, outcomes: outcomes, reasons: reasons, overriddenBy: overriddenBy,
                           protection: protection)

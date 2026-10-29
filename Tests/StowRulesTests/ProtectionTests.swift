@@ -82,9 +82,9 @@ struct ProtectionTests {
         #expect(try RuleSet.load(from: url).protectedSenders.isEmpty)
     }
 
-    @Test func aVersionOneDataFileStillReads() throws {
+    /// A-19 (D-517): a file without the protection lists is an error, not empty lists.
+    @Test func aDataFileWithoutTheProtectionListsIsRefused() {
         let old = #"{"version": 1, "noReplyLocalParts": ["noreply"], "listProviderDomains": []}"#
-        let data = try JSONDecoder().decode(RulesData.self, from: Data(old.utf8))
-        #expect(data.protectedSubjectKeywords.isEmpty && data.billingSenders.isEmpty)
+        #expect(throws: DecodingError.self) { try JSONDecoder().decode(RulesData.self, from: Data(old.utf8)) }
     }
 }

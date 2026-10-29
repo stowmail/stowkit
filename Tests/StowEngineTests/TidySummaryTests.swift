@@ -29,13 +29,14 @@ import Testing
 
         /// `bulk`: two strong signals (consider deleting); otherwise one (deprioritise) or none.
         @discardableResult
-        func add(from: String, name: String = "Shop", subject: String, signals: Int, daysAgo: Double = 1) throws -> StoredMessageID {
+        func add(from: String, name: String = "Shop", subject: String, signals: Int, daysAgo: Double = 1,
+                 data: RulesData = .bundled) throws -> StoredMessageID {
             uid += 1
             var headers = "From: \(name) <\(from)>\r\nTo: sam@example.com\r\nSubject: \(subject)\r\nMessage-ID: <m\(uid)@example.org>\r\n"
             if signals >= 1 { headers += "List-Unsubscribe: <https://example.org/u>\r\n" }
             if signals >= 2 { headers += "Precedence: bulk\r\n" }
             let text = headers + "\r\nbody \(uid)\r\n"
-            let classifier = EngineRules.classifier(try EngineRules.ruleSet(settings: settings, archive: archive, account: account.id))
+            let classifier = EngineRules.classifier(try EngineRules.ruleSet(settings: settings, archive: archive, account: account.id), data: data)
             let raw = RawMessage(key: RawMessageKey(accountID: account.id, folder: "[Gmail]/All Mail", uidValidity: 1, uid: uid),
                                  internalDate: Date().addingTimeInterval(-daysAgo * 86_400), size: text.utf8.count, bytes: Data(text.utf8))
             guard case .imported(let id) = try Importer(archive: archive, classifier: classifier).importMessage(raw) else {
@@ -44,6 +45,23 @@ import Testing
             ids.append(id)
             return id
         }
+    }
+
+    /// A-19 (D-517): without the protection lists, Tidy up offers nothing and says why,
+    /// and mail classified meanwhile cannot be selected by suggestion or by rule.
+    @Test func withoutTheProtectionListsNothingIsOffered() throws {
+        let f = try Fixture()
+        try f.add(from: "news@shop.example", subject: "Offer", signals: 2)  // classified with good lists
+        let broken = RulesData.unusable(.unreadable)
+        let invoice = try f.add(from: "service@paypal.com", name: "PayPal", subject: "Your receipt", signals: 2, data: broken)
+
+        let summary = try TidySummary.compute(f.archive, settings: f.settings, data: broken)
+        #expect(summary.suggestions.isEmpty)
+        #expect(summary.rulesProblem == RulesDataProblem.unreadable.description)
+        let removal = ArchiveRemoval(archive: f.archive)
+        #expect(try !removal.plan(.suggestion(.considerDeleting)).messageIDs.contains(invoice))
+        #expect(try !removal.plan(.signal("listUnsubscribe")).messageIDs.contains(invoice))
+        #expect(try TidySummary.compute(f.archive, settings: f.settings).rulesProblem == nil)
     }
 
     @Test func groupsMatchRemovalPlansAndNameNoAddressInReasons() throws {

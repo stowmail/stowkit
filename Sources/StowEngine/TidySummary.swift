@@ -64,6 +64,9 @@ public struct TidySummary: Sendable, Equatable {
     public var protectedTotal: Int
     /// Messages in the summary's scope.
     public var messages: Int
+    /// Set when the protection lists could not be loaded: then nothing is offered
+    /// for removal (`suggestions` is empty) and this says why (A-19, D-517).
+    public var rulesProblem: String?
 
     /// The two suggestions Tidy up offers, in the order it shows them.
     public static let offered: [StoredRuleResult.Suggestion] = [.considerDeleting, .deprioritise]
@@ -71,7 +74,7 @@ public struct TidySummary: Sendable, Equatable {
     /// The summary for one account, or every account. `settings` gives the protected
     /// senders' rule set, used only to say why each protected message is protected.
     public static func compute(_ archive: Archive, account: AccountID? = nil, settings: URL = EngineRules.defaultSettingsURL,
-                               now: Date = Date()) throws -> TidySummary {
+                               now: Date = Date(), data: RulesData = .bundled) throws -> TidySummary {
         let protectionRules = try EngineRules.ruleSet(settings: settings, archive: archive, account: account)
         let overrides = try RuleOverrides(archive: archive).list(for: account)
         return try archive.database.read { db in
@@ -94,7 +97,7 @@ public struct TidySummary: Sendable, Equatable {
             let signalSums = signals.map { "sum(instr(',' || coalesce(m.rule_signals, '') || ',', ',\($0.rawValue),') > 0)" }
                 .joined(separator: ", ")
             var groups: [SuggestionGroup] = []
-            for suggestion in offered {
+            for suggestion in offered where data.loadProblem == nil {
                 let rows = try Row.fetchAll(db, sql: """
                     SELECT m.from_address_id AS sender, a.address, a.domain, count(*) AS n, sum(m.size) AS bytes,
                         max(m.internal_date) AS newest, max(m.id) AS newest_id, \(signalSums)
@@ -170,11 +173,11 @@ public struct TidySummary: Sendable, Equatable {
                 """, arguments: StatementArguments(scopeArguments)) {
                 protectedTotal += 1
                 let from = (row["address"] as String?).map { [EmailAddress(name: row["display_name"], address: $0)] } ?? []
-                let kind = protectionRules.protection(MessageHeaders(from: from, subject: row["subject"]))?.kind ?? .subjectKeyword
+                let kind = protectionRules.protection(MessageHeaders(from: from, subject: row["subject"]), data: data)?.kind ?? .subjectKeyword
                 byKind[kind, default: 0] += 1
             }
             return TidySummary(suggestions: groups, sourceStates: states, protectedByKind: byKind,
-                               protectedTotal: protectedTotal, messages: total)
+                               protectedTotal: protectedTotal, messages: total, rulesProblem: data.loadProblem?.description)
         }
     }
 

@@ -32,6 +32,7 @@ struct RulesList: AsyncParsableCommand {
 
     func run() async throws {
         let set = try options.ruleSet()
+        if let problem = RulesData.bundled.loadProblem { print(problem) }
         print("Rules (a rule counts only when on and its signal fires):")
         for rule in set.rules {
             let signal = Signals.signal(rule.signal)
@@ -80,6 +81,7 @@ struct RulesReportCommand: AsyncParsableCommand {
     @Option(help: "One account only (ID, prefix, address or name).") var account: String?
 
     func run() async throws {
+        if let problem = RulesData.bundled.loadProblem { print(problem) }
         CLI.bootstrapLogging()
         let (archive, lock) = try CLIArchive.openForWriting(requireRecovery: false)
         defer { lock.release() }

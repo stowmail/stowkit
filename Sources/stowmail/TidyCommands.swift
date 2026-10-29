@@ -281,6 +281,7 @@ struct Tidy: AsyncParsableCommand {
         let id = try account.map { try CLIArchive.accounts(archive).find($0).account.id }
         let started = ContinuousClock.now
         let summary = try TidySummary.compute(archive, account: id)
+        if let problem = summary.rulesProblem { print(problem) }
         let elapsed = ContinuousClock.now - started
         for group in summary.suggestions {
             let name = group.suggestion == .considerDeleting ? "Consider deleting" : "Deprioritise"
