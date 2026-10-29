@@ -59,8 +59,9 @@ public enum SafeFile {
         }
     }
 
-    /// Creates the temporary file, lets `write` fill it, and flushes it to disk.
-    static func writeTemporary(in folder: URL, _ write: @Sendable (FileHandle) async throws -> Void) async throws -> URL {
+    /// Creates the hidden temporary file in `folder`: `O_EXCL` and `O_NOFOLLOW`,
+    /// permissions 0600. The caller writes it, flushes it and publishes or unlinks it.
+    public static func openTemporary(in folder: URL) throws -> (url: URL, handle: FileHandle) {
         var isFolder: ObjCBool = false
         guard FileManager.default.fileExists(atPath: folder.path, isDirectory: &isFolder), isFolder.boolValue else {
             throw SafeFileError.notAFolder(folder.path)
@@ -68,7 +69,20 @@ public enum SafeFile {
         let temporary = folder.appendingPathComponent(temporaryName(), isDirectory: false)
         let descriptor = open(temporary.path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o600)
         guard descriptor >= 0 else { throw SafeFileError.cannotCreate(folder.path) }
-        let handle = FileHandle(fileDescriptor: descriptor, closeOnDealloc: true)
+        return (temporary, FileHandle(fileDescriptor: descriptor, closeOnDealloc: true))
+    }
+
+    /// Names `temporary` `destination` only if nothing has that name yet
+    /// (`RENAME_EXCL`), with no numbering. Returns false if the name is taken.
+    public static func publishExclusively(_ temporary: URL, as destination: URL) throws -> Bool {
+        if renamex_np(temporary.path, destination.path, UInt32(RENAME_EXCL)) == 0 { return true }
+        guard errno == EEXIST else { throw SafeFileError.writeFailed(destination.deletingLastPathComponent().path) }
+        return false
+    }
+
+    /// Creates the temporary file, lets `write` fill it, and flushes it to disk.
+    static func writeTemporary(in folder: URL, _ write: @Sendable (FileHandle) async throws -> Void) async throws -> URL {
+        let (temporary, handle) = try openTemporary(in: folder)
         do {
             try await write(handle)
             try handle.synchronize()

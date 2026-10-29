@@ -36,18 +36,54 @@ public struct AccountExport: Sendable, Equatable {
 public enum MboxExport {
     /// Writes the file (permissions 0600, never over an existing file).
     /// Returns the number of messages and bytes written.
+    ///
+    /// Written under a hidden temporary name in the same folder, flushed, then
+    /// renamed to `url` without replacing anything (`RENAME_EXCL`), as
+    /// `SafeFile` does (A-20). An error part way (a missing or damaged stored
+    /// file, a full disk) removes the temporary file, so nothing is left under
+    /// `url` and the retry works. A name that appears meanwhile is never
+    /// overwritten and gives `destinationExists`. A temporary file left by a
+    /// killed process is hidden (`.stow-….part`) and never blocks a retry.
     @discardableResult
     public static func export(
         _ archive: Archive, account: AccountID, to url: URL, progress: (@Sendable (Int, Int) -> Void)? = nil
     ) throws -> (messages: Int, bytes: Int) {
-        // One exclusive create: never over a file, or through a link, that appears in the meantime.
-        let descriptor = open(url.path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o600)
-        guard descriptor >= 0 else {
-            throw errno == EEXIST ? MboxExportError.destinationExists(url.path) : MboxExportError.cannotCreate(url.path)
-        }
-        let handle = FileHandle(fileDescriptor: descriptor, closeOnDealloc: true)
-        defer { try? handle.close() }
+        try export(archive, account: account, to: url, progress: progress, beforePublishing: {})
+    }
 
+    /// `export`, with a step tests use to take the name before the rename.
+    static func export(
+        _ archive: Archive, account: AccountID, to url: URL, progress: (@Sendable (Int, Int) -> Void)?,
+        beforePublishing: () -> Void
+    ) throws -> (messages: Int, bytes: Int) {
+        var status = stat()
+        if lstat(url.path, &status) == 0 { throw MboxExportError.destinationExists(url.path) }
+        let temporary: URL
+        let handle: FileHandle
+        do {
+            (temporary, handle) = try SafeFile.openTemporary(in: url.deletingLastPathComponent())
+        } catch SafeFileError.notAFolder(let path) {
+            throw MboxExportError.notAFolder(path)
+        } catch {
+            throw MboxExportError.cannotCreate(url.path)
+        }
+        do {
+            let written = try write(archive, account: account, into: handle, progress: progress)
+            try handle.close()
+            beforePublishing()
+            guard try SafeFile.publishExclusively(temporary, as: url) else { throw MboxExportError.destinationExists(url.path) }
+            return written
+        } catch {
+            try? handle.close()
+            unlink(temporary.path)
+            throw error
+        }
+    }
+
+    /// Every message of `account`, oldest first, into `handle`, then flushed.
+    private static func write(
+        _ archive: Archive, account: AccountID, into handle: FileHandle, progress: (@Sendable (Int, Int) -> Void)?
+    ) throws -> (messages: Int, bytes: Int) {
         let rows = try archive.database.read { db in
             try Row.fetchAll(db, sql: """
                 SELECT raw_hash, raw_state, internal_date FROM messages WHERE account_id = ? ORDER BY internal_date, id
