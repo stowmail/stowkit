@@ -12,6 +12,8 @@ public enum ArchiveSetupError: Error, Equatable, CustomStringConvertible {
     case notAnArchive(String)
     /// The recovery bundle opened, but its keys belong to a different archive.
     case bundleMismatch
+    /// The keys offered for a new recovery key are not the ones the archive was opened with.
+    case keysNotThisArchives
     /// Fewer than two different groups were typed back.
     case tooFewGroups
     /// A typed group does not match the recovery key being confirmed.
@@ -30,6 +32,8 @@ public enum ArchiveSetupError: Error, Equatable, CustomStringConvertible {
             "Save your recovery key first. Run `stowmail recovery-key create` to make one and confirm it; until then no mail is imported."
         case .notAnArchive(let path): "There is no Stow archive at \(path)."
         case .bundleMismatch: "The recovery bundle's keys do not open the archive beside it. Nothing was changed."
+        case .keysNotThisArchives:
+            "The archive keys in this Mac's Keychain are not the ones this archive was opened with, so no recovery key was made. Nothing was changed."
         case .tooFewGroups: "Type two different groups of the recovery key to confirm it."
         case .groupMismatch: "That does not match. Check the groups you saved and try again."
         case .notCurrentRecoveryKey:
@@ -137,7 +141,10 @@ public enum ArchiveSetup {
     /// `keys.recovery.pending`, replacing any earlier pending one. The live
     /// bundle and its confirmation are left alone, so sync carries on and the
     /// old key keeps working until `confirm` (A-04, D-480).
+    /// Refuses keys other than the ones the archive was opened with (A-09), so
+    /// a Keychain changed meanwhile can never end up in the bundle.
     public static func rotate(_ archive: Archive, keys: ArchiveKeys) throws -> RecoveryKey {
+        guard archive.isOpened(with: keys) else { throw ArchiveSetupError.keysNotThisArchives }
         let recoveryKey = RecoveryKey.generate()
         try RecoveryBundle.write(keys, archiveID: try archive.archiveID(), recoveryKey: recoveryKey, to: archive.location.root,
                                  name: RecoveryBundle.pendingFileName, sync: archive.diskSync)
@@ -188,15 +195,18 @@ public enum ArchiveSetup {
             // The key's bundle was discarded (the prompt gave up) and no other is there.
             throw ArchiveSetupError.notCurrentRecoveryKey
         }
-        let archiveID: String
+        let unwrapped: (keys: ArchiveKeys, archiveID: String)
         do {
-            archiveID = try RecoveryBundle.unwrap(in: root, name: name, with: recoveryKey).archiveID
+            unwrapped = try RecoveryBundle.unwrap(in: root, name: name, with: recoveryKey)
         } catch RecoveryBundleError.wrongKey {
             throw ArchiveSetupError.notCurrentRecoveryKey
         }
         // The bundle checked must be the one recorded as confirmed.
         guard try RecoveryBundle.fingerprint(in: root, name: name) == fingerprint else { throw ArchiveSetupError.notCurrentRecoveryKey }
-        guard try archive.archiveID() == archiveID else { throw ArchiveSetupError.bundleMismatch }
+        // Same archive, and the very keys it was opened with (A-09).
+        guard try archive.archiveID() == unwrapped.archiveID, archive.isOpened(with: unwrapped.keys) else {
+            throw ArchiveSetupError.bundleMismatch
+        }
         try record(archive, bundle: fingerprint, at: date)
         if name == RecoveryBundle.pendingFileName {
             try RecoveryBundle.promotePending(in: root, sync: archive.diskSync)

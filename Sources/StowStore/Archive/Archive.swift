@@ -14,11 +14,14 @@ public final class Archive: Sendable {
     public let attachmentFiles: EncryptedFileStore
     /// How files and commits are flushed to disk; tests pass one that records the order.
     public let diskSync: DiskSync
+    /// A digest of the keys this archive was opened with, not the keys (A-09, D-486).
+    let keysDigest: KeysDigest
 
     public init(location: ArchiveLocation, database: DatabasePool, keys: ArchiveKeys, diskSync: DiskSync = .system) {
         self.location = location
         self.database = database
         self.diskSync = diskSync
+        keysDigest = keys.digest
         rawFiles = EncryptedFileStore(directory: location.rawDirectory, kind: .raw, keys: keys)
         attachmentFiles = EncryptedFileStore(directory: location.attachmentsDirectory, kind: .attachment, keys: keys)
     }
@@ -52,6 +55,12 @@ public final class Archive: Sendable {
     }
 
     // MARK: - Archive facts
+
+    /// Whether `keys` are the ones this archive was opened with. A recovery
+    /// bundle may only ever wrap those (A-09).
+    public func isOpened(with keys: ArchiveKeys) -> Bool {
+        keysDigest.matches(keys.digest)
+    }
 
     /// A random ID given to the archive when it was created. The recovery
     /// bundle carries it, so a bundle can only unlock its own archive (D-031).

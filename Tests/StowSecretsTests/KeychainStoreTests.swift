@@ -24,6 +24,18 @@ let dataProtectionAvailable: Bool = {
 }()
 
 @Suite struct KeychainStoreTests {
+    /// A-09: adding an item that exists fails and leaves its value as it was;
+    /// `set` still replaces, for tokens and the licence record.
+    @Test func addNeverReplacesAnExistingItem() throws {
+        let keychain = makeTestKeychain()
+        defer { try? keychain.deleteAll() }
+        try keychain.add(Data("first".utf8), for: "item")
+        #expect(throws: KeychainError.alreadyExists) { try keychain.add(Data("second".utf8), for: "item") }
+        #expect(try keychain.get("item") == Data("first".utf8))
+        try keychain.set(Data("third".utf8), for: "item")
+        #expect(try keychain.get("item") == Data("third".utf8))
+    }
+
     @Test func roundTripLeavesNothingBehind() throws {
         let keychain = makeTestKeychain()
         defer { try? keychain.deleteAll() }

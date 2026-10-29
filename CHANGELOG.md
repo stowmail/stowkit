@@ -7,6 +7,7 @@ Changes to StowKit and the `stowmail` command-line tool, newest first. Security 
 ### Security
 
 - **Medium:** making a new recovery key (`stowmail recovery-key rotate`, `create`, `init`) replaced the archive's recovery bundle, `keys.recovery`, before the new key had been confirmed. Stopping at the prompt (Ctrl-C, a closed terminal, three mistyped groups) left a bundle that only the unsaved key opened, and sync paused (second review A-04). A new key is now written as `keys.recovery.pending` and replaces `keys.recovery` only after it is confirmed; the confirmation is committed durably first, and both files and the folder are flushed to the drive (`F_FULLFSYNC`). A confirmation stopped before the rename is finished by the next writer. Until then the old key keeps working and sync carries on. A pending key nobody confirmed is deleted when the prompt gives up, and `status` and `doctor` mention one that is left. The file format is unchanged.
+- **Low:** two `stowmail init` runs at once, or the app and the CLI, could both find no archive keys in the Keychain and both save a pair, the second replacing the first (second review A-09). Archive keys are now added with `KeychainStore.add`, which never replaces an item: one caller makes the pair and the other is refused. `rotate` also refuses keys other than the ones the archive was opened with, and `confirm` refuses a bundle whose keys differ from them, compared by a SHA-256 digest in constant time rather than by keeping a copy of the keys. Existing Keychain items are not changed.
 
 ### Fixed
 

@@ -35,6 +35,17 @@ public struct ArchiveKeys: Sendable {
         derive(info: "ee.getstow.file-naming.v1")
     }
 
+    /// A SHA-256 over both keys, to tell whether two sets of keys are the same
+    /// without keeping a second copy of either (A-09, D-486). It reveals nothing
+    /// about the keys: they are 256 random bits each.
+    public var digest: KeysDigest {
+        var hash = SHA256()
+        hash.update(data: Data("ee.getstow.archive-keys.digest.v1".utf8))
+        databaseKey.withUnsafeBytes { hash.update(bufferPointer: $0) }
+        fileKey.withUnsafeBytes { hash.update(bufferPointer: $0) }
+        return KeysDigest(bytes: Data(hash.finalize()))
+    }
+
     private func derive(info: String) -> SymmetricKey {
         HKDF<SHA256>.deriveKey(
             inputKeyMaterial: fileKey,
@@ -42,6 +53,18 @@ public struct ArchiveKeys: Sendable {
             info: Data(info.utf8),
             outputByteCount: 32
         )
+    }
+}
+
+/// A digest of an archive's two keys (`ArchiveKeys.digest`). Compared in constant time.
+public struct KeysDigest: Sendable {
+    let bytes: Data
+
+    public func matches(_ other: KeysDigest) -> Bool {
+        guard bytes.count == other.bytes.count else { return false }
+        var difference: UInt8 = 0
+        for (a, b) in zip(bytes, other.bytes) { difference |= a ^ b }
+        return difference == 0
     }
 }
 
@@ -109,32 +132,36 @@ public struct KeyManager: Sendable {
     /// Generates both keys and saves them. Fails if any key already exists.
     @discardableResult
     public func createKeys() throws -> ArchiveKeys {
-        guard try keychain.get(Self.databaseKeyItem) == nil,
-              try keychain.get(Self.fileKeyItem) == nil
-        else { throw KeyManagerError.keysAlreadyExist }
-
         let keys = ArchiveKeys(databaseKey: SymmetricKey(size: .bits256), fileKey: SymmetricKey(size: .bits256))
-        try keychain.set(keys.databaseKeyData, for: Self.databaseKeyItem)
-        do {
-            try keychain.set(keys.fileKey.withUnsafeBytes { Data($0) }, for: Self.fileKeyItem)
-        } catch {
-            try? keychain.delete(Self.databaseKeyItem)
-            throw error
-        }
+        try addBoth(keys)
         return keys
     }
 
     /// Saves keys recovered from the recovery bundle (D-031). Refuses if any
     /// Stow key is already in the Keychain: recovery never overwrites keys.
     public func installRecovered(_ keys: ArchiveKeys) throws {
+        try addBoth(keys)
+    }
+
+    /// Adds both items, never replacing one (A-09). Two callers at once (two
+    /// `init` runs, or the app and the CLI) can both pass a "nothing there yet"
+    /// check, so the add itself is the check: whoever adds the database key
+    /// first goes on, the other is refused. If the file key cannot be added,
+    /// the database key this call added is taken out again; nothing else is.
+    private func addBoth(_ keys: ArchiveKeys) throws {
         guard try keychain.get(Self.databaseKeyItem) == nil,
               try keychain.get(Self.fileKeyItem) == nil
         else { throw KeyManagerError.keysAlreadyExist }
-        try keychain.set(keys.databaseKeyData, for: Self.databaseKeyItem)
         do {
-            try keychain.set(keys.fileKey.withUnsafeBytes { Data($0) }, for: Self.fileKeyItem)
+            try keychain.add(keys.databaseKeyData, for: Self.databaseKeyItem)
+        } catch KeychainError.alreadyExists {
+            throw KeyManagerError.keysAlreadyExist
+        }
+        do {
+            try keychain.add(keys.fileKey.withUnsafeBytes { Data($0) }, for: Self.fileKeyItem)
         } catch {
             try? keychain.delete(Self.databaseKeyItem)
+            if case KeychainError.alreadyExists = error { throw KeyManagerError.keysAlreadyExist }
             throw error
         }
     }

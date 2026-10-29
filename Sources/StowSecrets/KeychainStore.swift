@@ -30,6 +30,8 @@ public enum KeychainError: Error, Equatable, CustomStringConvertible {
     case fileVaultRequired
     case unexpectedStatus(OSStatus)
     case unexpectedData
+    /// `add` found an item of that name already there; it was left unchanged.
+    case alreadyExists
 
     public var description: String {
         switch self {
@@ -41,6 +43,8 @@ public enum KeychainError: Error, Equatable, CustomStringConvertible {
             "Keychain error \(status): \(SecCopyErrorMessageString(status, nil) as String? ?? "unknown")"
         case .unexpectedData:
             "Keychain returned data in an unexpected form"
+        case .alreadyExists:
+            "The Keychain already holds that item; it was left unchanged"
         }
     }
 
@@ -103,7 +107,21 @@ public struct KeychainStore: Sendable {
         }
     }
 
-    /// Saves `data` under `item`, replacing any existing value.
+    /// Saves `data` under `item` only if no item of that name exists. The
+    /// check and the write are one Keychain call, so two processes adding at
+    /// once cannot both succeed (A-09). An existing item is never touched.
+    public func add(_ data: Data, for item: String) throws {
+        try checkBackendAllowed()
+        let status = SecItemAdd(addAttributes(item: item, data: data) as CFDictionary, nil)
+        switch status {
+        case errSecSuccess: return
+        case errSecDuplicateItem: throw KeychainError.alreadyExists
+        default: throw KeychainError(status: status)
+        }
+    }
+
+    /// Saves `data` under `item`, replacing any existing value. For tokens and
+    /// the licence record; archive keys use `add`.
     public func set(_ data: Data, for item: String) throws {
         try checkBackendAllowed()
         let status = SecItemAdd(addAttributes(item: item, data: data) as CFDictionary, nil)
