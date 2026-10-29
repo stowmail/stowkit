@@ -29,6 +29,19 @@ public struct MCPAuditEntry: Codable, Sendable, Equatable {
     }
 }
 
+extension MCPAuditEntry {
+    /// The line `stowmail mcp log` prints for this entry, after `time`. The
+    /// client name, tool and arguments come from an assistant, which an email
+    /// can steer, so each goes through `ArchiveTools.oneLine`: no escape
+    /// sequence, line break or bidi control reaches the terminal (A-16). The
+    /// audit file itself keeps what was sent.
+    public func printedLine(time: String) -> String {
+        let clean = ArchiveTools.oneLine
+        let arguments = self.arguments.sorted { $0.key < $1.key }.map { "\(clean($0.key))=\(clean($0.value))" }.joined(separator: " ")
+        return "\(time)  \(clean(client ?? "unknown client"))  \(clean(tool))  \(arguments)  -> \(results)\(error ? " (error)" : "")"
+    }
+}
+
 /// Records every tool call to `mcp-audit.log` beside Stow's other logs, one JSON
 /// object per line (D-081). The folder is 0700 and the file 0600, as for the
 /// main log (D-040). Rotated at 5 MB, one old file kept.

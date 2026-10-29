@@ -94,8 +94,7 @@ struct MCPCommand: AsyncParsableCommand {
             let entries = try await MCPCommand.auditLog.recent(last)
             if entries.isEmpty { print("No requests yet.") }
             for entry in entries {
-                let arguments = entry.arguments.sorted { $0.key < $1.key }.map { "\($0.key)=\($0.value)" }.joined(separator: " ")
-                print("\(CLI.time(entry.at))  \(entry.client ?? "unknown client")  \(entry.tool)  \(arguments)  -> \(entry.results)\(entry.error ? " (error)" : "")")
+                print(entry.printedLine(time: CLI.time(entry.at)))
             }
         }
     }
