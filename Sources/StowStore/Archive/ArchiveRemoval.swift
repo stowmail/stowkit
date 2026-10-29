@@ -213,22 +213,36 @@ public struct ArchiveRemoval: Sendable {
     /// batches; files afterwards, only once nothing refers to them. An
     /// interruption between the two leaves unused files, which `stowmail verify`
     /// reports and `sweepUnusedFiles` deletes.
+    ///
+    /// Each batch's commit is made durable before its first file is deleted
+    /// (A-11): the archive's usual commit reaches the disk only at the next
+    /// checkpoint, so after a power cut the removed rows could come back
+    /// pointing at files already gone.
     public func remove(_ messageIDs: [StoredMessageID], reason: String, progress: (@Sendable (Int, Int) -> Void)? = nil) throws -> RemovalResult {
         var result = RemovalResult()
         for start in stride(from: 0, to: messageIDs.count, by: 200) {
             let batch = Array(messageIDs[start..<min(start + 200, messageIDs.count)])
-            let (rawFiles, attachmentFiles) = try archive.database.write { db -> ([Data], [Data]) in
-                var raw: [Data] = []
-                var attachments: [Data] = []
-                for id in batch {
-                    guard let unused = try removeOne(db, id: id, reason: reason) else { continue }
-                    raw += unused.raw
-                    attachments += unused.attachments
-                    result.messages += 1
-                    result.tombstones.append(unused.tombstone)
+            var rawFiles: [Data] = []
+            var attachmentFiles: [Data] = []
+            try archive.database.writeWithoutTransaction { db in
+                try Archive.durably(db) {
+                    try db.inTransaction {
+                        rawFiles = []
+                        attachmentFiles = []
+                        var batchResult = result
+                        for id in batch {
+                            guard let unused = try removeOne(db, id: id, reason: reason) else { continue }
+                            rawFiles += unused.raw
+                            attachmentFiles += unused.attachments
+                            batchResult.messages += 1
+                            batchResult.tombstones.append(unused.tombstone)
+                        }
+                        result = batchResult
+                        return .commit
+                    }
                 }
-                return (raw, attachments)
             }
+            try archive.diskSync.note(.durableCommit)
             result.bytesFreed += deleteFiles(rawFiles, in: archive.rawFiles) + deleteFiles(attachmentFiles, in: archive.attachmentFiles)
             result.filesDeleted += rawFiles.count + attachmentFiles.count
             progress?(min(start + batch.count, messageIDs.count), messageIDs.count)
@@ -286,6 +300,7 @@ public struct ArchiveRemoval: Sendable {
         var bytes = 0
         for hash in hashes {
             bytes += EncryptedFileStore.fileSize(store.url(for: hash)) ?? 0
+            try? archive.diskSync.note(.unlink(store.url(for: hash).path))
             try? store.delete(hash)
         }
         return bytes

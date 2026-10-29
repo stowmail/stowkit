@@ -196,6 +196,22 @@ struct Benchmarks {
         print(String(format: "BENCH first sync with attachments: %@ s", times.map { String(format: "%.2f", $0) }.joined(separator: ", ")))
     }
 
+    // MARK: Removing mail (A-11)
+
+    /// Removes 10,000 messages (one in three with an attachment) in the usual
+    /// batches of 200. Run before and after a change to how removal commits.
+    @Test func removeTenThousand() async throws {
+        var generator = MessageGenerator(seed: 33)
+        let messages = (0..<10_000).map { generator.message(uid: UInt32($0 + 1), attachment: $0 % 3 == 0 ? .text : nil) }
+        let (archive, root) = try freshArchive()
+        defer { try? FileManager.default.removeItem(at: root) }
+        _ = try await timeImport(archive, messages, extractText: false)
+        let ids = try await archive.database.read { db in try Int64.fetchAll(db, sql: "SELECT id FROM messages ORDER BY id") }
+        let start = Date()
+        let result = try ArchiveRemoval(archive: archive).remove(ids, reason: "bench")
+        print(String(format: "BENCH remove 10,000: %.2f s (%d messages, %d files)", Date().timeIntervalSince(start), result.messages, result.filesDeleted))
+    }
+
     // MARK: MCP queries alongside import (Phase 3 QA)
 
     /// Imports into an archive that already holds mail, alone and then while a
