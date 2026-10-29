@@ -51,7 +51,7 @@ import Testing
         let test = try TestArchive()
         defer { test.remove() }
         let inside = try test.archive.database.writeWithoutTransaction { db in
-            try Archive.durably(db) {
+            try test.archive.durably(db) {
                 (try Int.fetchOne(db, sql: "PRAGMA synchronous"), try Int.fetchOne(db, sql: "PRAGMA fullfsync"))
             }
         }

@@ -91,7 +91,7 @@ public final class Archive: Sendable {
     /// transaction the writer syncs the WAL with `F_FULLFSYNC` (A-04).
     public func setMetaDurably(_ values: KeyValuePairs<String, String?>) throws {
         try database.writeWithoutTransaction { db in
-            try Self.durably(db) {
+            try durably(db) {
                 try db.inTransaction {
                     for (key, value) in values {
                         if let value {
@@ -106,12 +106,12 @@ public final class Archive: Sendable {
                 }
             }
         }
-        try diskSync.note(.durableCommit)
     }
 
     /// Runs `body` with every commit on this connection synced with `F_FULLFSYNC`,
     /// then puts the connection's settings back. Only outside a transaction.
-    static func durably<T>(_ db: Database, _ body: () throws -> T) throws -> T {
+    /// Records `.durableCommit` once `body` has returned.
+    func durably<T>(_ db: Database, _ body: () throws -> T) throws -> T {
         let synchronous = try Int.fetchOne(db, sql: "PRAGMA synchronous") ?? 1
         let fullfsync = try Int.fetchOne(db, sql: "PRAGMA fullfsync") ?? 0
         try db.execute(sql: "PRAGMA synchronous = FULL")
@@ -120,7 +120,9 @@ public final class Archive: Sendable {
             try? db.execute(sql: "PRAGMA synchronous = \(synchronous)")
             try? db.execute(sql: "PRAGMA fullfsync = \(fullfsync)")
         }
-        return try body()
+        let value = try body()
+        try diskSync.note(.durableCommit)
+        return value
     }
 
     // MARK: - Accounts

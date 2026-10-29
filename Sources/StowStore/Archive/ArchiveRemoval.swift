@@ -225,7 +225,7 @@ public struct ArchiveRemoval: Sendable {
             var rawFiles: [Data] = []
             var attachmentFiles: [Data] = []
             try archive.database.writeWithoutTransaction { db in
-                try Archive.durably(db) {
+                try archive.durably(db) {
                     try db.inTransaction {
                         rawFiles = []
                         attachmentFiles = []
@@ -242,7 +242,6 @@ public struct ArchiveRemoval: Sendable {
                     }
                 }
             }
-            try archive.diskSync.note(.durableCommit)
             result.bytesFreed += deleteFiles(rawFiles, in: archive.rawFiles) + deleteFiles(attachmentFiles, in: archive.attachmentFiles)
             result.filesDeleted += rawFiles.count + attachmentFiles.count
             progress?(min(start + batch.count, messageIDs.count), messageIDs.count)
