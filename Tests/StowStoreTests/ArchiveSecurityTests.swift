@@ -42,7 +42,9 @@ import Testing
         defer { test.remove() }
         let files = test.files(in: test.location.rawDirectory) + test.files(in: test.location.attachmentsDirectory)
         #expect(files.count > 20)
-        let keywords = ["LANTERN-COAST-1150", "PERIWINKLE", "%PDF", "Return-Path", "PNG", "word/document.xml", "example.org"]
+        // The full PNG signature, not "PNG": three bytes turn up in 64 KB of ciphertext
+        // about once in 260 runs (CI run 40943094256, at byte 21,756 of an encrypted file).
+        let keywords = ["LANTERN-COAST-1150", "PERIWINKLE", "%PDF", "Return-Path", "\u{89}PNG\r\n\u{1A}\n", "word/document.xml", "example.org"]
         for file in files {
             #expect(file.lastPathComponent.count == 64)
             #expect(file.lastPathComponent.allSatisfy { $0.isHexDigit })
