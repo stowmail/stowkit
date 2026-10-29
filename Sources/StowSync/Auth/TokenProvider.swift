@@ -19,6 +19,10 @@ public enum SignInCredential: Sendable {
 /// - An account already marked is refused at once, without touching the network.
 /// - A refused app-specific password marks the account the same way; it is
 ///   never retried, since there is nothing to refresh (D-467 item 5).
+/// - A removed (disconnected) account is refused before anything else, and a
+///   refresh saves its tokens only into an item that still exists, for an
+///   account still connected, so it never brings back what `account remove`
+///   deleted (A-12, D-513).
 public actor TokenProvider {
     let tokenStore: TokenStore
     let passwordStore: PasswordStore
@@ -48,6 +52,7 @@ public actor TokenProvider {
         guard let record = try registry.record(accountID) else {
             throw AccountDirectoryError.notFound(accountID.rawValue)
         }
+        guard record.isConnected else { throw SyncError.accountRemoved(accountID) }
         guard record.account.provider.oauth == nil else {
             return .accessToken(try await accessToken(for: accountID, forceRefresh: forceRefresh))
         }
@@ -75,6 +80,7 @@ public actor TokenProvider {
         guard let oauth = record.account.provider.oauth else {
             throw SyncError.protocolViolation("This account signs in with an app-specific password, not a token")
         }
+        guard record.isConnected else { throw SyncError.accountRemoved(accountID) }
         guard !record.needsSignIn else { throw SyncError.needsSignIn(accountID) }
         guard let tokens = try tokenStore.tokens(for: accountID) else {
             try registry.setNeedsSignIn(accountID, true)
@@ -85,7 +91,14 @@ public actor TokenProvider {
         logger.info("Refreshing access token", metadata: ["account": "\(accountID)"])
         do {
             let refreshed = try await clientFor(oauth).refresh(tokens)
-            try tokenStore.save(refreshed, for: accountID)
+            // The account may have been removed while the refresh was in flight:
+            // drop the new tokens rather than save them for it.
+            guard try registry.record(accountID)?.isConnected == true,
+                  try tokenStore.replace(refreshed, for: accountID)
+            else {
+                logger.notice("Account removed during a token refresh; the new tokens were dropped", metadata: ["account": "\(accountID)"])
+                throw SyncError.accountRemoved(accountID)
+            }
             return refreshed.accessToken
         } catch OAuthError.invalidGrant, OAuthError.noRefreshToken {
             logger.warning("Refresh token rejected; account needs sign-in", metadata: ["account": "\(accountID)"])

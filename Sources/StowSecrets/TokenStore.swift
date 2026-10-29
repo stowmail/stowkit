@@ -47,9 +47,23 @@ public struct TokenStore: Sendable {
         "oauth.\(accountID.rawValue)"
     }
 
+    /// Saves the tokens of a sign-in, adding the item or replacing it.
     public func save(_ tokens: OAuthTokens, for accountID: AccountID) throws {
         let data = try JSONEncoder().encode(tokens)
         try keychain.set(data, for: Self.itemName(for: accountID))
+    }
+
+    /// Replaces the saved tokens after a refresh, only if the item is still
+    /// there (A-12, D-513). Returns false, writing nothing, when it is gone:
+    /// the account was removed while the refresh was in flight.
+    public func replace(_ tokens: OAuthTokens, for accountID: AccountID) throws -> Bool {
+        let data = try JSONEncoder().encode(tokens)
+        do {
+            try keychain.update(data, for: Self.itemName(for: accountID))
+            return true
+        } catch KeychainError.itemNotFound {
+            return false
+        }
     }
 
     /// The saved tokens, or nil if the account has never signed in (or was removed).

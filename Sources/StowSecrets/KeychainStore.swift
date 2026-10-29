@@ -32,6 +32,8 @@ public enum KeychainError: Error, Equatable, CustomStringConvertible {
     case unexpectedData
     /// `add` found an item of that name already there; it was left unchanged.
     case alreadyExists
+    /// `update` found no item of that name; nothing was written.
+    case itemNotFound
 
     public var description: String {
         switch self {
@@ -45,6 +47,8 @@ public enum KeychainError: Error, Equatable, CustomStringConvertible {
             "Keychain returned data in an unexpected form"
         case .alreadyExists:
             "The Keychain already holds that item; it was left unchanged"
+        case .itemNotFound:
+            "The Keychain no longer holds that item; nothing was written"
         }
     }
 
@@ -134,6 +138,21 @@ public struct KeychainStore: Sendable {
             guard updateStatus == errSecSuccess else { throw KeychainError(status: updateStatus) }
         default:
             throw KeychainError(status: status)
+        }
+    }
+
+    /// Replaces the value of an existing item and never creates one (A-12), so
+    /// a write that races a deletion cannot bring the item back. Writes
+    /// `kSecValueData` only, exactly as `set` does for an existing item; the
+    /// item's attributes and access settings are not touched.
+    public func update(_ data: Data, for item: String) throws {
+        try checkBackendAllowed()
+        let update: [String: Any] = [kSecValueData as String: data]
+        let status = SecItemUpdate(baseQuery(item: item) as CFDictionary, update as CFDictionary)
+        switch status {
+        case errSecSuccess: return
+        case errSecItemNotFound: throw KeychainError.itemNotFound
+        default: throw KeychainError(status: status)
         }
     }
 

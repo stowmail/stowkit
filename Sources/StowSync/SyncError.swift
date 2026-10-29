@@ -7,6 +7,9 @@ public enum SyncError: Error, Equatable, CustomStringConvertible {
     /// The refresh token was rejected or is missing. The account is marked and
     /// sync will not try again until the user signs in (D-110).
     case needsSignIn(AccountID)
+    /// The account was removed (disconnected) from Stow. Nothing is refreshed
+    /// or saved for it; adding the address again reconnects it (A-12, D-513).
+    case accountRemoved(AccountID)
     /// The server rejected XOAUTH2 even with a freshly refreshed token.
     case authenticationFailed(String)
     /// Sign-in worked but there is no IMAP mailbox behind the account, for
@@ -52,6 +55,8 @@ public enum SyncError: Error, Equatable, CustomStringConvertible {
         switch self {
         case .needsSignIn(let id):
             "Account \(id) needs to sign in again. Run `stowmail account signin \(id)`."
+        case .accountRemoved(let id):
+            "Account \(id) was removed from Stow, so it no longer signs in or syncs. Add the address again with `stowmail account add` to reconnect it."
         case .authenticationFailed(let text):
             "The mail server rejected the sign-in (\(text)). Try `stowmail account signin`."
         case .mailboxUnavailable(let text):
