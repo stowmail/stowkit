@@ -62,6 +62,9 @@ struct Doctor: AsyncParsableCommand {
                 case .unconfirmed: print("  recovery key confirmed: NO (run `stowmail recovery-key create`)")
                 case .none: print("  recovery key: NONE MADE YET (run `stowmail recovery-key create`)")
                 }
+                if ArchiveSetup.hasUnconfirmedNewKey(archive) {
+                    print("  a new recovery key was made but not confirmed; your old key still works")
+                }
                 // Nil also for an archive no v2 build has opened for writing yet.
                 if let unread = try? UnreadText.collect(archive) {
                     print(unread.total > 0 ? "  \(unread.summary)" : "  emails Stow could not read in full: none")

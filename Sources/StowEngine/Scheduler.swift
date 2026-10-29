@@ -165,6 +165,11 @@ public actor Scheduler {
         guard ArchiveSetup.recoveryState(archive) == .confirmed else { return (.paused(ArchiveSetupError.recoveryNotConfirmed.description), [:]) }
         guard let lock = try? ArchiveLock.acquire(archive.location) else { return (.busy, [:]) }
         defer { lock.release() }
+        // A confirmed key whose bundle was not yet renamed into place (A-04). Sync
+        // goes on either way: the confirmation stands, and the next turn tries again.
+        if (try? ArchiveSetup.finishConfirmedKey(archive)) == true {
+            logger.notice("Finished replacing the recovery bundle with the confirmed new key")
+        }
         if recordedHold != nil || Self.heldReason(archive) != nil {
             // The hold has lifted: `stowmail status` should stop showing it.
             try? archive.setMeta(Self.heldMetaKey, nil)

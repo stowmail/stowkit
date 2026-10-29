@@ -35,17 +35,18 @@ public enum ArchiveSetupError: Error, Equatable, CustomStringConvertible {
         case .notCurrentRecoveryKey:
             "That recovery key has been replaced by a newer one, so it cannot be confirmed. Make a new key and confirm that one."
         case .recoveryAlreadyConfirmed:
-            "This archive already has a confirmed recovery key. To replace it, run `stowmail recovery-key rotate`; the old key then stops working."
+            "This archive already has a confirmed recovery key. To replace it, run `stowmail recovery-key rotate`; the old key keeps working until the new one is confirmed."
         }
     }
 }
 
 /// Where an archive is with its recovery key (D-031, D-055).
 public enum RecoveryState: Sendable, Equatable {
-    /// No recovery bundle beside the archive: no key has been made yet.
+    /// No recovery bundle beside the archive, live or pending: no key has been made yet.
     case none
     /// A key was made but not typed back. It cannot be shown again, so the
-    /// next step is a new key (`makeRecoveryKey`).
+    /// next step is a new key (`makeRecoveryKey`). Also a first key still
+    /// waiting as `keys.recovery.pending` (D-480).
     case unconfirmed
     /// The key was typed back. Mail may be imported.
     case confirmed
@@ -59,6 +60,13 @@ public enum RecoveryState: Sendable, Equatable {
 /// any real mail is imported (D-055, D-084). Rotating makes a new one (the only
 /// way to see a key again) and re-wraps the bundle; the archive keys themselves
 /// never change, so nothing is re-encrypted.
+///
+/// A new key waits as `keys.recovery.pending` until it is confirmed (A-04,
+/// D-480). The confirmation is recorded with the pending bundle's fingerprint
+/// in one durable commit, and only then does the pending file replace
+/// `keys.recovery`. Stopping anywhere leaves the old key opening the live
+/// bundle, or the new one confirmed and promoted at the next writer open
+/// (`finishConfirmedKey`).
 public enum ArchiveSetup {
     static let confirmedKey = "recovery_confirmed_at"
     /// The fingerprint of the bundle that was confirmed (D-086). Empty when
@@ -89,11 +97,14 @@ public enum ArchiveSetup {
     }
 
     /// A confirmation counts only with the bundle it confirmed still beside the
-    /// archive: a bundle replaced without a new confirmation, by a rotation
-    /// that failed half way or by a file copied in, reads as unconfirmed (D-086).
+    /// archive: a bundle replaced without a new confirmation, or a file copied
+    /// in, reads as unconfirmed (D-086). A recorded fingerprint naming the
+    /// pending bundle is a confirmed key not yet promoted, which still counts.
     public static func recoveryState(_ archive: Archive) -> RecoveryState {
         let root = archive.location.root
-        guard RecoveryBundle.exists(in: root) else { return .none }
+        let live = RecoveryBundle.exists(in: root)
+        let pending = RecoveryBundle.exists(in: root, name: RecoveryBundle.pendingFileName)
+        guard live || pending else { return .none }
         guard isConfirmed(archive) else { return .unconfirmed }
         let recorded: String?
         do {
@@ -102,52 +113,94 @@ public enum ArchiveSetup {
             return .unconfirmed
         }
         // Confirmed before D-086, which did not record the bundle: trusted as before.
-        guard let recorded else { return .confirmed }
-        return recorded == (try? RecoveryBundle.fingerprint(in: root)) ? .confirmed : .unconfirmed
+        guard let recorded else { return live ? .confirmed : .unconfirmed }
+        if live, recorded == (try? RecoveryBundle.fingerprint(in: root)) { return .confirmed }
+        if pending, recorded == (try? RecoveryBundle.fingerprint(in: root, name: RecoveryBundle.pendingFileName)) { return .confirmed }
+        return .unconfirmed
+    }
+
+    /// Whether a new key was made but never confirmed: the pending bundle is
+    /// there and is not the confirmed one. The old key, if any, still works.
+    public static func hasUnconfirmedNewKey(_ archive: Archive) -> Bool {
+        let root = archive.location.root
+        guard let pending = try? RecoveryBundle.fingerprint(in: root, name: RecoveryBundle.pendingFileName) else { return false }
+        return (try? archive.meta(confirmedBundleKey)) != pending
     }
 
     /// Makes a new recovery key for the archive and returns it to show once.
-    /// Any earlier key stops working and the state becomes `unconfirmed`.
+    /// It waits beside the archive until confirmed; any earlier key keeps working until then.
     public static func makeRecoveryKey(_ archive: Archive, keyManager: KeyManager) throws -> RecoveryKey {
         try rotate(archive, keys: try keyManager.loadKeys())
     }
 
-    /// Makes a new recovery key and wraps the archive keys with it, replacing
-    /// the old bundle. The new key is unconfirmed until `confirm`.
-    ///
-    /// The confirmation is cleared before the bundle is written, so a failure
-    /// in between leaves an unconfirmed archive (sync pauses) rather than a
-    /// "confirmed" one whose bundle no shown key opens (D-086).
+    /// Makes a new recovery key and wraps the archive keys with it as
+    /// `keys.recovery.pending`, replacing any earlier pending one. The live
+    /// bundle and its confirmation are left alone, so sync carries on and the
+    /// old key keeps working until `confirm` (A-04, D-480).
     public static func rotate(_ archive: Archive, keys: ArchiveKeys) throws -> RecoveryKey {
         let recoveryKey = RecoveryKey.generate()
-        let archiveID = try archive.archiveID()
-        try archive.setMeta(confirmedKey, nil)
-        try archive.setMeta(confirmedBundleKey, nil)
-        try RecoveryBundle.write(keys, archiveID: archiveID, recoveryKey: recoveryKey, to: archive.location.root)
+        try RecoveryBundle.write(keys, archiveID: try archive.archiveID(), recoveryKey: recoveryKey, to: archive.location.root,
+                                 name: RecoveryBundle.pendingFileName, sync: archive.diskSync)
         return recoveryKey
+    }
+
+    /// Finishes a confirmation that stopped between its commit and the rename:
+    /// when the recorded fingerprint names the pending bundle, it replaces the
+    /// live one. It writes, so callers hold the writer lock (D-035): the CLI's
+    /// `openForWriting` and the scheduler's turn. Returns whether it promoted.
+    @discardableResult
+    public static func finishConfirmedKey(_ archive: Archive) throws -> Bool {
+        let root = archive.location.root
+        guard let pending = try? RecoveryBundle.fingerprint(in: root, name: RecoveryBundle.pendingFileName),
+              isConfirmed(archive), try archive.meta(confirmedBundleKey) == pending else { return false }
+        try RecoveryBundle.promotePending(in: root, sync: archive.diskSync)
+        return true
+    }
+
+    /// Deletes a new key nobody confirmed (the prompt gave up, or the user
+    /// quit), unless it is the confirmed one waiting to be promoted, which is
+    /// promoted instead. The live bundle and its confirmation are untouched.
+    public static func discardUnconfirmedKey(_ archive: Archive) throws {
+        guard !(try finishConfirmedKey(archive)) else { return }
+        guard RecoveryBundle.exists(in: archive.location.root, name: RecoveryBundle.pendingFileName) else { return }
+        try RecoveryBundle.removePending(in: archive.location.root, sync: archive.diskSync)
     }
 
     /// Confirms the recovery key from groups the user typed back (group number,
     /// 0-based, to text). Needs two different groups, each matching, and the
-    /// key must open the bundle beside this archive, so a key from an earlier
-    /// attempt cannot confirm a newer bundle. The key is never stored.
+    /// key must open the waiting bundle (or, with none waiting, the live one,
+    /// as for a key an older build made), so a key from an earlier attempt
+    /// cannot confirm a newer bundle. The key is never stored.
+    ///
+    /// The confirmation is made durable first, then the pending bundle
+    /// replaces the live one (A-04). Callers hold the writer lock.
     public static func confirm(_ archive: Archive, recoveryKey: RecoveryKey, typed: [Int: String], at date: Date = Date()) throws {
         guard typed.count >= 2 else { throw ArchiveSetupError.tooFewGroups }
         for (group, text) in typed where !recoveryKey.groupMatches(group, typed: text) {
             throw ArchiveSetupError.groupMismatch
         }
         let root = archive.location.root
-        let fingerprint = try RecoveryBundle.fingerprint(in: root)
+        let name = RecoveryBundle.exists(in: root, name: RecoveryBundle.pendingFileName) ? RecoveryBundle.pendingFileName : RecoveryBundle.fileName
+        let fingerprint: String
+        do {
+            fingerprint = try RecoveryBundle.fingerprint(in: root, name: name)
+        } catch RecoveryBundleError.missing {
+            // The key's bundle was discarded (the prompt gave up) and no other is there.
+            throw ArchiveSetupError.notCurrentRecoveryKey
+        }
         let archiveID: String
         do {
-            archiveID = try RecoveryBundle.unwrap(in: root, with: recoveryKey).archiveID
+            archiveID = try RecoveryBundle.unwrap(in: root, name: name, with: recoveryKey).archiveID
         } catch RecoveryBundleError.wrongKey {
             throw ArchiveSetupError.notCurrentRecoveryKey
         }
         // The bundle checked must be the one recorded as confirmed.
-        guard try RecoveryBundle.fingerprint(in: root) == fingerprint else { throw ArchiveSetupError.notCurrentRecoveryKey }
+        guard try RecoveryBundle.fingerprint(in: root, name: name) == fingerprint else { throw ArchiveSetupError.notCurrentRecoveryKey }
         guard try archive.archiveID() == archiveID else { throw ArchiveSetupError.bundleMismatch }
         try record(archive, bundle: fingerprint, at: date)
+        if name == RecoveryBundle.pendingFileName {
+            try RecoveryBundle.promotePending(in: root, sync: archive.diskSync)
+        }
     }
 
     /// Two different group numbers (0-based) to ask the user to type back.
@@ -158,15 +211,20 @@ public enum ArchiveSetup {
         return (min(first, second), max(first, second))
     }
 
-    /// Marks the current key confirmed without checking it. Tests and setups
-    /// that write their own bundle use it; the CLI and app use `confirm`.
+    /// Marks the current key confirmed without checking it, promoting a
+    /// waiting one first. Tests and setups that write their own bundle use it;
+    /// the CLI and app use `confirm`.
     public static func markConfirmed(_ archive: Archive, at date: Date = Date()) throws {
-        try record(archive, bundle: (try? RecoveryBundle.fingerprint(in: archive.location.root)) ?? "", at: date)
+        let root = archive.location.root
+        if RecoveryBundle.exists(in: root, name: RecoveryBundle.pendingFileName) {
+            try RecoveryBundle.promotePending(in: root, sync: archive.diskSync)
+        }
+        try record(archive, bundle: (try? RecoveryBundle.fingerprint(in: root)) ?? "", at: date)
     }
 
+    /// Both rows in one commit that is on the drive before the caller renames anything.
     private static func record(_ archive: Archive, bundle fingerprint: String, at date: Date) throws {
-        try archive.setMeta(confirmedBundleKey, fingerprint)
-        try archive.setMeta(confirmedKey, String(Int(date.timeIntervalSince1970)))
+        try archive.setMetaDurably([confirmedBundleKey: fingerprint, confirmedKey: String(Int(date.timeIntervalSince1970))])
     }
 
     /// The confirmation alone; callers use `recoveryState`, which also wants the bundle.

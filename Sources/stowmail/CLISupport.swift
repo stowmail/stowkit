@@ -151,6 +151,13 @@ enum CLIArchive {
         let lock = try ArchiveLock.acquire(archive.location, wait: 600) {
             print("Waiting for the background sync to finish its current turn...")
         }
+        do {
+            // A confirmed key whose bundle was not yet renamed into place (A-04).
+            try ArchiveSetup.finishConfirmedKey(archive)
+        } catch {
+            lock.release()
+            throw error
+        }
         return (archive, lock)
     }
 

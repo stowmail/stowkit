@@ -1,5 +1,6 @@
 import CryptoKit
 import Foundation
+import StowCore
 
 public enum RecoveryKeyError: Error, Equatable, CustomStringConvertible {
     case wrongLength(Int)
@@ -161,6 +162,9 @@ public enum RecoveryBundleError: Error, Equatable, CustomStringConvertible {
 /// No slow password hashing is needed: the recovery key is random, not a password.
 public struct RecoveryBundle: Sendable {
     public static let fileName = "keys.recovery"
+    /// A new bundle waiting for its key to be confirmed (D-480). Same format;
+    /// `recover` never reads it.
+    public static let pendingFileName = "keys.recovery.pending"
     static let version = 1
     static let info = Data("ee.getstow.recovery.v1".utf8)
 
@@ -179,8 +183,12 @@ public struct RecoveryBundle: Sendable {
     }
 
     /// Wraps `keys` with `recoveryKey` and writes the bundle into `archiveFolder`
-    /// (permissions 0600), replacing any earlier bundle atomically.
-    public static func write(_ keys: ArchiveKeys, archiveID: String, recoveryKey: RecoveryKey, to archiveFolder: URL) throws {
+    /// as `name` (permissions 0600), replacing any earlier file of that name
+    /// atomically. The file is flushed to the drive before the rename and the
+    /// folder after it (A-04), so a power cut leaves the old file or the new
+    /// one, whole. A new key is written as `pendingFileName` (D-480).
+    public static func write(_ keys: ArchiveKeys, archiveID: String, recoveryKey: RecoveryKey, to archiveFolder: URL,
+                             name: String = fileName, sync: DiskSync = .system) throws {
         let salt = SymmetricKey(size: .bits256).withUnsafeBytes { Data($0) }
         let contents = try JSONEncoder().encode(Contents(
             databaseKey: keys.databaseKeyData, fileKey: keys.fileKey.withUnsafeBytes { Data($0) }))
@@ -190,16 +198,37 @@ public struct RecoveryBundle: Sendable {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         encoder.dateEncodingStrategy = .iso8601
-        let url = archiveFolder.appendingPathComponent(fileName)
-        let temporary = archiveFolder.appendingPathComponent(".\(fileName).\(UUID().uuidString).tmp")
-        guard FileManager.default.createFile(atPath: temporary.path, contents: try encoder.encode(file),
-                                             attributes: [.posixPermissions: 0o600]) else {
-            throw RecoveryBundleError.unreadable
+        let bytes = try encoder.encode(file)
+        let url = archiveFolder.appendingPathComponent(name)
+        let temporary = archiveFolder.appendingPathComponent(".\(name).\(UUID().uuidString).tmp")
+        let descriptor = open(temporary.path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o600)
+        guard descriptor >= 0 else { throw RecoveryBundleError.unreadable }
+        do {
+            let handle = FileHandle(fileDescriptor: descriptor, closeOnDealloc: true)
+            try handle.write(contentsOf: bytes)
+            try sync.flushFile(descriptor, path: temporary.path)
+            try handle.close()
+            try sync.rename(temporary, to: url)
+        } catch {
+            unlink(temporary.path)
+            throw error
         }
-        guard Foundation.rename(temporary.path, url.path) == 0 else {
-            try? FileManager.default.removeItem(at: temporary)
-            throw RecoveryBundleError.unreadable
-        }
+        try sync.flushFolder(archiveFolder)
+    }
+
+    /// Makes the confirmed pending bundle the live one: one rename, then the
+    /// folder flushed. `keys.recovery` is the old bundle or the new one at every moment.
+    public static func promotePending(in archiveFolder: URL, sync: DiskSync = .system) throws {
+        try sync.rename(archiveFolder.appendingPathComponent(pendingFileName), to: archiveFolder.appendingPathComponent(fileName))
+        try sync.flushFolder(archiveFolder)
+    }
+
+    /// Deletes a pending bundle nobody confirmed. The live bundle is not touched.
+    public static func removePending(in archiveFolder: URL, sync: DiskSync = .system) throws {
+        let url = archiveFolder.appendingPathComponent(pendingFileName)
+        try sync.note(.unlink(url.path))
+        guard unlink(url.path) == 0 || errno == ENOENT else { throw RecoveryBundleError.unreadable }
+        try sync.flushFolder(archiveFolder)
     }
 
     /// The archive ID the bundle in `archiveFolder` belongs to, without unwrapping anything.
@@ -207,23 +236,23 @@ public struct RecoveryBundle: Sendable {
         try read(archiveFolder).archiveID
     }
 
-    public static func exists(in archiveFolder: URL) -> Bool {
-        FileManager.default.fileExists(atPath: archiveFolder.appendingPathComponent(fileName).path)
+    public static func exists(in archiveFolder: URL, name: String = fileName) -> Bool {
+        FileManager.default.fileExists(atPath: archiveFolder.appendingPathComponent(name).path)
     }
 
     /// SHA-256 of the bundle file, in hex, so a confirmation can name the
     /// exact bundle it confirmed (D-086). Any new bundle has a new random salt,
     /// so it never shares a fingerprint with an older one.
-    public static func fingerprint(in archiveFolder: URL) throws -> String {
-        guard let data = FileManager.default.contents(atPath: archiveFolder.appendingPathComponent(fileName).path) else {
+    public static func fingerprint(in archiveFolder: URL, name: String = fileName) throws -> String {
+        guard let data = FileManager.default.contents(atPath: archiveFolder.appendingPathComponent(name).path) else {
             throw RecoveryBundleError.missing
         }
         return SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
     }
 
     /// Unwraps the keys in `archiveFolder`'s bundle. Returns them with the archive ID they belong to.
-    public static func unwrap(in archiveFolder: URL, with recoveryKey: RecoveryKey) throws -> (keys: ArchiveKeys, archiveID: String) {
-        let file = try read(archiveFolder)
+    public static func unwrap(in archiveFolder: URL, name: String = fileName, with recoveryKey: RecoveryKey) throws -> (keys: ArchiveKeys, archiveID: String) {
+        let file = try read(archiveFolder, name: name)
         let contents: Contents
         do {
             let box = try AES.GCM.SealedBox(combined: file.sealed)
@@ -237,8 +266,8 @@ public struct RecoveryBundle: Sendable {
                 file.archiveID)
     }
 
-    static func read(_ archiveFolder: URL) throws -> File {
-        guard let data = FileManager.default.contents(atPath: archiveFolder.appendingPathComponent(fileName).path) else {
+    static func read(_ archiveFolder: URL, name: String = fileName) throws -> File {
+        guard let data = FileManager.default.contents(atPath: archiveFolder.appendingPathComponent(name).path) else {
             throw RecoveryBundleError.missing
         }
         let decoder = JSONDecoder()

@@ -4,6 +4,10 @@ Changes to StowKit and the `stowmail` command-line tool, newest first. Security 
 
 ## Unreleased
 
+### Security
+
+- **Medium:** making a new recovery key (`stowmail recovery-key rotate`, `create`, `init`) replaced the archive's recovery bundle, `keys.recovery`, before the new key had been confirmed. Stopping at the prompt (Ctrl-C, a closed terminal, three mistyped groups) left a bundle that only the unsaved key opened, and sync paused (second review A-04). A new key is now written as `keys.recovery.pending` and replaces `keys.recovery` only after it is confirmed; the confirmation is committed durably first, and both files and the folder are flushed to the drive (`F_FULLFSYNC`). A confirmation stopped before the rename is finished by the next writer. Until then the old key keeps working and sync carries on. A pending key nobody confirmed is deleted when the prompt gives up, and `status` and `doctor` mention one that is left. The file format is unchanged.
+
 ### Fixed
 
 - `swift test -c release -Xswiftc -enable-testing` compiles again, so the benchmarks run. The iCloud sign-in tests, which need a debug-only plain-text test endpoint (D-471), are left out of release builds. `scripts/check.sh` now builds the tests in release too.

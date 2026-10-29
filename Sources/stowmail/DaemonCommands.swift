@@ -132,6 +132,9 @@ struct Status: AsyncParsableCommand {
             print("Background sync: \(daemon)\(heartbeat.map { ", last active \(CLI.time($0))" } ?? "")")
         }
         if let unread = try UnreadText.collect(archive), unread.total > 0 { print(unread.summary) }
+        if ArchiveSetup.hasUnconfirmedNewKey(archive) {
+            print("A new recovery key was made but not confirmed; your old key still works.")
+        }
         if let reason = Scheduler.heldReason(archive) { print("Sync is held by the Stow app: \(reason)") }
         if let reason = pauseReason { print("Sync is paused: \(reason).") }
         print("Archive: \(location.root.path). Logs: \(LaunchAgent.logDirectory.path)")

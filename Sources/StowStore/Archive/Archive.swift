@@ -12,15 +12,19 @@ public final class Archive: Sendable {
     public let database: DatabasePool
     public let rawFiles: EncryptedFileStore
     public let attachmentFiles: EncryptedFileStore
+    /// How files and commits are flushed to disk; tests pass one that records the order.
+    public let diskSync: DiskSync
 
-    public init(location: ArchiveLocation, database: DatabasePool, keys: ArchiveKeys) {
+    public init(location: ArchiveLocation, database: DatabasePool, keys: ArchiveKeys, diskSync: DiskSync = .system) {
         self.location = location
         self.database = database
+        self.diskSync = diskSync
         rawFiles = EncryptedFileStore(directory: location.rawDirectory, kind: .raw, keys: keys)
         attachmentFiles = EncryptedFileStore(directory: location.attachmentsDirectory, kind: .attachment, keys: keys)
     }
 
-    public static func open(_ location: ArchiveLocation, keys: ArchiveKeys, readOnly: Bool = false) throws -> Archive {
+    public static func open(_ location: ArchiveLocation, keys: ArchiveKeys, readOnly: Bool = false,
+                            diskSync: DiskSync = .system) throws -> Archive {
         if !readOnly { try location.prepare() }
         let database = try EncryptedDatabase.open(at: location.databaseURL, key: keys.databaseKeyData, readOnly: readOnly)
         if !readOnly {
@@ -34,7 +38,7 @@ public final class Archive: Sendable {
             }
             secureDatabaseFiles(location)
         }
-        return Archive(location: location, database: database, keys: keys)
+        return Archive(location: location, database: database, keys: keys, diskSync: diskSync)
     }
 
     /// The folder is already 0700; the database files get 0600 as well.
@@ -70,6 +74,44 @@ public final class Archive: Sendable {
                 try db.execute(sql: "DELETE FROM archive_meta WHERE key = ?", arguments: [key])
             }
         }
+    }
+
+    /// Sets several `archive_meta` rows in one transaction that is on the drive
+    /// when this returns. The archive runs WAL with `synchronous = NORMAL`, where
+    /// a commit reaches the disk only at the next checkpoint; for this one
+    /// transaction the writer syncs the WAL with `F_FULLFSYNC` (A-04).
+    public func setMetaDurably(_ values: KeyValuePairs<String, String?>) throws {
+        try database.writeWithoutTransaction { db in
+            try Self.durably(db) {
+                try db.inTransaction {
+                    for (key, value) in values {
+                        if let value {
+                            try db.execute(sql: """
+                                INSERT INTO archive_meta (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value
+                                """, arguments: [key, value])
+                        } else {
+                            try db.execute(sql: "DELETE FROM archive_meta WHERE key = ?", arguments: [key])
+                        }
+                    }
+                    return .commit
+                }
+            }
+        }
+        try diskSync.note(.durableCommit)
+    }
+
+    /// Runs `body` with every commit on this connection synced with `F_FULLFSYNC`,
+    /// then puts the connection's settings back. Only outside a transaction.
+    static func durably<T>(_ db: Database, _ body: () throws -> T) throws -> T {
+        let synchronous = try Int.fetchOne(db, sql: "PRAGMA synchronous") ?? 1
+        let fullfsync = try Int.fetchOne(db, sql: "PRAGMA fullfsync") ?? 0
+        try db.execute(sql: "PRAGMA synchronous = FULL")
+        try db.execute(sql: "PRAGMA fullfsync = ON")
+        defer {
+            try? db.execute(sql: "PRAGMA synchronous = \(synchronous)")
+            try? db.execute(sql: "PRAGMA fullfsync = \(fullfsync)")
+        }
+        return try body()
     }
 
     // MARK: - Accounts

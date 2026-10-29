@@ -87,8 +87,11 @@ struct RecoveryKeyCommand: AsyncParsableCommand {
 
     struct Rotate: AsyncParsableCommand {
         static let configuration = CommandConfiguration(
-            abstract: "Make a new recovery key, show it once and confirm it. The old one stops working.",
-            discussion: "Only the small key bundle beside the archive is rewritten; the archive itself is not re-encrypted."
+            abstract: "Make a new recovery key, show it once and confirm it. The old one keeps working until the new one is confirmed.",
+            discussion: """
+                Only the small key bundle beside the archive is rewritten, once the new key is confirmed; the archive itself \
+                is not re-encrypted, so backups made before the change still open with the old key.
+                """
         )
 
         func run() async throws {
@@ -161,7 +164,12 @@ enum RecoveryPrompt {
                 if attempt < 3 { print(ArchiveSetupError.groupMismatch.description) }
             }
         }
-        print("Not confirmed. Run `stowmail recovery-key create` to get a new key; no mail is imported until one is confirmed.")
+        try ArchiveSetup.discardUnconfirmedKey(archive)
+        if ArchiveSetup.recoveryState(archive) == .confirmed {
+            print("Not confirmed. Your old recovery key still works. Run `stowmail recovery-key rotate` to try again.")
+        } else {
+            print("Not confirmed. Run `stowmail recovery-key create` to get a new key; no mail is imported until one is confirmed.")
+        }
         throw ExitCode.failure
     }
 }

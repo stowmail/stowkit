@@ -104,17 +104,25 @@ func testKeychain() -> KeychainStore {
         #expect(try ArchiveAccounts(archive: try Archive.open(location, keys: try manager.loadKeys())).all().count == 1)
     }
 
-    @Test func rotatingUnconfirmsAndOnlyTheNewKeyWorks() throws {
+    /// A-04 (D-480): the new key waits as the pending bundle; once confirmed it
+    /// replaces the live one and only it works.
+    @Test func rotatingWaitsForConfirmationThenOnlyTheNewKeyWorks() throws {
         let keychain = testKeychain()
         defer { try? keychain.deleteAll() }
         let location = ArchiveLocation(root: TestFixtures.temporaryDirectory())
         defer { try? FileManager.default.removeItem(at: location.root) }
         let manager = KeyManager(keychain: keychain)
-        let (archive, first) = try ArchiveSetup.initialise(location, keyManager: manager)
+        let (archive, shown) = try ArchiveSetup.initialise(location, keyManager: manager)
+        let first = try #require(shown)
         try ArchiveSetup.markConfirmed(archive)
         let second = try ArchiveSetup.rotate(archive, keys: try manager.loadKeys())
-        #expect(!ArchiveSetup.isConfirmed(archive))
-        #expect(throws: RecoveryBundleError.wrongKey) { try RecoveryBundle.unwrap(in: location.root, with: try #require(first)) }
+        #expect(ArchiveSetup.recoveryState(archive) == .confirmed)
+        #expect(try RecoveryBundle.unwrap(in: location.root, with: first).archiveID == archive.archiveID())
+        #expect(try RecoveryBundle.unwrap(in: location.root, name: RecoveryBundle.pendingFileName, with: second).archiveID == archive.archiveID())
+        try ArchiveSetup.confirm(archive, recoveryKey: second, typed: [4: second.groups[4], 9: second.groups[9]])
+        #expect(ArchiveSetup.recoveryState(archive) == .confirmed)
+        #expect(!RecoveryBundle.exists(in: location.root, name: RecoveryBundle.pendingFileName))
+        #expect(throws: RecoveryBundleError.wrongKey) { try RecoveryBundle.unwrap(in: location.root, with: first) }
         #expect(try RecoveryBundle.unwrap(in: location.root, with: second).archiveID == archive.archiveID())
         var generator = SystemRandomNumberGenerator()
         for _ in 0..<50 {
@@ -142,13 +150,14 @@ func testKeychain() -> KeychainStore {
         #expect(ArchiveSetup.recoveryState(archive) == .unconfirmed)
         #expect(throws: ArchiveSetupError.recoveryNotConfirmed) { try ArchiveSetup.requireConfirmed(archive) }
 
-        // A rotation that cannot write its bundle leaves the archive unconfirmed, never confirmed.
+        // A rotation that cannot write its bundle leaves the confirmed key working (A-04).
         let next = try ArchiveSetup.makeRecoveryKey(archive, keyManager: manager)
         try ArchiveSetup.confirm(archive, recoveryKey: next, typed: [1: next.groups[1], 2: next.groups[2]])
         try FileManager.default.setAttributes([.posixPermissions: 0o500], ofItemAtPath: location.root.path)
         defer { try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: location.root.path) }
         #expect(throws: (any Error).self) { try ArchiveSetup.rotate(archive, keys: try manager.loadKeys()) }
-        #expect(ArchiveSetup.recoveryState(archive) == .unconfirmed)
+        #expect(ArchiveSetup.recoveryState(archive) == .confirmed)
+        #expect(try RecoveryBundle.unwrap(in: location.root, with: next).archiveID == archive.archiveID())
 
         // Confirmations made before D-086 recorded no bundle and still count.
         try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: location.root.path)
