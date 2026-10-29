@@ -71,6 +71,9 @@ public actor Scheduler {
     let makeSync: @Sendable (Archive) throws -> EngineSync
     let power: @Sendable () -> PowerState
     let hold: @Sendable () -> String?
+    /// True when work this process abandoned is still stuck, so it should
+    /// stop and be started afresh (D-502). launchd restarts the daemon.
+    let restartWhen: @Sendable () -> Bool
     let now: @Sendable () -> Date
     let sleep: @Sendable (TimeInterval) async throws -> Void
     private let logger = Logger(label: "ee.getstow.engine.scheduler")
@@ -81,6 +84,7 @@ public actor Scheduler {
     private var nextStart = 0
     private var lastLogged: RoundResult?
     private var swept = false
+    private var retried = false
     private var recordedHold: String?
 
     /// The `archive_meta` key holding the reason while the app holds sync, for `stowmail status`.
@@ -92,6 +96,7 @@ public actor Scheduler {
         makeSync: @escaping @Sendable (Archive) throws -> EngineSync,
         power: @escaping @Sendable () -> PowerState = { PowerState.current() },
         hold: @escaping @Sendable () -> String? = { nil },
+        restartWhen: @escaping @Sendable () -> Bool = { false },
         now: @escaping @Sendable () -> Date = { Date() },
         sleep: @escaping @Sendable (TimeInterval) async throws -> Void = { try await Task.sleep(nanoseconds: UInt64($0 * 1_000_000_000)) }
     ) {
@@ -100,14 +105,20 @@ public actor Scheduler {
         self.makeSync = makeSync
         self.power = power
         self.hold = hold
+        self.restartWhen = restartWhen
         self.now = now
         self.sleep = sleep
     }
 
-    /// Runs rounds until cancelled, pausing between them as the last round's result says.
+    /// Runs rounds until cancelled, pausing between them as the last round's
+    /// result says, or until `restartWhen` asks for a fresh process.
     public func run() async {
         while !Task.isCancelled {
             let (result, _) = await round()
+            if restartWhen() {
+                logger.notice("Reading a message got stuck and was abandoned; stopping so the process starts afresh")
+                return
+            }
             if result != lastLogged {
                 switch result {
                 case .paused(let reason): logger.notice("Sync paused", metadata: ["reason": "\(reason)"])
@@ -166,6 +177,23 @@ public actor Scheduler {
             if let count = try? ArchiveRemoval(archive: archive).sweepUnusedFiles(), count > 0 {
                 logger.notice("Deleted unused files left by an interrupted sync", metadata: ["count": "\(count)"])
             }
+        }
+        if !retried {
+            // Text an older build could not read, read again once per process
+            // with this build's parser and extractor (D-481, D-502). A no-op
+            // unless the version went up since the mark.
+            retried = true
+            let importer = Importer(archive: archive)
+            do {
+                let messages = try importer.retryMarkedMessages()
+                let attachments = try importer.retryUnreadAttachments()
+                if messages != TextRetrySummary() || attachments != TextRetrySummary() {
+                    logger.notice("Read again after an update", metadata: ["messages": "\(messages)", "attachments": "\(attachments)"])
+                }
+            } catch {
+                logger.warning("Reading again after an update stopped", metadata: ["error": "\(Self.plainWords(error))"])
+            }
+            if restartWhen() { return (.worked, [:]) }
         }
 
         let accounts = ArchiveAccounts(archive: archive)

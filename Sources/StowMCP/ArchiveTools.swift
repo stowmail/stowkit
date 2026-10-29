@@ -234,6 +234,9 @@ public struct ArchiveTools: Sendable {
         lines.append("Date: \(time(detail.date))")
         lines.append("Subject: \(subject(detail.subject))")
         if detail.sourceState != .present { lines.append("In the mailbox: \(detail.sourceState.rawValue) (kept in the archive)") }
+        if detail.textIncomplete {
+            lines.append("Not read in full: Stow could not read all of this email, so search misses part of it. It is stored whole; Stow tries again after an update.")
+        }
         if !detail.attachments.isEmpty {
             lines.append("Attachments (read the text with get_attachment):")
             for attachment in detail.attachments { lines.append("  \(attachmentLine(attachment))") }
@@ -299,14 +302,15 @@ public struct ArchiveTools: Sendable {
         } else if result.info.textLength > 0 {
             lines.append("No text at offset \(offset); the text has \(result.info.textLength) characters.")
         } else {
-            lines.append(Self.noTextReason(result.info.textStatus))
+            lines.append(Self.noTextReason(result.info))
         }
         lines.append("The file itself is not available through this tool.")
         return ToolOutcome(text: lines.joined(separator: "\n"), results: shown, accounts: [result.accountID])
     }
 
-    static func noTextReason(_ status: String) -> String {
-        switch status {
+    static func noTextReason(_ attachment: AttachmentInfo) -> String {
+        if attachment.textUnreadable { return "Stow tried to read its text and could not; it tries again after an update." }
+        return switch attachment.textStatus {
         case "ocr_pending": "Its text has not been read yet: it is waiting for text recognition (OCR) on the Mac."
         case "ocr_failed": "Text recognition (OCR) could not read it."
         case "unsupported": "Stow cannot read text from this kind of file."
@@ -318,6 +322,7 @@ public struct ArchiveTools: Sendable {
         let name = attachment.filename.map { clip($0, 200) } ?? "(no name)"
         let size = ByteCountFormatter.string(fromByteCount: Int64(attachment.size), countStyle: .file)
         let text = attachment.textLength > 0 ? "\(attachment.textLength) characters of text"
+            : attachment.textUnreadable ? "text could not be read"
             : attachment.textStatus == "ocr_pending" ? "text not read yet" : "no text"
         return "\(attachment.index). \(name) (\(attachment.mimeType.map { clip($0, 100) } ?? "unknown type"), \(size), \(text))"
     }

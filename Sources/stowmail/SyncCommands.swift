@@ -230,6 +230,8 @@ struct Verify: AsyncParsableCommand {
         for id in report.failedAttachments { print("  ATTACHMENT DAMAGED: attachment \(id)") }
         print("Search index: \(report.searchIndexConsistent ? "matches the stored text" : "DOES NOT MATCH")")
         print("Database: \(report.databaseIntegrity)\(report.foreignKeyProblems > 0 ? ", \(report.foreignKeyProblems) broken references" : "")")
+        // Not a fault: these rebuilt byte for byte above like every other message (D-481).
+        if let unread = try UnreadText.collect(archive), unread.total > 0 { print(unread.summary) }
         if report.unusedMessageFiles + report.unusedAttachmentFiles > 0 {
             print("Unused files left by an interrupted sync or removal: \(report.unusedMessageFiles + report.unusedAttachmentFiles) (harmless; deleted when background sync next starts, or by `stowmail remove`).")
         }

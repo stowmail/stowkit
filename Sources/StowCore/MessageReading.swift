@@ -15,9 +15,13 @@ public struct AttachmentInfo: Hashable, Sendable, Codable {
     public var textStatus: String
     /// Length of the extracted text in characters (Unicode scalars), 0 if none.
     public var textLength: Int
+    /// Stow tried to read its text and could not (D-481): `unsupported` or
+    /// `ocr_failed` because reading failed, not because Stow does not read the
+    /// type. Stow tries again after an update.
+    public var textUnreadable: Bool
 
     public init(index: Int, filename: String?, mimeType: String?, size: Int, disposition: String?, textStatus: String,
-                textLength: Int) {
+                textLength: Int, textUnreadable: Bool = false) {
         self.index = index
         self.filename = filename
         self.mimeType = mimeType
@@ -25,6 +29,21 @@ public struct AttachmentInfo: Hashable, Sendable, Codable {
         self.disposition = disposition
         self.textStatus = textStatus
         self.textLength = textLength
+        self.textUnreadable = textUnreadable
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case index, filename, mimeType, size, disposition, textStatus, textLength, textUnreadable
+    }
+
+    /// `textUnreadable` decodes as false when missing, so a value encoded before D-481's mark still reads.
+    public init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(index: try c.decode(Int.self, forKey: .index), filename: try c.decodeIfPresent(String.self, forKey: .filename),
+                  mimeType: try c.decodeIfPresent(String.self, forKey: .mimeType), size: try c.decode(Int.self, forKey: .size),
+                  disposition: try c.decodeIfPresent(String.self, forKey: .disposition),
+                  textStatus: try c.decode(String.self, forKey: .textStatus), textLength: try c.decode(Int.self, forKey: .textLength),
+                  textUnreadable: try c.decodeIfPresent(Bool.self, forKey: .textUnreadable) ?? false)
     }
 }
 
@@ -65,11 +84,17 @@ public struct MessageDetail: Hashable, Sendable, Codable, Identifiable {
     /// When `sourceState` last changed (`messages.source_state_at`, D-039), for "Deleted from
     /// Gmail 1 Oct 2026" (UI-24). Nil while the message has always been present.
     public var sourceStateAt: Date?
+    /// Stow could not read all of this email (D-481): its own text, or an
+    /// attachment's (see `AttachmentInfo.textUnreadable`). It is stored whole and
+    /// opens and exports as usual; search misses the part that was not read.
+    /// Stow tries again after an update. A message whose own text was not read
+    /// has no subject, sender or body here until then.
+    public var textIncomplete: Bool
 
     public init(messageID: StoredMessageID, accountID: AccountID, threadKey: String?, date: Date, sentDate: Date?,
                 from: EmailAddress?, to: [EmailAddress], cc: [EmailAddress], subject: String?, sourceState: SourceState,
                 body: String?, bodyFromHTML: Bool, bodyLength: Int, bodyTruncated: Bool, attachments: [AttachmentInfo],
-                places: [ArchiveFolder] = [], importedAt: Date? = nil, sourceStateAt: Date? = nil) {
+                places: [ArchiveFolder] = [], importedAt: Date? = nil, sourceStateAt: Date? = nil, textIncomplete: Bool = false) {
         self.messageID = messageID
         self.accountID = accountID
         self.threadKey = threadKey
@@ -88,15 +113,16 @@ public struct MessageDetail: Hashable, Sendable, Codable, Identifiable {
         self.places = places
         self.importedAt = importedAt
         self.sourceStateAt = sourceStateAt
+        self.textIncomplete = textIncomplete
     }
 
     enum CodingKeys: String, CodingKey {
         case messageID, accountID, threadKey, date, sentDate, from, to, cc, subject, sourceState, body, bodyFromHTML,
-             bodyLength, bodyTruncated, attachments, places, importedAt, sourceStateAt
+             bodyLength, bodyTruncated, attachments, places, importedAt, sourceStateAt, textIncomplete
     }
 
-    /// `places`, `importedAt` and `sourceStateAt` decode with defaults when missing, so a value encoded before
-    /// R11 still reads (as D-418 did for `SearchHit.sourceState`).
+    /// `places`, `importedAt`, `sourceStateAt` and `textIncomplete` decode with defaults when missing, so a value
+    /// encoded before R11 (or D-481's mark) still reads (as D-418 did for `SearchHit.sourceState`).
     public init(from decoder: any Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         self.init(messageID: try c.decode(StoredMessageID.self, forKey: .messageID),
@@ -116,7 +142,8 @@ public struct MessageDetail: Hashable, Sendable, Codable, Identifiable {
                   attachments: try c.decode([AttachmentInfo].self, forKey: .attachments),
                   places: try c.decodeIfPresent([ArchiveFolder].self, forKey: .places) ?? [],
                   importedAt: try c.decodeIfPresent(Date.self, forKey: .importedAt),
-                  sourceStateAt: try c.decodeIfPresent(Date.self, forKey: .sourceStateAt))
+                  sourceStateAt: try c.decodeIfPresent(Date.self, forKey: .sourceStateAt),
+                  textIncomplete: try c.decodeIfPresent(Bool.self, forKey: .textIncomplete) ?? false)
     }
 }
 

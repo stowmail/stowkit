@@ -27,9 +27,13 @@ struct Daemon: AsyncParsableCommand {
             print("Stow background sync started. Logs: \(LaunchAgent.logDirectory.path)")
             let scheduler = Scheduler(
                 openArchive: { try CLIArchive.open() },
-                makeSync: { archive in EngineSync(archive: archive, tokens: try CLI.tokenProvider(accounts: ArchiveAccounts(archive: archive))) }
+                makeSync: { archive in EngineSync(archive: archive, tokens: try CLI.tokenProvider(accounts: ArchiveAccounts(archive: archive))) },
+                restartWhen: { Importer.stuckPreparations > 0 }
             )
             await Task(priority: .background) { await scheduler.run() }.value
+            // A stuck reading cannot be stopped from inside (D-495); a failing exit
+            // makes launchd start the daemon afresh, without it (D-502).
+            if Importer.stuckPreparations > 0 { throw ExitCode(75) }
         }
     }
 
@@ -127,6 +131,7 @@ struct Status: AsyncParsableCommand {
         } else {
             print("Background sync: \(daemon)\(heartbeat.map { ", last active \(CLI.time($0))" } ?? "")")
         }
+        if let unread = try UnreadText.collect(archive), unread.total > 0 { print(unread.summary) }
         if let reason = Scheduler.heldReason(archive) { print("Sync is held by the Stow app: \(reason)") }
         if let reason = pauseReason { print("Sync is paused: \(reason).") }
         print("Archive: \(location.root.path). Logs: \(LaunchAgent.logDirectory.path)")

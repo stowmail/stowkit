@@ -25,15 +25,22 @@ public struct ExtractionResult: Sendable, Equatable {
     public var status: Status
     public var text: String?
     public var method: Method?
+    /// Reading was tried and did not finish (D-481): recorded as
+    /// `text_failed_version`, so a newer extractor tries again. False for a
+    /// type Stow does not read.
+    public var failed: Bool
 
     static let none = ExtractionResult(status: .none)
     static let unsupported = ExtractionResult(status: .unsupported)
     static let ocrPending = ExtractionResult(status: .ocrPending)
+    /// Stored with no text because reading it did not finish in time.
+    static let unreadable = ExtractionResult(status: .unsupported, failed: true)
 
-    public init(status: Status, text: String? = nil, method: Method? = nil) {
+    public init(status: Status, text: String? = nil, method: Method? = nil, failed: Bool = false) {
         self.status = status
         self.text = text
         self.method = method
+        self.failed = failed
     }
 }
 
@@ -55,6 +62,8 @@ public struct TextExtractor: Sendable {
     /// PDFs get no text rather than another thread (D-495).
     static let maximumAbandoned = 4
     private static let sharedAbandoned = OSAllocatedUnfairLock(initialState: 0)
+    /// Extraction tries per attachment in a retry round after an update (D-502).
+    public static let maximumAttempts = 3
     static let ocrImageTypes: Set<String> = [
         "image/png", "image/jpeg", "image/jpg", "image/tiff", "image/heic", "image/heif", "image/gif", "image/bmp", "image/webp",
     ]
@@ -109,34 +118,14 @@ public struct TextExtractor: Sendable {
     }
 
     /// Runs PDFKit on its own thread under `pdfLimit`, so a PDF that hangs it
-    /// cannot stall import. On timeout the attachment is stored with no text
-    /// (`unsupported` until D-481's mark exists) and the thread is left to
-    /// finish or hang on its own: there is no safe way to stop it.
+    /// cannot stall import. On timeout the attachment is stored with no text,
+    /// marked as unreadable (D-481), and the thread is left to finish or hang
+    /// on its own: there is no safe way to stop it.
     func pdf(_ data: Data) -> ExtractionResult {
-        enum Run { case running, finished(ExtractionResult), abandoned }
-        let abandoned = abandoned
-        guard abandoned.withLock({ $0 }) < Self.maximumAbandoned else { return .unsupported }
-        let run = OSAllocatedUnfairLock(initialState: Run.running)
-        let done = DispatchSemaphore(value: 0)
         let work = pdfText
-        // A thread of its own, not a shared queue, so a stuck call holds no pool thread.
-        Thread.detachNewThread {
-            let result = work(data)
-            let wasAbandoned = run.withLock { state in
-                if case .abandoned = state { return true }
-                state = .finished(result)
-                return false
-            }
-            if wasAbandoned { abandoned.withLock { $0 -= 1 } }
-            done.signal()
-        }
-        let seconds = Double(pdfLimit.components.seconds) + Double(pdfLimit.components.attoseconds) / 1e18
-        _ = done.wait(timeout: .now() + seconds)
-        return run.withLock { state in
-            if case .finished(let result) = state { return result }
-            state = .abandoned
-            abandoned.withLock { $0 += 1 }
-            return .unsupported
+        switch TimeLimit(limit: pdfLimit, maximumAbandoned: Self.maximumAbandoned, abandoned: abandoned).run({ work(data) }) {
+        case .finished(let result): return result
+        case .timedOut, .tooManyStuck: return .unreadable
         }
     }
 

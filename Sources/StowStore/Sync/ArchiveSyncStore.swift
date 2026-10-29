@@ -1,5 +1,6 @@
 import Foundation
 import GRDB
+import Logging
 import StowCore
 
 /// Sync writes straight into the archive through this (brief step 4): it is
@@ -11,9 +12,15 @@ import StowCore
 /// transaction, so "durable before the queue moves on" holds by construction:
 /// after a crash a message is either archived and gone from the queue, or
 /// still queued and downloaded again (the import is idempotent).
+///
+/// Each import is counted on its queue row, in a transaction of its own,
+/// before the message is read (D-481, D-502). A count that reaches
+/// `Importer.maximumAttempts` means reading it crashed, was killed or hung
+/// that many times, so the next try stores it whole and unread instead.
 public final class ArchiveSyncStore: RawMessageSink, SyncStateStore, Sendable {
     public let archive: Archive
     let importer: Importer
+    let logger = Logger(label: "ee.getstow.store.sync")
 
     public init(archive: Archive, importer: Importer? = nil) {
         self.archive = archive
@@ -25,19 +32,55 @@ public final class ArchiveSyncStore: RawMessageSink, SyncStateStore, Sendable {
     // MARK: - RawMessageSink
 
     public func write(_ message: RawMessage) async throws {
+        try store(message)
+    }
+
+    /// `write`, synchronously: tests run it on a thread they can leave stuck.
+    func store(_ message: RawMessage) throws {
         let key = message.key
-        let restoring = try await database.read { db in
-            try Bool.fetchOne(db, sql: """
-                SELECT q.restore FROM download_queue q JOIN folders f ON f.id = q.folder_id
-                WHERE f.account_id = ? AND f.kind = 'folder' AND f.name = ? AND q.uid_validity = ? AND q.uid = ?
-                """, arguments: [key.accountID.rawValue, key.folder, Int64(key.uidValidity), Int64(key.uid)]) ?? false
+        let queueRow = """
+            WHERE uid_validity = ? AND uid = ?
+                AND folder_id = (SELECT id FROM folders WHERE account_id = ? AND kind = 'folder' AND name = ?)
+            """
+        let rowArguments: StatementArguments = [Int64(key.uidValidity), Int64(key.uid), key.accountID.rawValue, key.folder]
+        // Recorded and committed before the message is read, so a crash, kill or hang while reading it still counts.
+        let queued = try database.write { db -> (restoring: Bool, earlier: Int)? in
+            guard let row = try Row.fetchOne(db, sql: "SELECT restore, import_attempts FROM download_queue \(queueRow)", arguments: rowArguments) else {
+                return nil
+            }
+            try db.execute(sql: "UPDATE download_queue SET import_attempts = import_attempts + 1, last_import_attempt_at = ? \(queueRow)",
+                           arguments: [Self.now()] + rowArguments)
+            return (row["restore"], row["import_attempts"])
         }
-        _ = try importer.importMessage(message, restoring: restoring) { db, _ in
-            let folder = try Self.folderID(db, account: key.accountID, name: key.folder)
-            try db.execute(sql: "DELETE FROM download_queue WHERE folder_id = ? AND uid_validity = ? AND uid = ?",
-                           arguments: [folder, Int64(key.uidValidity), Int64(key.uid)])
+        let dequeue: (Database, ImportOutcome) throws -> Void = { db, _ in
+            try db.execute(sql: "DELETE FROM download_queue \(queueRow)", arguments: rowArguments)
+        }
+        let restoring = queued?.restoring ?? false
+        if let queued, queued.earlier >= Importer.maximumAttempts {
+            logger.warning("reading a message never finished; storing it whole and unread", metadata: [
+                "key": "\(key)", "attempts": "\(queued.earlier)", "bytes": "\(message.bytes.count)",
+            ])
+            _ = try importer.storeUnread(message, restoring: restoring, within: dequeue)
+            return
+        }
+        do {
+            _ = try importer.importMessage(message, restoring: restoring, within: dequeue)
+        } catch ImportError.timedOut(let key) {
+            // Did not finish: the attempt stays counted.
+            throw ImportError.timedOut(key)
+        } catch {
+            // Finished, with an error that is not the message's reading (a full disk, a stuck process):
+            // not an attempt that never finished.
+            if queued != nil {
+                try? database.write { db in
+                    try db.execute(sql: "UPDATE download_queue SET import_attempts = max(import_attempts - 1, 0) \(queueRow)",
+                                   arguments: rowArguments)
+                }
+            }
+            throw error
         }
     }
+
 
     /// Every write is committed by its own transaction before it returns.
     public func flush() async throws {}

@@ -38,8 +38,11 @@ public final class MessageReader: MessageReading, InlinePartReading, MessageBody
 
     func message(_ db: Database, _ id: StoredMessageID, bodyLimit: Int) throws -> MessageDetail? {
         let limit = max(0, bodyLimit)
+        // An archive not yet upgraded to v2 (opened read-only) has no marks.
+        let marks = try UnreadText.hasMarks(db)
         guard let row = try Row.fetchOne(db, sql: """
             SELECT m.account_id, m.thread_key, m.internal_date, m.sent_date, m.subject, m.source_state, m.imported_at, m.source_state_at,
+                   \(marks ? "m.text_state = 'incomplete'" : "0") AS text_incomplete,
                    b.text_plain IS NULL AND b.text_from_html IS NOT NULL AS from_html,
                    substr(coalesce(b.text_plain, b.text_from_html), 1, ?) AS body,
                    length(coalesce(b.text_plain, b.text_from_html)) AS body_length
@@ -57,6 +60,7 @@ public final class MessageReader: MessageReading, InlinePartReading, MessageBody
 
         let bodyLength: Int = row["body_length"] ?? 0
         let body: String? = row["body"]
+        let attachments = try attachments(db, message: id)
         return MessageDetail(
             messageID: id,
             accountID: AccountID(rawValue: row["account_id"]),
@@ -72,10 +76,11 @@ public final class MessageReader: MessageReading, InlinePartReading, MessageBody
             bodyFromHTML: row["from_html"] ?? false,
             bodyLength: bodyLength,
             bodyTruncated: bodyLength > limit,
-            attachments: try attachments(db, message: id),
+            attachments: attachments,
             places: try places(db, message: id),
             importedAt: Date(timeIntervalSince1970: TimeInterval(row["imported_at"] as Int64)),
-            sourceStateAt: (row["source_state_at"] as Int64?).map { Date(timeIntervalSince1970: TimeInterval($0)) })
+            sourceStateAt: (row["source_state_at"] as Int64?).map { Date(timeIntervalSince1970: TimeInterval($0)) },
+            textIncomplete: row["text_incomplete"] || attachments.contains(where: \.textUnreadable))
     }
 
     /// Where the provider has the message now (R11): every folder or label holding a copy the
@@ -98,7 +103,7 @@ public final class MessageReader: MessageReading, InlinePartReading, MessageBody
 
     /// The message's attachments in MIME part order, numbered from 1.
     func attachments(_ db: Database, message: StoredMessageID) throws -> [AttachmentInfo] {
-        try Row.fetchAll(db, sql: Self.attachmentSQL, arguments: [message]).enumerated().map { position, row in
+        try Row.fetchAll(db, sql: try Self.attachmentSQL(db), arguments: [message]).enumerated().map { position, row in
             Self.info(row, index: position + 1)
         }
     }
@@ -107,7 +112,7 @@ public final class MessageReader: MessageReading, InlinePartReading, MessageBody
         guard index >= 1,
               let account = try String.fetchOne(db, sql: "SELECT account_id FROM messages WHERE id = ?", arguments: [message])
         else { return nil }
-        let rows = try Row.fetchAll(db, sql: Self.attachmentSQL, arguments: [message])
+        let rows = try Row.fetchAll(db, sql: try Self.attachmentSQL(db), arguments: [message])
         guard index <= rows.count else { return nil }
         let row = rows[index - 1]
         let start = min(max(0, offset), Int(Int32.max))  // no overflow in `start + 1`, whatever the caller passes
@@ -144,7 +149,7 @@ public final class MessageReader: MessageReading, InlinePartReading, MessageBody
         guard let attachmentFiles = archive?.attachmentFiles else { throw MessageReaderError.noFileKey }
         guard index >= 1 else { return nil }
         let found = try await database.read { db -> (hash: Data, info: AttachmentInfo)? in
-            let rows = try Row.fetchAll(db, sql: Self.attachmentSQL, arguments: [message])
+            let rows = try Row.fetchAll(db, sql: try Self.attachmentSQL(db), arguments: [message])
             guard index <= rows.count else { return nil }
             return (rows[index - 1]["content_hash"], Self.info(rows[index - 1], index: index))
         }
@@ -155,6 +160,14 @@ public final class MessageReader: MessageReading, InlinePartReading, MessageBody
 
     public func body(of message: StoredMessageID) async throws -> MessageBody? {
         guard let archive else { throw MessageReaderError.noFileKey }
+        let marked = try await database.read { db in
+            try Bool.fetchOne(db, sql: "SELECT \(try UnreadText.hasMarks(db) ? "text_state = 'incomplete'" : "0") FROM messages WHERE id = ?",
+                              arguments: [message])
+        }
+        guard let marked else { return nil }
+        // Reading this message's text crashed or hung Stow (D-481): it is not parsed
+        // here either. Its bytes still export whole (`.eml`, mbox).
+        if marked { return MessageBody(messageID: message, html: nil, plain: nil, contentIDs: []) }
         // Decrypted and parsed in memory only; nothing is written to disk (R9, D-409).
         guard let raw = try archive.rawMessage(message) else { return nil }
         let parts = MIMEParser().displayBody(raw)
@@ -162,16 +175,22 @@ public final class MessageReader: MessageReading, InlinePartReading, MessageBody
                            contentIDs: parts.html.map(MessageBody.contentIDs(inHTML:)) ?? [])
     }
 
-    static let attachmentSQL = """
+    static func attachmentSQL(_ db: Database) throws -> String {
+        try attachmentSQL(marks: UnreadText.hasMarks(db))
+    }
+
+    static func attachmentSQL(marks: Bool) -> String { """
         SELECT x.attachment_id, t.content_hash, x.filename, coalesce(t.mime_type, x.declared_mime_type) AS mime_type, x.disposition,
-               t.size, t.text_status, coalesce((SELECT length(at.text) FROM attachment_text at WHERE at.attachment_id = t.id), 0) AS text_length
+               t.size, t.text_status, \(marks ? "t.text_failed_version IS NOT NULL" : "0") AS text_unreadable, coalesce((SELECT length(at.text) FROM attachment_text at WHERE at.attachment_id = t.id), 0) AS text_length
         FROM message_attachments x JOIN attachments t ON t.id = x.attachment_id
         WHERE x.message_id = ? ORDER BY x.part_path
         """
+    }
 
     static func info(_ row: Row, index: Int) -> AttachmentInfo {
         AttachmentInfo(index: index, filename: row["filename"], mimeType: row["mime_type"], size: row["size"],
-                       disposition: row["disposition"], textStatus: row["text_status"], textLength: row["text_length"])
+                       disposition: row["disposition"], textStatus: row["text_status"], textLength: row["text_length"],
+                       textUnreadable: row["text_unreadable"])
     }
 }
 

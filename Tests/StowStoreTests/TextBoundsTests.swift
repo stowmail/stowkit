@@ -96,7 +96,7 @@ import Testing
             Issue.record("not imported")
             return
         }
-        #expect(try test.count("attachments", "text_status = 'unsupported'") == 1)
+        #expect(try test.count("attachments", "text_status = 'unsupported' AND text_failed_version = 1") == 1)
         #expect(abandoned.withLock { $0 } == 1)
 
         // Once the stuck call finishes, it no longer counts.
@@ -111,7 +111,7 @@ import Testing
         let abandoned = OSAllocatedUnfairLock(initialState: 0)
         let extractor = TextExtractor(pdfText: hang.extract, pdfLimit: .milliseconds(50), abandoned: abandoned)
         for _ in 0..<(TextExtractor.maximumAbandoned + 2) {
-            #expect(extractor.pdf(Data()) == .unsupported)
+            #expect(extractor.pdf(Data()) == .unreadable)
         }
         #expect(hang.calls.withLock { $0 } == TextExtractor.maximumAbandoned)
         hang.release(TextExtractor.maximumAbandoned)

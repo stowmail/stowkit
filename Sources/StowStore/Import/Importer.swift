@@ -1,6 +1,7 @@
 import Foundation
 import GRDB
 import Logging
+import os
 import StowCore
 
 public enum ImportError: Error, Equatable, CustomStringConvertible {
@@ -8,11 +9,21 @@ public enum ImportError: Error, Equatable, CustomStringConvertible {
     case unknownAccount(AccountID)
     /// The stored file did not rebuild into the downloaded bytes. Nothing was recorded.
     case rebuildMismatch(RawMessageKey)
+    /// Reading the message did not finish within `Importer.preparationTimeLimit`.
+    /// Nothing was recorded; the work was abandoned (D-502).
+    case timedOut(RawMessageKey)
+    /// Reading a stored message again after an update did not finish in time (D-502).
+    case retryTimedOut(StoredMessageID)
+    /// Not started: reading earlier messages is still stuck in this process (D-502).
+    case tooManyStuck
 
     public var description: String {
         switch self {
         case .unknownAccount(let id): "Account \(id) is not in the archive; register it before importing"
         case .rebuildMismatch(let key): "Message \(key) did not rebuild byte for byte from the archive; it was not recorded"
+        case .timedOut(let key): "Reading message \(key) did not finish in time; it was not recorded yet, and is kept whole after \(Importer.maximumAttempts) tries"
+        case .retryTimedOut(let id): "Reading message \(id) again did not finish in time; it stays marked"
+        case .tooManyStuck: "Reading earlier messages is still stuck in this process; restart it to carry on"
         }
     }
 }
@@ -99,9 +110,28 @@ public typealias RuleClassifier = @Sendable (_ headers: MessageHeaders, _ ownAdd
 /// read, and the same bytes for the same account map to the same row
 /// (`UNIQUE (account_id, raw_hash)`).
 public final class Importer: Sendable {
+    /// Tries at reading one message, at import or in a retry round after an
+    /// update, that may never finish before it is kept whole and marked (D-481, D-502).
+    public static let maximumAttempts = 3
+    /// Longest reading one message may take: parsing, attachment text and the
+    /// skeleton check (D-502). PDFKit has its own 30 s inside this (D-495).
+    static let preparationTimeLimit: Duration = .seconds(300)
+    /// Readings abandoned at their limit and still running. Past this many,
+    /// no more are started until the process restarts (D-502).
+    static let maximumAbandoned = 4
+    private static let sharedAbandoned = OSAllocatedUnfairLock(initialState: 0)
+    /// Message readings abandoned in this process that are still running. The
+    /// daemon restarts when this is above 0, which ends them (D-502).
+    public static var stuckPreparations: Int { sharedAbandoned.withLock { $0 } }
+
     public let archive: Archive
-    let parser = MIMEParser()
+    let parse: @Sendable (Data) -> ParsedMessage
+    /// `MIMEParser.version`, except in tests of retrying after an update.
+    let parserVersion: Int
     let extractor: TextExtractor
+    /// `TextExtractor.version`, except in tests of retrying after an update.
+    let extractorVersion: Int
+    let preparation: TimeLimit
     /// False only for measuring import speed without inline extraction (QA checklist).
     let extractText: Bool
     let classifier: RuleClassifier?
@@ -111,12 +141,24 @@ public final class Importer: Sendable {
         self.init(archive: archive, extractText: extractText, classifier: classifier, extractor: TextExtractor())
     }
 
-    /// Tests pass an extractor with a stand-in for PDFKit.
-    init(archive: Archive, extractText: Bool = true, classifier: RuleClassifier? = nil, extractor: TextExtractor) {
+    /// Tests pass an extractor with a stand-in for PDFKit, a stand-in parser,
+    /// a parser version and their own time limit.
+    init(
+        archive: Archive, extractText: Bool = true, classifier: RuleClassifier? = nil, extractor: TextExtractor,
+        parse: @escaping @Sendable (Data) -> ParsedMessage = { MIMEParser().parse($0) },
+        parserVersion: Int = MIMEParser.version,
+        extractorVersion: Int = TextExtractor.version,
+        preparation: TimeLimit? = nil
+    ) {
         self.archive = archive
         self.extractText = extractText
         self.classifier = classifier
         self.extractor = extractor
+        self.parse = parse
+        self.parserVersion = parserVersion
+        self.extractorVersion = extractorVersion
+        self.preparation = preparation ?? TimeLimit(limit: Self.preparationTimeLimit, maximumAbandoned: Self.maximumAbandoned,
+                                                    abandoned: Self.sharedAbandoned)
     }
 
     // MARK: - Bulk
@@ -186,12 +228,90 @@ public final class Importer: Sendable {
     ) throws -> ImportOutcome {
         let key = raw.key
         guard let ownAddress = try accountAddress(key.accountID) else { throw ImportError.unknownAccount(key.accountID) }
+        let rawHash = archive.rawFiles.hash(of: raw.bytes)
+        if let outcome = try storedBefore(raw, rawHash: rawHash, restoring: restoring, within: within) { return outcome }
+
+        // Work outside the transaction, on a thread of its own under a time limit
+        // (D-502): parse, store attachments, build and check the skeleton, extract text.
+        let prepared = try prepareWithinLimit(timedOut: .timedOut(key)) { [self] in
+            try prepareMessage(raw, hash: rawHash, ownAddress: ownAddress)
+        }
+
+        return try archive.database.write { db -> ImportOutcome in
+            // Another importer may have stored the same bytes meanwhile.
+            if let existing = try Self.messageID(db, account: key.accountID, rawHash: rawHash) {
+                try Self.link(db, messageID: existing, raw: raw)
+                try within?(db, .linked(existing))
+                return .linked(existing)
+            }
+            if restoring { try Self.deleteTombstone(db, account: key.accountID, rawHash: rawHash) }
+            let id = try insertMessage(db, raw: raw, rawHash: rawHash, prepared: prepared)
+            try insertAddresses(db, messageID: id, headers: prepared.parsed.headers)
+            try insertAttachments(db, messageID: id, attachments: prepared.attachments)
+            try Self.link(db, messageID: id, raw: raw)
+            try SearchIndexWriter.index(db, messageID: id)
+            try within?(db, .imported(id))
+            return .imported(id)
+        }
+    }
+
+    /// Stores a message whose reading never finished in `maximumAttempts` tries
+    /// (D-481, D-502): encrypted exactly as received, whole, with no parsing at
+    /// all, so nothing that stopped the earlier tries runs again. It is marked
+    /// "couldn't read all of this email" with this parser's version, and a newer
+    /// parser reads it again (`retryMarkedMessages`). It has no subject, sender
+    /// or text until then; opening and exporting it work from its stored bytes.
+    public func storeUnread(
+        _ raw: RawMessage,
+        restoring: Bool = false,
+        within: ((Database, ImportOutcome) throws -> Void)? = nil
+    ) throws -> ImportOutcome {
+        let key = raw.key
+        guard try accountAddress(key.accountID) != nil else { throw ImportError.unknownAccount(key.accountID) }
+        let rawHash = archive.rawFiles.hash(of: raw.bytes)
+        if let outcome = try storedBefore(raw, rawHash: rawHash, restoring: restoring, within: within) { return outcome }
+        let stored = try storeRawFile(raw, hash: rawHash, skeleton: nil, keptInline: 0)
+        return try archive.database.write { db -> ImportOutcome in
+            if let existing = try Self.messageID(db, account: key.accountID, rawHash: rawHash) {
+                try Self.link(db, messageID: existing, raw: raw)
+                try within?(db, .linked(existing))
+                return .linked(existing)
+            }
+            if restoring { try Self.deleteTombstone(db, account: key.accountID, rawHash: rawHash) }
+            try db.execute(sql: """
+                INSERT INTO messages (
+                    account_id, raw_hash, gmail_msgid, gmail_thrid, thread_key, internal_date, size,
+                    raw_state, raw_stored_size, parse_status, parse_warnings, parser_version,
+                    text_state, text_marked_version, imported_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'failed', ?, ?, 'incomplete', ?, ?)
+                """, arguments: [
+                    key.accountID.rawValue, rawHash,
+                    raw.gmailMessageID.map { Int64(bitPattern: $0) }, raw.gmailThreadID.map { Int64(bitPattern: $0) },
+                    Self.threadKey(raw: raw, headers: MessageHeaders(), rawHash: rawHash),
+                    Int(raw.internalDate.timeIntervalSince1970), raw.size > 0 ? raw.size : raw.bytes.count,
+                    stored.state, stored.storedSize, Self.unreadWarnings, parserVersion, parserVersion,
+                    Int(Date().timeIntervalSince1970),
+                ])
+            let id = db.lastInsertedRowID
+            try Self.link(db, messageID: id, raw: raw)
+            try SearchIndexWriter.index(db, messageID: id)
+            try within?(db, .imported(id))
+            return .imported(id)
+        }
+    }
+
+    /// The parse warning on a message stored unread. Words only, never content.
+    static let unreadWarnings = #"["not read: reading it stopped 3 times; stored whole as received"]"#
+
+    /// The outcome when this copy or these bytes are already accounted for, else nil.
+    private func storedBefore(
+        _ raw: RawMessage, rawHash: Data, restoring: Bool, within: ((Database, ImportOutcome) throws -> Void)?
+    ) throws -> ImportOutcome? {
+        let key = raw.key
         if try isAlreadyPresent(key) {
             if let within { try archive.database.write { db in try within(db, .alreadyPresent) } }
             return .alreadyPresent
         }
-
-        let rawHash = archive.rawFiles.hash(of: raw.bytes)
         if !restoring, let tombstone = try tombstoneID(account: key.accountID, rawHash: rawHash) {
             try archive.database.write { db in
                 try Self.rememberTombstonedCopy(db, tombstone: tombstone, key: key)
@@ -207,33 +327,44 @@ public final class Importer: Sendable {
             }
             return .linked(existing)
         }
+        return nil
+    }
 
-        // Work outside the transaction: parse, store attachments, build and check the skeleton, extract text.
-        let parsed = parser.parse(raw.bytes)
+    // MARK: - Reading a message
+
+    /// Everything worked out from a message before its rows are written.
+    struct Prepared: Sendable {
+        var parsed: ParsedMessage
+        var attachments: [PreparedAttachment]
+        var stored: StoredRaw
+        var rules: StoredRuleResult?
+    }
+
+    private func prepareMessage(_ raw: RawMessage, hash: Data, ownAddress: String) throws -> Prepared {
+        let parsed = parse(raw.bytes)
         let attachments = try parsed.attachments.map(prepare)
-        let stored = try storeRawFile(raw, hash: rawHash, parsed: parsed)
-        let rules = classifier?(parsed.headers, [ownAddress.lowercased()])
+        let skeleton = RawCompaction.skeleton(raw.bytes, parsed: parsed, hashOf: archive.attachmentFiles.hash(of:))
+        let stored = try storeRawFile(raw, hash: hash, skeleton: skeleton?.skeleton,
+                                      keptInline: skeleton?.keptInline ?? RawCompaction.inlineCandidates(parsed))
+        return Prepared(parsed: parsed, attachments: attachments, stored: stored,
+                        rules: classifier?(parsed.headers, [ownAddress.lowercased()]))
+    }
 
-        return try archive.database.write { db -> ImportOutcome in
-            // Another importer may have stored the same bytes meanwhile.
-            if let existing = try Self.messageID(db, account: key.accountID, rawHash: rawHash) {
-                try Self.link(db, messageID: existing, raw: raw)
-                try within?(db, .linked(existing))
-                return .linked(existing)
-            }
-            if restoring { try Self.deleteTombstone(db, account: key.accountID, rawHash: rawHash) }
-            let id = try insertMessage(db, raw: raw, rawHash: rawHash, stored: stored, parsed: parsed, rules: rules,
-                                       hasAttachments: attachments.contains { $0.parsed.disposition == .attachment })
-            try insertAddresses(db, messageID: id, headers: parsed.headers)
-            try insertAttachments(db, messageID: id, attachments: attachments)
-            try Self.link(db, messageID: id, raw: raw)
-            try SearchIndexWriter.index(db, messageID: id)
-            try within?(db, .imported(id))
-            return .imported(id)
+    /// Runs `work` under `preparation`'s time limit. On timeout the work is
+    /// abandoned, nothing is recorded, and the caller's attempt stays counted.
+    func prepareWithinLimit<Value: Sendable>(timedOut: ImportError, _ work: @escaping @Sendable () throws -> Value) throws -> Value {
+        switch preparation.run({ Result { try work() } }) {
+        case .finished(let result):
+            return try result.get()
+        case .timedOut:
+            logger.warning("reading a message did not finish in time; abandoned", metadata: ["error": "\(Redact.scrub(String(describing: timedOut)))"])
+            throw timedOut
+        case .tooManyStuck:
+            throw ImportError.tooManyStuck
         }
     }
 
-    private func accountAddress(_ id: AccountID) throws -> String? {
+    func accountAddress(_ id: AccountID) throws -> String? {
         try archive.database.writeWithoutTransaction { db in
             try String.fetchOne(db, sql: "SELECT email FROM accounts WHERE id = ?", arguments: [id.rawValue])
         }
@@ -250,7 +381,7 @@ public final class Importer: Sendable {
 
     // MARK: - Skeleton
 
-    struct StoredRaw {
+    struct StoredRaw: Sendable {
         var state: String
         var storedSize: Int
         var keptInline: Int
@@ -259,9 +390,8 @@ public final class Importer: Sendable {
     /// Writes the message file: a skeleton when at least one attachment could
     /// be cut out, else the whole message. `RawCompaction.skeleton` has already
     /// proved the skeleton rebuilds into exactly these bytes.
-    private func storeRawFile(_ raw: RawMessage, hash: Data, parsed: ParsedMessage) throws -> StoredRaw {
-        let skeleton = RawCompaction.skeleton(raw.bytes, parsed: parsed, hashOf: archive.attachmentFiles.hash(of:))
-        let result = try archive.rawFiles.write(skeleton?.skeleton ?? raw.bytes, hash: hash, skeleton: skeleton != nil)
+    private func storeRawFile(_ raw: RawMessage, hash: Data, skeleton: Data?, keptInline: Int) throws -> StoredRaw {
+        let result = try archive.rawFiles.write(skeleton ?? raw.bytes, hash: hash, skeleton: skeleton != nil)
         var state = skeleton == nil ? "full" : "skeleton"
         if !result.written {
             // The file was already there (the same bytes in another account, or a
@@ -271,8 +401,7 @@ public final class Importer: Sendable {
                 throw ImportError.rebuildMismatch(raw.key)
             }
         }
-        return StoredRaw(state: state, storedSize: result.storedSize,
-                         keptInline: skeleton?.keptInline ?? RawCompaction.inlineCandidates(parsed))
+        return StoredRaw(state: state, storedSize: result.storedSize, keptInline: keptInline)
     }
 
     // MARK: - Tombstones (D-033)
@@ -297,7 +426,7 @@ public final class Importer: Sendable {
 
     // MARK: - Attachments
 
-    struct PreparedAttachment {
+    struct PreparedAttachment: Sendable {
         var parsed: ParsedAttachment
         var hash: Data
         var storedSize: Int
@@ -305,7 +434,7 @@ public final class Importer: Sendable {
         var extraction: ExtractionResult?
     }
 
-    private func prepare(_ attachment: ParsedAttachment) throws -> PreparedAttachment {
+    func prepare(_ attachment: ParsedAttachment) throws -> PreparedAttachment {
         let hash = archive.attachmentFiles.hash(of: attachment.data)
         let known = try archive.database.writeWithoutTransaction { db in
             try Bool.fetchOne(db, sql: "SELECT EXISTS (SELECT 1 FROM attachments WHERE content_hash = ?)", arguments: [hash]) ?? false
@@ -318,23 +447,24 @@ public final class Importer: Sendable {
         return PreparedAttachment(parsed: attachment, hash: hash, storedSize: stored, extraction: extraction)
     }
 
-    private func insertAttachments(_ db: Database, messageID: StoredMessageID, attachments: [PreparedAttachment]) throws {
+    func insertAttachments(_ db: Database, messageID: StoredMessageID, attachments: [PreparedAttachment]) throws {
         let now = Int(Date().timeIntervalSince1970)
         for attachment in attachments {
             let extraction = attachment.extraction ?? .none
             // Insert, or find the existing row for this content (deduplication).
             let attachmentID = try Int64.fetchOne(db, sql: """
-                INSERT INTO attachments (content_hash, size, stored_size, mime_type, text_status, created_at)
-                VALUES (?, ?, ?, ?, ?, ?)
+                INSERT INTO attachments (content_hash, size, stored_size, mime_type, text_status, text_failed_version, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT (content_hash) DO UPDATE SET content_hash = excluded.content_hash
                 RETURNING id
                 """, arguments: [attachment.hash, attachment.parsed.data.count, attachment.storedSize,
-                                 TextExtractor.effectiveType(attachment.parsed), extraction.status.rawValue, now])!
+                                 TextExtractor.effectiveType(attachment.parsed), extraction.status.rawValue,
+                                 extraction.failed ? extractorVersion : nil, now])!
             if let text = extraction.text, let method = extraction.method {
                 try db.execute(sql: """
                     INSERT INTO attachment_text (attachment_id, text, method, extractor_version, extracted_at)
                     VALUES (?, ?, ?, ?, ?) ON CONFLICT DO NOTHING
-                    """, arguments: [attachmentID, text, method.rawValue, TextExtractor.version, now])
+                    """, arguments: [attachmentID, text, method.rawValue, extractorVersion, now])
             }
             let parsed = attachment.parsed
             try db.execute(sql: """
@@ -348,10 +478,9 @@ public final class Importer: Sendable {
 
     // MARK: - Rows
 
-    private func insertMessage(
-        _ db: Database, raw: RawMessage, rawHash: Data, stored: StoredRaw, parsed: ParsedMessage,
-        rules: StoredRuleResult?, hasAttachments: Bool
-    ) throws -> StoredMessageID {
+    private func insertMessage(_ db: Database, raw: RawMessage, rawHash: Data, prepared: Prepared) throws -> StoredMessageID {
+        let (parsed, stored, rules) = (prepared.parsed, prepared.stored, prepared.rules)
+        let hasAttachments = prepared.attachments.contains { $0.parsed.disposition == .attachment }
         let headers = parsed.headers
         let fromID = try headers.from.first.flatMap { try Self.addressID(db, $0) }
         let warnings = parsed.warnings.isEmpty ? nil
@@ -370,7 +499,8 @@ public final class Importer: Sendable {
                 Self.threadKey(raw: raw, headers: headers, rawHash: rawHash),
                 Int(raw.internalDate.timeIntervalSince1970), headers.date.map { Int($0.timeIntervalSince1970) },
                 headers.dateRaw, headers.subject, fromID, raw.size > 0 ? raw.size : raw.bytes.count, hasAttachments,
-                stored.state, stored.storedSize, stored.keptInline, parsed.status.rawValue, warnings, MIMEParser.version,
+                stored.state, stored.storedSize, stored.keptInline, parsed.status.rawValue, warnings, parserVersion,
+
                 rules?.suggestion.rawValue, rules?.score, rules.map { $0.signals.joined(separator: ",") }, now,
             ])
         let id = db.lastInsertedRowID
@@ -391,7 +521,7 @@ public final class Importer: Sendable {
         return "h:" + rawHash.prefix(8).hex
     }
 
-    private func insertAddresses(_ db: Database, messageID: StoredMessageID, headers: MessageHeaders) throws {
+    func insertAddresses(_ db: Database, messageID: StoredMessageID, headers: MessageHeaders) throws {
         let roles: [(String, [EmailAddress])] = [
             ("from", headers.from), ("sender", headers.sender.map { [$0] } ?? []), ("reply_to", headers.replyTo),
             ("to", headers.to), ("cc", headers.cc), ("bcc", headers.bcc), ("delivered_to", headers.deliveredTo),
