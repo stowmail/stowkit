@@ -73,7 +73,7 @@ mime)
     swiftc "${SANITIZE[@]}" "${with_stowcore[@]}" -module-name MIMEFuzz \
         Fuzz/MIMEFuzz.swift Fuzz/Shims.swift Sources/StowStore/MIME/*.swift \
         Sources/StowStore/Archive/RawCompaction.swift Sources/StowStore/Extraction/ZipReader.swift \
-        Sources/StowStore/Extraction/TextExtractor.swift \
+        Sources/StowStore/Extraction/TextExtractor.swift Sources/StowStore/Extraction/TimeLimit.swift \
         -o "$OUT/fuzz"
     # The 15 MiB fixture is left out: libFuzzer mutates inputs up to -max_len.
     if [ -d Tests/Fixtures/eml ]; then find Tests/Fixtures/eml -name '*.eml' -size -2M -exec cp {} "$OUT/corpus/" \; ; fi
