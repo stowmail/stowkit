@@ -16,7 +16,8 @@ swift build
 echo "==> swift test"
 swift test
 
-# The benchmarks run in release with -enable-testing; keep that building.
+# The benchmarks run in release with -enable-testing; keep that building. Local
+# only: on the CI runner this step alone took 4 min 35 s (D-504).
 echo "==> swift build -c release --build-tests"
 swift build -c release -Xswiftc -enable-testing --build-tests
 
