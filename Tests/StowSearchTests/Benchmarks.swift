@@ -146,24 +146,32 @@ struct Benchmarks {
         _ = try await timeImport(busy, scans)
         let queue = OCRQueue(archive: busy)
         #expect(try queue.status().pending == scans.count)
-        let ocr = Task { try await queue.run() }
+        // The loop `OCRQueue.run` runs, at the same background priority, in a task the test can
+        // stop: `run`'s own detached task does not see the caller's cancellation.
+        let ocr = Task.detached(priority: .background) {
+            var processed = 0
+            while !Task.isCancelled, try queue.runNext() { processed += 1 }
+            return processed
+        }
         let during = try await timeImport(busy, messages)
         let processedDuring = try queue.status().done
 
         // At background priority OCR yields to a busy CPU (D-207), so it may do little during the
-        // import. Prove the queue was live: once import stops, it must make progress on its own.
-        let idleStart = Date()
-        while try queue.status().done <= processedDuring, Date().timeIntervalSince(idleStart) < 120 {
-            try await Task.sleep(nanoseconds: 200_000_000)
-        }
-        let firstIdleItem = Date().timeIntervalSince(idleStart)
+        // import. Prove the queue is live without waiting on the scheduler: stop the background
+        // loop (it finishes the item in hand), then take the next item here (security sweep 3 step 12).
         ocr.cancel()
         _ = try? await ocr.value
+        let beforeNext = try queue.status()
+        let tookNext = try queue.runNext()
+        let afterNext = try queue.status()
 
         let slowdown = (during.seconds - baseline.seconds) / baseline.seconds
-        print(String(format: "BENCH OCR: import alone %.2f s, with OCR queue running %.2f s (%.1f%%); %d OCR items done during import, next item %.1f s after import ended",
-                     baseline.seconds, during.seconds, slowdown * 100, processedDuring, firstIdleItem))
-        #expect(try queue.status().done > processedDuring)
+        var load = [Double](repeating: 0, count: 3)
+        _ = getloadavg(&load, 3)
+        print(String(format: "BENCH OCR: import alone %.2f s, with OCR queue running %.2f s (%.1f%%); %d OCR items done during import; load average %.2f %.2f %.2f",
+                     baseline.seconds, during.seconds, slowdown * 100, processedDuring, load[0], load[1], load[2]))
+        // Either every scan was done already, or the next one was taken and finished now.
+        #expect(beforeNext.pending == 0 || (tookNext && afterNext.done + afterNext.failed > beforeNext.done + beforeNext.failed))
         #expect(slowdown < 0.10)
     }
 

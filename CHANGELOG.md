@@ -13,6 +13,10 @@ Changes to StowKit and the `stowmail` command-line tool, newest first. Security 
 - **Low:** log lines kept CR, LF and other control characters from the text they quoted, so a mail server's reply could start what looked like a new log line in `stowmail.log` or on standard error; metadata keys were not scrubbed; and a log folder or `stowmail.log` that already existed kept whatever permissions it had (second review A-15). Each log line now scrubs the message, every metadata key and value and the label, then escapes them with `Redact.oneLine`, so one event is one line. The first write in each process sets the folder to 0700 and the file to 0600.
 - **Low:** `stowmail mcp log` printed each audit entry's client name, tool name and arguments as an assistant sent them, so an assistant steered by an email could put terminal escape sequences (erase the line, write the clipboard with OSC 52), line breaks or bidi controls in front of whoever reads the log (second review A-16). Each printed field now goes through the reply sanitiser (`ArchiveTools.oneLine`); the line is built by `MCPAuditEntry.printedLine`. The audit file itself is unchanged.
 
+### Fixed
+
+- The OCR benchmark (`Benchmarks.ocrDoesNotHurtImport`, run only with `STOW_BENCH=1`) no longer waits up to 120 s for background-priority OCR to get a core after the import, which failed once on a busy Mac. It stops its own OCR loop and takes the next item directly, and prints the load average with its figures.
+
 ## 0.1.2 (29 October 2026)
 
 ### Security
