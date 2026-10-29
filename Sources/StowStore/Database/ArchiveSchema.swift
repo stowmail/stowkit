@@ -30,6 +30,25 @@ public enum ArchiveSchema {
         try migrator.migrate(writer)
     }
 
+    /// One line for `stowmail doctor`: the archive's schema version, read from
+    /// GRDB's `grdb_migrations` without changing anything, and the newest
+    /// version this build knows. A version written by a newer build is shown as
+    /// such, not as an error: older builds read what they know.
+    public static func versionSummary(_ db: Database) throws -> String {
+        let applied = try db.tableExists("grdb_migrations")
+            ? try String.fetchAll(db, sql: "SELECT identifier FROM grdb_migrations") : []
+        let known = migrationIdentifiers
+        let newest = known.last!
+        if let newer = applied.filter({ !known.contains($0) }).sorted(by: { $0.localizedStandardCompare($1) == .orderedAscending }).last {
+            return "Schema: \(newer), newer than this build, which knows up to \(newest) and reads what it knows."
+        }
+        guard let current = known.last(where: applied.contains) else {
+            return "Schema: none yet (made the first time this build writes to it). This build knows up to \(newest)."
+        }
+        if current == newest { return "Schema: \(current). This build knows up to \(newest)." }
+        return "Schema: \(current) (upgrades the next time this build writes to it). This build knows up to \(newest)."
+    }
+
     // MARK: - v1
 
     static func v1(_ db: Database) throws {

@@ -13,6 +13,10 @@ Changes to StowKit and the `stowmail` command-line tool, newest first. Security 
 - **Low:** `stowmail archive-move` released the writer lock before asking whether to delete the old copy, so a background sync that had opened the old folder could sync mail into it, which the deletion then destroyed (second review A-10). The command now holds the lock until it ends, and leaves `moved-to.json` in the old folder, flushed, before switching. `Archive.open`, `createArchive` and `archive-location` refuse a folder with it and name the new place. The scheduler checks for it after opening and again after taking the lock, and `stowmail daemon run` then exits with status 75 so launchd starts it afresh at the new place. A background sync installed with `STOW_ARCHIVE_DIR` pinned to another folder is warned about before the switch. The move itself is now `ArchiveRelocation.move` in StowEngine; `Scheduler.run` returns why it stopped.
 - **Low:** an mbox export that stopped part way (a missing or damaged stored file, a full disk, a kill) left a partial file under its final name, and the retry then failed because the file existed; "Export everything" stayed blocked until the user deleted it (second review A-20). `MboxExport.export` now writes under a hidden temporary name, flushes it and renames it into place without replacing anything (`RENAME_EXCL`), and removes the temporary file on any error. `SafeFile` gains `openTemporary(in:)` and `publishExclusively(_:as:)`.
 
+### Added
+
+- `stowmail doctor` prints the archive's schema version and the newest this build knows (`ArchiveSchema.versionSummary`); an archive written by a newer build is shown as such.
+
 ### Fixed
 
 - `swift test -c release -Xswiftc -enable-testing` compiles again, so the benchmarks run. The iCloud sign-in tests, which need a debug-only plain-text test endpoint (D-471), are left out of release builds. `scripts/check.sh` now builds the tests in release too (locally only; on the CI runner it took over 4 minutes).

@@ -57,6 +57,7 @@ struct Doctor: AsyncParsableCommand {
         if location.exists {
             print("  database: present\(RecoveryBundle.exists(in: location.root) ? ", recovery bundle present" : ", NO recovery bundle")")
             if let archive = try? CLIArchive.open(readOnly: true) {
+                if let schema = try? await archive.database.read({ try ArchiveSchema.versionSummary($0) }) { print("  \(schema)") }
                 switch ArchiveSetup.recoveryState(archive) {
                 case .confirmed: print("  recovery key confirmed: yes")
                 case .unconfirmed: print("  recovery key confirmed: NO (run `stowmail recovery-key create`)")
