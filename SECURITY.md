@@ -17,7 +17,7 @@ Never send real email content or anyone's credentials in a report. A synthetic m
 
 A fix is released first and disclosed second, never the other way round:
 
-- **Medium or worse:** a GitHub security advisory on this repository, with a CVE requested through GitHub, published once the fix is on `main`.
+- **Medium or worse:** a GitHub security advisory on this repository, published once the fix is on `main` and in a tagged release. It reaches the GitHub Advisory Database and Dependabot. A CVE is requested through GitHub as well once Stow has users outside the project; until then the advisory's GHSA ID is the identifier.
 - **Low:** a line in the changelog.
 
 Reporters are credited in both, as above. An advisory says who found the problem and how, including when it came from our own AI-assisted review rather than an independent one.

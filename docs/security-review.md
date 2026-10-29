@@ -47,9 +47,23 @@ No High findings. Five Medium findings, all fixed with tests:
 
 Low findings fixed: a huge result offset requested through the MCP server could crash it; the mailbox export checked for an existing file and then created it, leaving a gap; a `%` typed into a tidy-up selector matched more mail than intended (the count was always shown before anything was removed).
 
+## Second review, 28 October 2026
+
+A second in-house, AI-assisted review read the engine at `711062a` with none of the first review's conclusions. As before, it is not an independent audit. Its findings are being fixed in batches; this section lists the ones fixed so far, each with a test that fails on the old code.
+
+| | Severity | Finding | Fix |
+|---|---|---|---|
+| A-01 | High | Crafted HTML in an email made converting it to text take time proportional to the square of its size: 19 minutes for a 2 MB body. The email was never recorded, so it was fetched and parsed again on every sync and archiving stopped. Disclosed as [GHSA-xhg9-88xv-2q76](https://github.com/stowmail/stowkit/security/advisories/GHSA-xhg9-88xv-2q76). | The tag scanner only moves forward and stops looking for tags once none can close, so it runs in linear time (`d8bb7f0`, in 0.1.0). |
+| A-02 | Medium | The same effect from a header full of `=?`: 195 s for a 1 MB Subject. Same advisory. | Encoded-word scans stop at 76 bytes (the RFC 2047 maximum is 75), and at most 16 KB of a header is decoded (`c6ed62c`, in 0.1.0). |
+| A-03, in part | Medium | One attachment that hangs Apple's PDF reader could stall import or text extraction for good. | The text read from each part is capped at 10 MB, and PDFKit runs on its own thread with a 30-second limit; a stuck reader is abandoned and the email stored without that text (`dc530da`, in 0.1.0). Keeping and marking an email that still cannot be read, and the same limits for OCR, are still open. |
+| A-13 | Low | A mail server could hold sync without limit: replies for messages Stow had not asked for were kept in memory, a reply's size was bounded only by the server's own claims, and a server sending one byte every 89 seconds never tripped the idle timer, which also held up every other account. | Replies for messages not asked for are dropped as they arrive; each command has a byte limit (twice the expected size plus 16 MB, never over 1 GB) and a 5-minute deadline; the full flag check runs in windows; one stuck account no longer holds the others (`0fe59a0`, in 0.1.0). |
+| R-01 | | Nothing checked a push. | Every push to `main` builds, tests and scans the history with gitleaks on GitHub Actions, as the `check` job; CodeQL runs on pushes and weekly, and reads every engine and vendored source file. Actions are pinned to full commit SHAs, with a read-only token and no secrets. |
+| R-02 | | Fuzzing covered only the MIME parser, with inputs too small to find slow code. | libFuzzer targets for the MIME parser, HTML to text, encoded words and address lists, the search query parser, the ZIP reader and IMAP reply assembly, with 1 MB inputs and a 5-second limit per input (`scripts/fuzz.sh`). Run against the old code, they found A-01 and A-02 within 30 seconds; on the fixed code each ran 10 minutes with no finding. A short pass runs on pushes to `main` and weekly. |
+
 ## Still open
 
 - **Attachments are read by Apple's frameworks** (PDFKit, Vision, XMLParser) in the process that holds the keys. A flaw in one of those would run with access to the archive. The app's sandbox narrows this; moving text extraction into its own sandboxed process, holding no keys, is planned.
+- **An email or attachment that still cannot be read** (second review A-03 and D-481): it should be kept, marked and retried only after an update, and OCR should survive an image that hangs Apple's reader in the same way. Planned for the next batch.
 - **Removing an account does not revoke Stow's access at Google.** The tokens are deleted on the Mac and Stow tells you to remove its access in your Google account; calling Google's revoke service automatically is planned.
 - **Encrypted files are not forced to disk before the database records them.** After a power cut (not a crash), a file could be incomplete; `stowmail verify` reports it. Planned.
 - **Prompt injection cannot be prevented by Stow alone.** Stow's tools can only read, mark email as data and keep each email's text between coded lines. If your assistant can also send email, browse or write files, a tricked assistant could try to use those. See [SECURITY.md](../SECURITY.md).
