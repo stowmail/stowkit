@@ -237,7 +237,11 @@ public final class Importer: Sendable {
             try prepareMessage(raw, hash: rawHash, ownAddress: ownAddress)
         }
 
-        return try archive.database.write { db -> ImportOutcome in
+        if prepared.stored.written || prepared.attachments.contains(where: \.written) {
+            // The files above go to the disk before these rows can (A-05, D-507).
+            try archive.diskSync.barrier(archive.location.root)
+        }
+        let outcome = try archive.database.write { db -> ImportOutcome in
             // Another importer may have stored the same bytes meanwhile.
             if let existing = try Self.messageID(db, account: key.accountID, rawHash: rawHash) {
                 try Self.link(db, messageID: existing, raw: raw)
@@ -253,6 +257,9 @@ public final class Importer: Sendable {
             try within?(db, .imported(id))
             return .imported(id)
         }
+        // Every file these rows use was flushed before the transaction began (A-05).
+        try archive.diskSync.note(.commit)
+        return outcome
     }
 
     /// Stores a message whose reading never finished in `maximumAttempts` tries
@@ -271,7 +278,8 @@ public final class Importer: Sendable {
         let rawHash = archive.rawFiles.hash(of: raw.bytes)
         if let outcome = try storedBefore(raw, rawHash: rawHash, restoring: restoring, within: within) { return outcome }
         let stored = try storeRawFile(raw, hash: rawHash, skeleton: nil, keptInline: 0)
-        return try archive.database.write { db -> ImportOutcome in
+        if stored.written { try archive.diskSync.barrier(archive.location.root) }
+        let outcome = try archive.database.write { db -> ImportOutcome in
             if let existing = try Self.messageID(db, account: key.accountID, rawHash: rawHash) {
                 try Self.link(db, messageID: existing, raw: raw)
                 try within?(db, .linked(existing))
@@ -298,6 +306,8 @@ public final class Importer: Sendable {
             try within?(db, .imported(id))
             return .imported(id)
         }
+        try archive.diskSync.note(.commit)
+        return outcome
     }
 
     /// The parse warning on a message stored unread. Words only, never content.
@@ -384,14 +394,26 @@ public final class Importer: Sendable {
     struct StoredRaw: Sendable {
         var state: String
         var storedSize: Int
+        var written = false
         var keptInline: Int
     }
 
     /// Writes the message file: a skeleton when at least one attachment could
     /// be cut out, else the whole message. `RawCompaction.skeleton` has already
     /// proved the skeleton rebuilds into exactly these bytes.
+    ///
+    /// The same bytes in another account share the file. If that file is
+    /// damaged it is replaced (A-05) in the form those rows record: whole when
+    /// they say `full`, which these bytes always allow; a skeleton only when
+    /// this import made one too, else the damage is reported, not papered over.
     private func storeRawFile(_ raw: RawMessage, hash: Data, skeleton: Data?, keptInline: Int) throws -> StoredRaw {
-        let result = try archive.rawFiles.write(skeleton ?? raw.bytes, hash: hash, skeleton: skeleton != nil)
+        let recorded = try archive.database.writeWithoutTransaction { db in
+            try String.fetchOne(db, sql: "SELECT raw_state FROM messages WHERE raw_hash = ? LIMIT 1", arguments: [hash])
+        }
+        var skeleton = skeleton
+        if recorded == "full" { skeleton = nil }
+        let result = try archive.rawFiles.write(skeleton ?? raw.bytes, hash: hash, skeleton: skeleton != nil,
+                                                replacingDamaged: !(recorded == "skeleton" && skeleton == nil))
         var state = skeleton == nil ? "full" : "skeleton"
         if !result.written {
             // The file was already there (the same bytes in another account, or a
@@ -401,7 +423,7 @@ public final class Importer: Sendable {
                 throw ImportError.rebuildMismatch(raw.key)
             }
         }
-        return StoredRaw(state: state, storedSize: result.storedSize, keptInline: keptInline)
+        return StoredRaw(state: state, storedSize: result.storedSize, written: result.written, keptInline: keptInline)
     }
 
     // MARK: - Tombstones (D-033)
@@ -430,6 +452,7 @@ public final class Importer: Sendable {
         var parsed: ParsedAttachment
         var hash: Data
         var storedSize: Int
+        var written = false
         /// Nil when the content was already in the archive: its text is there too.
         var extraction: ExtractionResult?
     }
@@ -439,12 +462,13 @@ public final class Importer: Sendable {
         let known = try archive.database.writeWithoutTransaction { db in
             try Bool.fetchOne(db, sql: "SELECT EXISTS (SELECT 1 FROM attachments WHERE content_hash = ?)", arguments: [hash]) ?? false
         }
-        let stored = try archive.attachmentFiles.write(attachment.data, hash: hash).storedSize
+        let stored = try archive.attachmentFiles.write(attachment.data, hash: hash)
         var extraction: ExtractionResult?
         if !known {
             extraction = extractText ? extractor.extract(attachment) : ExtractionResult.none
         }
-        return PreparedAttachment(parsed: attachment, hash: hash, storedSize: stored, extraction: extraction)
+        return PreparedAttachment(parsed: attachment, hash: hash, storedSize: stored.storedSize, written: stored.written,
+                                  extraction: extraction)
     }
 
     func insertAttachments(_ db: Database, messageID: StoredMessageID, attachments: [PreparedAttachment]) throws {

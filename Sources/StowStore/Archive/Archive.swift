@@ -22,8 +22,8 @@ public final class Archive: Sendable {
         self.database = database
         self.diskSync = diskSync
         keysDigest = keys.digest
-        rawFiles = EncryptedFileStore(directory: location.rawDirectory, kind: .raw, keys: keys)
-        attachmentFiles = EncryptedFileStore(directory: location.attachmentsDirectory, kind: .attachment, keys: keys)
+        rawFiles = EncryptedFileStore(directory: location.rawDirectory, kind: .raw, keys: keys, diskSync: diskSync)
+        attachmentFiles = EncryptedFileStore(directory: location.attachmentsDirectory, kind: .attachment, keys: keys, diskSync: diskSync)
     }
 
     public static func open(_ location: ArchiveLocation, keys: ArchiveKeys, readOnly: Bool = false,

@@ -167,6 +167,35 @@ struct Benchmarks {
         #expect(slowdown < 0.10)
     }
 
+    // MARK: Flushing stored files (A-05, L-5)
+
+    /// A first sync of 10,000 messages, one in three with an attachment, about one
+    /// attachment in five shared with an earlier message. Run on the code before and
+    /// after a change to how files are flushed; `STOW_BENCH_RUNS` (default 3) runs each.
+    @Test func firstSyncWithAttachments() async throws {
+        var generator = MessageGenerator(seed: 21)
+        var messages = (0..<10_000).map { generator.message(uid: UInt32($0 + 1), attachment: $0 % 3 == 0 ? .text : nil) }
+        // Every fifth message with an attachment repeats an earlier one's under a new
+        // Message-ID, so the attachment is already stored and reuse is measured too.
+        for index in stride(from: 15, to: messages.count, by: 15) {
+            let earlier = messages[index - 15]
+            let text = String(decoding: earlier.bytes, as: UTF8.self)
+                .replacingOccurrences(of: "Message-ID: <gen-\(earlier.key.uid)@", with: "Message-ID: <dup-\(index)@")
+            let bytes = Data(text.utf8)
+            messages[index] = RawMessage(key: messages[index].key, labels: [], internalDate: earlier.internalDate,
+                                         size: bytes.count, bytes: bytes)
+        }
+        let runs = Int(ProcessInfo.processInfo.environment["STOW_BENCH_RUNS"] ?? "3") ?? 3
+        var times: [Double] = []
+        for _ in 0..<runs {
+            let (archive, root) = try freshArchive()
+            let summary = try await timeImport(archive, messages, extractText: false)
+            times.append(summary.seconds)
+            try? FileManager.default.removeItem(at: root)
+        }
+        print(String(format: "BENCH first sync with attachments: %@ s", times.map { String(format: "%.2f", $0) }.joined(separator: ", ")))
+    }
+
     // MARK: MCP queries alongside import (Phase 3 QA)
 
     /// Imports into an archive that already holds mail, alone and then while a

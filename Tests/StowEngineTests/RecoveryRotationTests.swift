@@ -121,13 +121,13 @@ extension RecoveryRotationTests {
         let root = location.root.path
         let written = recorder.steps
         #expect(written.count == 3)
-        guard case .flushFile(let temporary, full: true) = written.first else { Issue.record("no full flush first: \(written)"); return }
+        guard case .flushFile(let temporary, .full) = written.first else { Issue.record("no full flush first: \(written)"); return }
         #expect(temporary.hasPrefix(root + "/.keys.recovery.pending."))
-        #expect(Array(written.dropFirst()) == [.rename(from: temporary, to: pending), .flushFolder(root)])
+        #expect(Array(written.dropFirst()) == [.rename(from: temporary, to: pending), .flushFolder(root, .full)])
 
         recorder.clear()
         try ArchiveSetup.confirm(archive, recoveryKey: second, typed: [5: second.groups[5], 6: second.groups[6]])
-        #expect(recorder.steps == [.durableCommit, .rename(from: pending, to: live), .flushFolder(root)])
+        #expect(recorder.steps == [.durableCommit, .rename(from: pending, to: live), .flushFolder(root, .full)])
         // The writer's connection is back on its usual settings afterwards.
         #expect(try archive.database.write { try Int.fetchOne($0, sql: "PRAGMA synchronous") } == 1)
         #expect(try archive.database.write { try Int.fetchOne($0, sql: "PRAGMA fullfsync") } == 0)
