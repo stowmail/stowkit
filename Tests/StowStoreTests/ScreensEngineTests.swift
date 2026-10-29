@@ -98,7 +98,7 @@ import Testing
                     == "2025-10-09 No subject, a@b.example.eml")
         #expect(EmlFileName.make(date: date, subject: "../.secret\n\tline", sender: nil, timeZone: utc) == "2025-10-09 -.secret line.eml")
         let long = EmlFileName.make(date: date, subject: String(repeating: "word ", count: 60), sender: nil, timeZone: utc)
-        #expect(long.count <= EmlFileName.maxLength && long.hasSuffix(".eml"))
+        #expect(long.utf8.count <= EmlFileName.maxBytes && long.hasSuffix(".eml"))
         #expect(SafeFile.numbered("Invoice.eml", 3) == "Invoice 3.eml")
         #expect(SafeFile.numbered("README", 2) == "README 2")
     }

@@ -106,19 +106,24 @@ public enum SafeFile {
         throw SafeFileError.writeFailed(folder.path)
     }
 
-    /// `Invoice.eml`, then `Invoice 2.eml`, `Invoice 3.eml` (D-419).
+    /// `Invoice.eml`, then `Invoice 2.eml`, `Invoice 3.eml` (D-419). The stem is cut, at a
+    /// character, to keep the numbered name within `EmlFileName.maxBytes` (A-21, D-518).
     public static func numbered(_ name: String, _ number: Int) -> String {
         guard number > 1 else { return name }
         let ext = (name as NSString).pathExtension
+        let suffix = " \(number)" + (ext.isEmpty ? "" : ".\(ext)")
         let stem = ext.isEmpty ? name : String(name.dropLast(ext.count + 1))
-        return ext.isEmpty ? "\(stem) \(number)" : "\(stem) \(number).\(ext)"
+        return EmlFileName.prefix(stem, bytes: EmlFileName.maxBytes - suffix.utf8.count) + suffix
     }
 }
 
 /// The name Save as Email File suggests (D-419): `<YYYY-MM-DD> <subject>, <sender name>.eml`,
-/// with characters a file name cannot hold replaced and the whole trimmed to 120 characters.
+/// with characters a file name cannot hold replaced and the whole cut, between characters,
+/// to `maxBytes` of UTF-8 (A-21, D-518). File systems limit names to 255 bytes (ext4, SMB
+/// shares and most NAS volumes) or 255 UTF-16 units (APFS, HFS+, exFAT); 240 bytes fits
+/// both and leaves room for a " 999" from `SafeFile.numbered`.
 public enum EmlFileName {
-    public static let maxLength = 120
+    public static let maxBytes = 240
 
     /// `date` is the message's date as the list shows it (`internal_date`), as a day in
     /// `timeZone`; `sender` is the From name, else its address.
@@ -132,10 +137,24 @@ public enum EmlFileName {
         var stem = prefix + " " + (subjectText.isEmpty ? "No subject" : subjectText)
         if !senderText.isEmpty { stem += ", " + senderText }
         let ext = ".eml"
-        if stem.count + ext.count > maxLength {
-            stem = String(stem.prefix(maxLength - ext.count)).trimmingCharacters(in: .whitespaces)
+        if stem.utf8.count + ext.utf8.count > maxBytes {
+            stem = Self.prefix(stem, bytes: maxBytes - ext.utf8.count).trimmingCharacters(in: .whitespaces)
         }
         return stem + ext
+    }
+
+    /// The longest run of `text`'s characters (grapheme clusters, so an emoji or an accented
+    /// letter is never split) that fits in `bytes` of UTF-8.
+    public static func prefix(_ text: String, bytes: Int) -> String {
+        var used = 0
+        var end = text.startIndex
+        for index in text.indices {
+            let size = text[index].utf8.count
+            guard used + size <= bytes else { break }
+            used += size
+            end = text.index(after: index)
+        }
+        return String(text[..<end])
     }
 
     /// Path separators, Finder's colon and control characters become a dash; runs of
