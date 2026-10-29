@@ -63,6 +63,41 @@ public enum Redact {
         return replaceAddresses(in: result)
     }
 
+    /// Keeps text to one line by showing every character that could break or
+    /// rewrite a line as an escape (A-14, A-15, D-514): CR, LF and tab as `\r`,
+    /// `\n` and `\t`; every other control character (C0, DEL, C1 including
+    /// NEL), the line and paragraph separators and the bidi controls as
+    /// `\u{XX}`. Everything else, including letters in any script, emoji and
+    /// joiners, is unchanged. Apply after `scrub`, so an escape cannot split a
+    /// pattern `scrub` would have found.
+    public static func oneLine(_ text: String) -> String {
+        var result = ""
+        result.reserveCapacity(text.utf8.count)
+        for scalar in text.unicodeScalars {
+            switch scalar {
+            case "\r": result += "\\r"
+            case "\n": result += "\\n"
+            case "\t": result += "\\t"
+            default:
+                if breaksLines(scalar) {
+                    result += "\\u{" + String(scalar.value, radix: 16, uppercase: true).leftPadded(to: 2) + "}"
+                } else {
+                    result.unicodeScalars.append(scalar)
+                }
+            }
+        }
+        return result
+    }
+
+    static func breaksLines(_ scalar: Unicode.Scalar) -> Bool {
+        switch scalar.value {
+        case 0x00...0x1F, 0x7F...0x9F: true          // C0, DEL, C1 (NEL is U+0085)
+        case 0x2028, 0x2029: true                    // line and paragraph separators
+        case 0x200E, 0x200F, 0x202A...0x202E, 0x2066...0x2069: true  // bidi marks, embeddings, overrides, isolates
+        default: false
+        }
+    }
+
     /// Pattern and replacement pairs, applied in order. Tokens go first so their
     /// pieces are not mistaken for anything else.
     private static let scrubRules: [(String, String)] = [
@@ -92,5 +127,11 @@ public enum Redact {
         }
         result += ns.substring(from: cursor)
         return result
+    }
+}
+
+private extension String {
+    func leftPadded(to width: Int) -> String {
+        count >= width ? self : String(repeating: "0", count: width - count) + self
     }
 }

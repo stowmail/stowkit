@@ -18,6 +18,38 @@ struct Stowmail: AsyncParsableCommand {
             Coverage.self, DeletionCheckCommand.self, ArchiveLocationCommand.self, ArchiveMove.self, Import.self, Stats.self, Search.self, ThreadCommand.self, OCR.self, MCPCommand.self,
         ]
     )
+
+    /// ArgumentParser's own `main` prints any error a command throws as
+    /// `Error: \(error)`, unscrubbed (A-14). This one leaves ArgumentParser's
+    /// own errors (help, version, usage, validation, `CleanExit`, `ExitCode`,
+    /// such as the daemon's 75) to it, so their text and exit status are as
+    /// before, and prints anything else through `TopLevelError.line`.
+    static func main() async {
+        let command: any ParsableCommand
+        do {
+            command = try parseAsRoot()
+        } catch {
+            exit(withError: error)
+        }
+        do {
+            if var command = command as? any AsyncParsableCommand {
+                try await command.run()
+            } else {
+                var command = command
+                try command.run()
+            }
+        } catch {
+            if isArgumentParserError(error) { exit(withError: error) }
+            FileHandle.standardError.write(Data((TopLevelError.line(for: error) + "\n").utf8))
+            Foundation.exit(EXIT_FAILURE)
+        }
+    }
+
+    /// `CleanExit`, `ExitCode`, `ValidationError` and the parser's internal errors.
+    static func isArgumentParserError(_ error: any Error) -> Bool {
+        error is CleanExit || error is ExitCode || error is ValidationError
+            || String(reflecting: type(of: error)).hasPrefix("ArgumentParser.")
+    }
 }
 
 /// Checks the local setup without revealing any secret.
