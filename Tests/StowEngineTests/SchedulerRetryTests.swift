@@ -26,6 +26,7 @@ extension SchedulerTests {
         let scheduler = Scheduler(
             openArchive: { try Archive.open(location, keys: keys) },
             makeSync: { _ in throw CocoaError(.featureUnsupported) },
+            power: { PowerState(onBattery: false, batteryPercent: nil, lowPowerMode: false) },
             restartWhen: { restart.withLock { $0 } },
             sleep: { _ in }
         )
