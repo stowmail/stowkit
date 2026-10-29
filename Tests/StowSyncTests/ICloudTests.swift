@@ -111,6 +111,9 @@ func icloudServer(_ fixtures: [(name: String, bytes: Data)] = [], flags: Bool = 
     }
 }
 
+// Debug only: these sign in over plain text through `IMAPEndpoint.plaintextLoopbackAcceptingPasswordsForTests`,
+// which release builds do not have (D-471), so `swift test -c release` leaves them out.
+#if DEBUG
 @Suite(.serialized) struct ICloudSignInTests {
     let keychain = makeTestKeychain()
 
@@ -297,7 +300,11 @@ func icloudServer(_ fixtures: [(name: String, bytes: Data)] = [], flags: Bool = 
         #expect(IMAPSession.classifyBye("Too many simultaneous connections") == .throttled("Too many simultaneous connections"))
     }
 }
+#endif
 
+// Debug only: these sign in over plain text through `IMAPEndpoint.plaintextLoopbackAcceptingPasswordsForTests`,
+// which release builds do not have (D-471), so `swift test -c release` leaves them out.
+#if DEBUG
 /// Security checklist: a sentinel password appears in no log line, error or
 /// description, at any level (the capturing handler logs at trace).
 @Suite(.serialized) struct ICloudSecretTests {
@@ -349,3 +356,4 @@ func icloudServer(_ fixtures: [(name: String, bytes: Data)] = [], flags: Bool = 
         }
     }
 }
+#endif

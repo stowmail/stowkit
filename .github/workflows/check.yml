@@ -57,6 +57,8 @@ jobs:
         run: swift build
       - name: swift test
         run: swift test
+      - name: swift build -c release --build-tests
+        run: swift build -c release -Xswiftc -enable-testing --build-tests
 
       # A release binary checked against the SHA-256 in gitleaks' published
       # checksums file, not gitleaks-action (a paid licence for organisations).

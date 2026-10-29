@@ -29,6 +29,9 @@ func icloudServer(_ fixtures: [(name: String, bytes: Data)]) -> FakeIMAPServer {
     return server
 }
 
+// Debug only: these sign in over plain text through `IMAPEndpoint.plaintextLoopbackAcceptingPasswordsForTests`,
+// which release builds do not have (D-471), so `swift test -c release` leaves them out.
+#if DEBUG
 @Suite(.serialized) struct ICloudSetupTests {
     let keychain = KeychainStore(service: "ee.getstow.stow.tests.\(UUID().uuidString)", backend: .file, fileVaultIsOn: { true })
     let good = try! AppSpecificPassword(typed: "abcd-efgh-ijkl-mnop")
@@ -202,3 +205,4 @@ func icloudServer(_ fixtures: [(name: String, bytes: Data)]) -> FakeIMAPServer {
         #expect(steps[4].text.contains("Trash"))
     }
 }
+#endif

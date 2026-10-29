@@ -2,6 +2,12 @@
 
 Changes to StowKit and the `stowmail` command-line tool, newest first. Security fixes rated Medium or worse also get a GitHub security advisory; Low ones are listed here only (see [SECURITY.md](SECURITY.md)).
 
+## Unreleased
+
+### Fixed
+
+- `swift test -c release -Xswiftc -enable-testing` compiles again, so the benchmarks run. The iCloud sign-in tests, which need a debug-only plain-text test endpoint (D-471), are left out of release builds. `scripts/check.sh` now builds the tests in release too.
+
 ## 0.1.1 (29 October 2026)
 
 ### Security

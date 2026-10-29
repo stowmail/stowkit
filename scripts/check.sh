@@ -16,6 +16,10 @@ swift build
 echo "==> swift test"
 swift test
 
+# The benchmarks run in release with -enable-testing; keep that building.
+echo "==> swift build -c release --build-tests"
+swift build -c release -Xswiftc -enable-testing --build-tests
+
 echo "==> gitleaks (committed history)"
 if git rev-parse --verify HEAD >/dev/null 2>&1; then
     gitleaks git --redact --no-banner .
