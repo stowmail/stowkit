@@ -41,22 +41,19 @@ struct Daemon: AsyncParsableCommand {
     struct Install: AsyncParsableCommand {
         static let configuration = CommandConfiguration(
             abstract: "Install the background sync as a launchd agent that starts now and at every login.",
-            discussion: "The agent's file holds no secrets: only this program's path and a few settings, such as where the .env file is. Settings the installed agent already has are kept unless set in this shell; set one to empty to remove it."
+            discussion: "The agent's file holds no secrets: only this program's path and a few settings, such as which configuration file to read (STOW_ENV_FILE). A .env in the current folder is never used; without STOW_ENV_FILE the agent reads ~/Library/Application Support/Stow/config.env. Settings the installed agent already has are kept unless set in this shell; set one to empty to remove it."
         )
 
         func run() async throws {
             let executable = (Bundle.main.executableURL ?? URL(fileURLWithPath: CommandLine.arguments[0])).resolvingSymlinksInPath()
-            var current = ProcessInfo.processInfo.environment.filter { LaunchAgent.allowedEnvironment.contains($0.key) }
-            if current["STOW_ENV_FILE"] == nil {
-                let local = URL(fileURLWithPath: FileManager.default.currentDirectoryPath).appendingPathComponent(".env")
-                if FileManager.default.fileExists(atPath: local.path) { current["STOW_ENV_FILE"] = local.path }
-            }
-            let (environment, change) = LaunchAgent.reinstallEnvironment(current: current, previous: LaunchAgent.installedEnvironment())
-            try LaunchAgent.install(executable: executable, environment: environment)
+            let plan = LaunchAgent.installEnvironment(shell: ProcessInfo.processInfo.environment, previous: LaunchAgent.installedEnvironment())
+            let change = plan.change
+            try LaunchAgent.install(executable: executable, environment: plan.environment)
             print("Installed \(LaunchAgent.plistURL.path).")
             if !change.kept.isEmpty { print("Kept from the previous install: \(change.kept.joined(separator: ", ")).") }
             if !change.changed.isEmpty { print("Changed: \(change.changed.joined(separator: ", ")).") }
             if !change.removed.isEmpty { print("Removed: \(change.removed.joined(separator: ", ")).") }
+            for note in plan.notes { print(note) }
             print("The background sync runs now and at every login, at low priority. `stowmail status` shows how it is doing.")
             print("It runs a copy of this program at \(LaunchAgent.installedExecutable.path), so rebuilding does not affect it.")
             print("Run `stowmail daemon install` again to update it to a new build.")

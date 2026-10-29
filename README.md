@@ -51,9 +51,15 @@ swift run stowmail doctor    # checks SQLCipher, Keychain backend, configuration
 swift run stowmail init      # creates the encrypted archive and shows its recovery key once
 ```
 
-App configuration (OAuth client IDs) goes in `.env`, copied from `.env.example`.
-It is git-ignored and never committed. User tokens and encryption keys live in
-the macOS Keychain only.
+App configuration (OAuth client IDs) goes in
+`~/Library/Application Support/Stow/config.env`, copied from `.env.example`, or
+in a file named by `STOW_ENV_FILE`. Environment variables override the file. A
+`.env` in the current folder is never read, so running `stowmail` inside a
+downloaded folder cannot swap in someone else's app IDs. `stowmail doctor`
+says where the configuration came from, never the values. Builds made with
+`scripts/bundle-config.sh` and `-Xswiftc -DSTOW_BUNDLED_CONFIG` (the app and the
+CLI bundled with it) have the IDs built in and read no file or variable. User
+tokens and encryption keys live in the macOS Keychain only.
 
 ## Modules
 

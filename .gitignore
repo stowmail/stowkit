@@ -10,6 +10,8 @@ DerivedData/
 .env
 .env.*
 !.env.example
+# Client IDs for a bundled-config build, written by scripts/bundle-config.sh (D-512)
+/Sources/StowSecrets/BundledAppConfigValues.generated.swift
 
 # SQLCipher binary: fetched and verified by scripts/fetch-sqlcipher.sh (D-011)
 /Vendor/SQLCipher/SQLCipher.xcframework/

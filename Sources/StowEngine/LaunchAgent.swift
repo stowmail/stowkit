@@ -1,4 +1,5 @@
 import Foundation
+import StowSecrets
 
 public enum LaunchAgentError: Error, Equatable, CustomStringConvertible {
     case launchctlFailed(String)
@@ -18,7 +19,8 @@ public enum LaunchAgentError: Error, Equatable, CustomStringConvertible {
 /// exit), and runs with `ProcessType` Background, `Nice` 10 and low-priority
 /// I/O, so macOS gives it whatever the user is not using. The plist holds no
 /// secrets: only the executable's path and a short list of settings (D-037),
-/// all of them paths or switches. Client IDs stay in the `.env` file it names,
+/// all of them paths or switches. Client IDs stay in the configuration file
+/// (`STOW_ENV_FILE` or `config.env`, D-512) or are built in,
 /// tokens and keys in the Keychain.
 public enum LaunchAgent {
     public static let label = "ee.getstow.stowmail.daemon"
@@ -102,6 +104,50 @@ public enum LaunchAgent {
             }
         }
         return (environment.filter { !$0.value.isEmpty }, change)
+    }
+
+    /// What `daemon install` writes, and what it tells the user about it.
+    public struct InstallPlan: Sendable, Equatable {
+        public var environment: [String: String]
+        public var change: SettingsChange
+        public var notes: [String] = []
+    }
+
+    /// The settings `daemon install` gives the agent, from this shell's and the
+    /// previous agent's (D-512). Configuration is never taken from the current
+    /// folder. A saved `STOW_ENV_FILE` that still exists is kept (the shell can
+    /// still change or empty it); one that no longer exists is dropped, so the
+    /// agent falls back to `config.env`. A bundled-config build names no file.
+    /// No configuration file is ever copied or rewritten.
+    public static func installEnvironment(
+        shell: [String: String],
+        previous: [String: String],
+        bundled: Bool = AppConfig.isBundled,
+        home: URL = FileManager.default.homeDirectoryForCurrentUser,
+        fileExists: (String) -> Bool = { FileManager.default.fileExists(atPath: $0) }
+    ) -> InstallPlan {
+        let key = AppConfig.envFileVariable
+        var current = shell.filter { allowedEnvironment.contains($0.key) }
+        var notes: [String] = []
+        var dropped: String?
+        if bundled {
+            current[key] = ""
+        } else if current[key] == nil, let saved = previous[key], !saved.isEmpty, !fileExists(saved) {
+            current[key] = ""
+            dropped = saved
+        }
+        var (environment, change) = reinstallEnvironment(current: current, previous: previous)
+        if bundled {
+            notes.append("App configuration: built in to this build, so the agent names no configuration file.")
+        } else if let path = environment[key] {
+            notes.append("App configuration: from STOW_ENV_FILE (\(path)).")
+        } else {
+            let configFile = "\(AppConfig.configFileURL(home: home).path) (config.env) if present, else the environment"
+            notes.append(dropped.map { "STOW_ENV_FILE (\($0)) no longer exists, so the agent no longer names it. App configuration: from \(configFile)." }
+                ?? "App configuration: from \(configFile).")
+        }
+        change.removed.sort()
+        return InstallPlan(environment: environment, change: change, notes: notes)
     }
 
     public static func encoded(executable: URL, environment: [String: String]) throws -> Data {

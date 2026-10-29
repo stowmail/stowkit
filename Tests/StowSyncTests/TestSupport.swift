@@ -71,5 +71,6 @@ let testAppConfig = try! AppConfig.load(
         "STOW_MS_CLIENT_ID": "00000000-0000-0000-0000-000000000000",
         "STOW_MS_TENANT": "common",
     ],
-    currentDirectory: FileManager.default.temporaryDirectory.appendingPathComponent("stow-no-env-\(UUID().uuidString)")
+    home: FileManager.default.temporaryDirectory.appendingPathComponent("stow-no-env-\(UUID().uuidString)"),
+    bundled: nil
 )

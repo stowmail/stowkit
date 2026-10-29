@@ -37,12 +37,21 @@ struct Doctor: AsyncParsableCommand {
         print("Keychain backend: \(backend.rawValue)\(backend == .file ? " (until builds are signed, D-012)" : "")")
         print("FileVault: \(FileVault.isOn ? "on" : "OFF")\(backend == .file && !FileVault.isOn ? " (the file backend will refuse to run)" : "")")
 
-        print("App configuration:")
         do {
-            for row in try AppConfig.report() {
-                print("  \(row.key): \(row.status.rawValue)")
+            let report = try AppConfig.report()
+            if report.bundled {
+                print("App configuration: built in")
+            } else if let file = report.file {
+                print("App configuration: from \(file)")
+            } else {
+                print("App configuration: no file (\(AppConfig.configFileURL().path) does not exist; STOW_ENV_FILE not set)")
+            }
+            for row in report.rows {
+                let source = row.source.map { if case .environment = $0 { " (environment)" } else { "" } } ?? ""
+                print("  \(row.key): \(row.status.rawValue)\(source)")
             }
         } catch {
+            print("App configuration:")
             print("  \(error)")
         }
 
