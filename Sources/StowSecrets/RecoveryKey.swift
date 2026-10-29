@@ -180,6 +180,11 @@ public struct RecoveryBundle: Sendable {
     struct Contents: Codable {
         var databaseKey: Data
         var fileKey: Data
+
+        mutating func wipe() {
+            databaseKey.resetBytes(in: 0..<databaseKey.count)
+            fileKey.resetBytes(in: 0..<fileKey.count)
+        }
     }
 
     /// Wraps `keys` with `recoveryKey` and writes the bundle into `archiveFolder`
@@ -190,8 +195,15 @@ public struct RecoveryBundle: Sendable {
     public static func write(_ keys: ArchiveKeys, archiveID: String, recoveryKey: RecoveryKey, to archiveFolder: URL,
                              name: String = fileName, sync: DiskSync = .system) throws {
         let salt = SymmetricKey(size: .bits256).withUnsafeBytes { Data($0) }
-        let contents = try JSONEncoder().encode(Contents(
-            databaseKey: keys.databaseKeyData, fileKey: keys.fileKey.withUnsafeBytes { Data($0) }))
+        // The keys pass through JSON (the file format); the plaintext and the key
+        // copies made for it are wiped once sealed (D-519). JSONEncoder's own
+        // base64 text in between cannot be reached.
+        var plain = Contents(databaseKey: keys.databaseKeyData, fileKey: keys.fileKey.withUnsafeBytes { Data($0) })
+        var contents = try JSONEncoder().encode(plain)
+        defer {
+            plain.wipe()
+            contents.resetBytes(in: 0..<contents.count)
+        }
         let sealed = try AES.GCM.seal(contents, using: wrappingKey(recoveryKey, salt: salt), authenticating: authenticated(archiveID))
         guard let combined = sealed.combined else { throw RecoveryBundleError.unreadable }
         let file = File(format: "ee.getstow.recovery", version: version, archiveID: archiveID, createdAt: Date(), salt: salt, sealed: combined)
@@ -253,14 +265,17 @@ public struct RecoveryBundle: Sendable {
     /// Unwraps the keys in `archiveFolder`'s bundle. Returns them with the archive ID they belong to.
     public static func unwrap(in archiveFolder: URL, name: String = fileName, with recoveryKey: RecoveryKey) throws -> (keys: ArchiveKeys, archiveID: String) {
         let file = try read(archiveFolder, name: name)
-        let contents: Contents
+        var contents: Contents
         do {
             let box = try AES.GCM.SealedBox(combined: file.sealed)
-            let plain = try AES.GCM.open(box, using: wrappingKey(recoveryKey, salt: file.salt), authenticating: authenticated(file.archiveID))
+            var plain = try AES.GCM.open(box, using: wrappingKey(recoveryKey, salt: file.salt), authenticating: authenticated(file.archiveID))
+            defer { plain.resetBytes(in: 0..<plain.count) }
             contents = try JSONDecoder().decode(Contents.self, from: plain)
         } catch {
             throw RecoveryBundleError.wrongKey
         }
+        // The decoded copies are wiped once the keys are in CryptoKit's storage (D-519).
+        defer { contents.wipe() }
         guard contents.databaseKey.count == 32, contents.fileKey.count == 32 else { throw RecoveryBundleError.unreadable }
         return (ArchiveKeys(databaseKey: SymmetricKey(data: contents.databaseKey), fileKey: SymmetricKey(data: contents.fileKey)),
                 file.archiveID)

@@ -31,7 +31,7 @@ public final class Archive: Sendable {
         // A moved archive's old folder is never opened or written again (A-10).
         try location.refuseIfMoved()
         if !readOnly { try location.prepare() }
-        let database = try EncryptedDatabase.open(at: location.databaseURL, key: keys.databaseKeyData, readOnly: readOnly)
+        let database = try EncryptedDatabase.open(at: location.databaseURL, key: KeyBuffer(keys.databaseKey), readOnly: readOnly)
         if !readOnly {
             try ArchiveSchema.migrate(database)
             try database.write { db in

@@ -31,7 +31,7 @@ final class MCPFixture: @unchecked Sendable {
         try archive.register(Account(id: work, provider: .microsoft, email: "sam@work.example", displayName: "Work"))
         try archive.register(Account(id: home, provider: .gmail, email: "sam@home.example", displayName: "Home"))
         let databaseKey = keys.databaseKeyData
-        direct = DirectMCPArchive(location: ArchiveLocation(root: root), databaseKey: { databaseKey })
+        direct = DirectMCPArchive(location: ArchiveLocation(root: root), databaseKey: { KeyBuffer(databaseKey) })
         tools = ArchiveTools(archive: direct)
 
         // Work: a short thread with a quoted reply, an attachment and a long body.
@@ -159,7 +159,7 @@ final class MCPFixture: @unchecked Sendable {
     }
 
     @Test func missingArchiveIsAnError() async throws {
-        let direct = DirectMCPArchive(location: ArchiveLocation(root: URL(fileURLWithPath: "/nonexistent/stow")), databaseKey: { Data(count: 32) })
+        let direct = DirectMCPArchive(location: ArchiveLocation(root: URL(fileURLWithPath: "/nonexistent/stow")), databaseKey: { KeyBuffer(Data(count: 32)) })
         let outcome = await ArchiveTools(archive: direct).call("search_messages", [:])
         #expect(outcome.isError)
         #expect(outcome.text.contains("no Stow archive"))

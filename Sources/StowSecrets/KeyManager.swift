@@ -152,13 +152,20 @@ public struct KeyManager: Sendable {
         guard try keychain.get(Self.databaseKeyItem) == nil,
               try keychain.get(Self.fileKeyItem) == nil
         else { throw KeyManagerError.keysAlreadyExist }
+        // The Keychain takes a CFData; each copy made for it is wiped once added (D-519).
+        var databaseData = keys.databaseKeyData
+        var fileData = keys.fileKey.withUnsafeBytes { Data($0) }
+        defer {
+            databaseData.resetBytes(in: 0..<databaseData.count)
+            fileData.resetBytes(in: 0..<fileData.count)
+        }
         do {
-            try keychain.add(keys.databaseKeyData, for: Self.databaseKeyItem)
+            try keychain.add(databaseData, for: Self.databaseKeyItem)
         } catch KeychainError.alreadyExists {
             throw KeyManagerError.keysAlreadyExist
         }
         do {
-            try keychain.add(keys.fileKey.withUnsafeBytes { Data($0) }, for: Self.fileKeyItem)
+            try keychain.add(fileData, for: Self.fileKeyItem)
         } catch {
             try? keychain.delete(Self.databaseKeyItem)
             if case KeychainError.alreadyExists = error { throw KeyManagerError.keysAlreadyExist }
@@ -168,8 +175,14 @@ public struct KeyManager: Sendable {
 
     /// Loads both keys. Never creates them.
     public func loadKeys() throws -> ArchiveKeys {
-        let database = try keychain.get(Self.databaseKeyItem)
-        let files = try keychain.get(Self.fileKeyItem)
+        var database = try keychain.get(Self.databaseKeyItem)
+        var files = try keychain.get(Self.fileKeyItem)
+        // The Keychain's copies are wiped once the keys are in CryptoKit's own storage (D-519).
+        defer {
+            let databaseCount = database?.count ?? 0, filesCount = files?.count ?? 0
+            database?.resetBytes(in: 0..<databaseCount)
+            files?.resetBytes(in: 0..<filesCount)
+        }
         switch (database, files) {
         case (nil, nil):
             throw KeyManagerError.keysMissing(backend: keychain.backend, service: keychain.service)
@@ -185,12 +198,14 @@ public struct KeyManager: Sendable {
 
     /// Loads only the database key, for readers that never open the encrypted
     /// files (the MCP server, D-081): one Keychain item, so one prompt at most.
-    /// Never creates it.
-    public func loadDatabaseKey() throws -> Data {
-        guard let data = try keychain.get(Self.databaseKeyItem) else {
+    /// Never creates it. The Keychain's copy is wiped once it is in the buffer (D-519).
+    public func loadDatabaseKey() throws -> KeyBuffer {
+        guard var data = try keychain.get(Self.databaseKeyItem) else {
             throw KeyManagerError.keysMissing(backend: keychain.backend, service: keychain.service)
         }
-        return try Self.key(from: data, item: Self.databaseKeyItem).withUnsafeBytes { Data($0) }
+        defer { data.resetBytes(in: 0..<data.count) }
+        guard data.count == 32 else { throw KeyManagerError.malformedKey(Self.databaseKeyItem) }
+        return KeyBuffer(data)
     }
 
     private static func key(from data: Data, item: String) throws -> SymmetricKey {

@@ -54,7 +54,7 @@ public enum ArchiveMover {
         try target.prepare()
 
         progress?("Copying the database")
-        let copy = try EncryptedDatabase.open(at: target.databaseURL, key: keys.databaseKeyData)
+        let copy = try EncryptedDatabase.open(at: target.databaseURL, key: KeyBuffer(keys.databaseKey))
         try archive.database.backup(to: copy)
         try copy.close()
         Archive.secureDatabaseFiles(target)

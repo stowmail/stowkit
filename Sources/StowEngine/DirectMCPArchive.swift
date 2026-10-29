@@ -30,7 +30,7 @@ public enum DirectMCPArchiveError: Error, CustomStringConvertible {
 /// while it reads.
 public final class DirectMCPArchive: MCPArchive {
     let location: ArchiveLocation
-    let databaseKey: @Sendable () throws -> Data
+    let databaseKey: @Sendable () throws -> KeyBuffer
     private let opened = OpenedDatabase()
 
     public convenience init(location: ArchiveLocation, keys: KeyManager) {
@@ -38,7 +38,7 @@ public final class DirectMCPArchive: MCPArchive {
     }
 
     /// `databaseKey` is called only when the database is first opened.
-    public init(location: ArchiveLocation, databaseKey: @escaping @Sendable () throws -> Data) {
+    public init(location: ArchiveLocation, databaseKey: @escaping @Sendable () throws -> KeyBuffer) {
         self.location = location
         self.databaseKey = databaseKey
     }
