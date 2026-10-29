@@ -90,6 +90,8 @@ public enum ArchiveSetup {
     /// archive. Makes no recovery key, so nothing can be imported yet (D-055).
     /// Refuses to make new keys for an archive that exists without them.
     public static func createArchive(_ location: ArchiveLocation, keyManager: KeyManager) throws -> Archive {
+        // Never a new archive, or new keys, in a folder whose archive moved away (A-10).
+        try location.refuseIfMoved()
         let keys: ArchiveKeys
         if try keyManager.keysExist() {
             keys = try keyManager.loadKeys()

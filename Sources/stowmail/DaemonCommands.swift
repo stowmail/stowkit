@@ -30,10 +30,11 @@ struct Daemon: AsyncParsableCommand {
                 makeSync: { archive in EngineSync(archive: archive, tokens: try CLI.tokenProvider(accounts: ArchiveAccounts(archive: archive))) },
                 restartWhen: { Importer.stuckPreparations > 0 }
             )
-            await Task(priority: .background) { await scheduler.run() }.value
+            let stop = await Task(priority: .background) { await scheduler.run() }.value
             // A stuck reading cannot be stopped from inside (D-495); a failing exit
-            // makes launchd start the daemon afresh, without it (D-502).
-            if Importer.stuckPreparations > 0 { throw ExitCode(75) }
+            // makes launchd start the daemon afresh, without it (D-502). After a
+            // move, the fresh daemon opens the archive at its new place (A-10).
+            if Importer.stuckPreparations > 0 || stop == .archiveMoved { throw ExitCode(75) }
         }
     }
 

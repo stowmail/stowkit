@@ -66,8 +66,8 @@ public enum LaunchAgent {
     }
 
     /// The settings the installed agent runs with, or none if it is not installed.
-    public static func installedEnvironment() -> [String: String] {
-        guard let data = try? Data(contentsOf: plistURL),
+    public static func installedEnvironment(plist url: URL = plistURL) -> [String: String] {
+        guard let data = try? Data(contentsOf: url),
               let plist = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any]
         else { return [:] }
         return plist["EnvironmentVariables"] as? [String: String] ?? [:]

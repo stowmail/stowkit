@@ -54,6 +54,19 @@ public enum RoundResult: Sendable, Equatable {
     /// The Stow app is holding sync, for this reason (R15, D-442). Kept apart from
     /// `paused` so the message points at the app, not at power (D-082).
     case held(String)
+    /// The archive this process opened was moved to the given folder (A-10).
+    /// The scheduler stops, so the daemon exits and starts afresh at the new place.
+    case moved(String)
+}
+
+/// Why `Scheduler.run` returned.
+public enum SchedulerStop: Sendable, Equatable {
+    /// The task was cancelled.
+    case cancelled
+    /// `restartWhen` asked for a fresh process (D-502).
+    case restartRequested
+    /// The archive was moved; a fresh process opens it at its new place (A-10).
+    case archiveMoved
 }
 
 /// Spreads sync across accounts, invisibly and gently (step 5, D-036).
@@ -111,13 +124,19 @@ public actor Scheduler {
     }
 
     /// Runs rounds until cancelled, pausing between them as the last round's
-    /// result says, or until `restartWhen` asks for a fresh process.
-    public func run() async {
+    /// result says, or until `restartWhen` asks for a fresh process or the
+    /// archive turns out to have moved.
+    @discardableResult
+    public func run() async -> SchedulerStop {
         while !Task.isCancelled {
             let (result, _) = await round()
             if restartWhen() {
                 logger.notice("Reading a message got stuck and was abandoned; stopping so the process starts afresh")
-                return
+                return .restartRequested
+            }
+            if case .moved = result {
+                logger.notice("The archive was moved; stopping so the process starts afresh at its new place")
+                return .archiveMoved
             }
             if result != lastLogged {
                 switch result {
@@ -126,6 +145,7 @@ public actor Scheduler {
                 case .cannotOpen(let reason): logger.error("Archive could not be opened; sync paused until it can", metadata: ["reason": "\(reason)"])
                 case .busy: logger.info("Archive busy; waiting")
                 case .held(let reason): logger.notice("Sync held by the Stow app", metadata: ["reason": "\(reason)"])
+                case .moved: break
                 case .worked, .idle: if lastLogged != nil, lastLogged != .worked, lastLogged != .idle { logger.notice("Sync resumed") }
                 }
                 lastLogged = result
@@ -133,15 +153,16 @@ public actor Scheduler {
             let pause: TimeInterval = switch result {
             case .worked: 1
             case .idle: settings.idleInterval
-            case .paused, .offline, .cannotOpen, .held: 60
+            case .paused, .offline, .cannotOpen, .held, .moved: 60
             case .busy: 30
             }
             do {
                 try await sleep(pause)
             } catch {
-                return
+                return .cancelled
             }
         }
+        return .cancelled
     }
 
     /// One turn for every connected account that is not waiting.
@@ -157,14 +178,20 @@ public actor Scheduler {
             archive = try openArchive()
         } catch let error as ArchiveLocationError {
             if case .offline = error { return (.offline(error.description), [:]) }
+            if case .moved(let destination) = error { return (.moved(destination), [:]) }
             return (.cannotOpen(error.description), [:])
         } catch {
             return (.cannotOpen(Redact.scrub(String(describing: error))), [:])
         }
         defer { try? archive.database.close() }
+        // An archive opened before a move (the app's, or a turn that started early).
+        if let destination = archive.location.movedTo() { return (.moved(destination), [:]) }
         guard ArchiveSetup.recoveryState(archive) == .confirmed else { return (.paused(ArchiveSetupError.recoveryNotConfirmed.description), [:]) }
         guard let lock = try? ArchiveLock.acquire(archive.location) else { return (.busy, [:]) }
         defer { lock.release() }
+        // Opened before a move finished: the lock is ours, but this copy is no
+        // longer the archive and may be about to be deleted (A-10).
+        if let destination = archive.location.movedTo() { return (.moved(destination), [:]) }
         // A confirmed key whose bundle was not yet renamed into place (A-04). Sync
         // goes on either way: the confirmation stands, and the next turn tries again.
         if (try? ArchiveSetup.finishConfirmedKey(archive)) == true {

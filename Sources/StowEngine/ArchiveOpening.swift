@@ -41,6 +41,8 @@ public enum ArchiveOpening {
         environment: [String: String] = ProcessInfo.processInfo.environment,
         settings: ArchiveSettings = ArchiveSettings()
     ) throws {
+        // Before "no archive": the old copy may have been deleted after a move.
+        try location.refuseIfMoved()
         guard !location.exists else { return }
         let fromEnvironment = environment["STOW_ARCHIVE_DIR"].map { !$0.isEmpty } ?? false
         if settings.chosenFolder != nil, !fromEnvironment { throw ArchiveLocationError.offline(location.root.path) }

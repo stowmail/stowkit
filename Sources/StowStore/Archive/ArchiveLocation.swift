@@ -1,4 +1,5 @@
 import Foundation
+import StowCore
 
 public enum ArchiveLocationError: Error, Equatable, CustomStringConvertible {
     /// The folder is inside iCloud Drive or another cloud-synced folder (D-203).
@@ -9,6 +10,8 @@ public enum ArchiveLocationError: Error, Equatable, CustomStringConvertible {
     /// The chosen archive folder is not there, usually because its disk is
     /// disconnected. Nothing is written anywhere else meanwhile.
     case offline(String)
+    /// The archive in this folder was moved to the given folder (`moved-to.json`, A-10).
+    case moved(String)
 
     public var description: String {
         switch self {
@@ -20,6 +23,8 @@ public enum ArchiveLocationError: Error, Equatable, CustomStringConvertible {
             "The archive cannot live there: \(reason)."
         case .offline(let path):
             "Archive offline: \(path) is not available. If it is on an external disk, connect the disk. Sync is paused until then."
+        case .moved(let path):
+            "This archive was moved to \(path), and Stow no longer uses this folder. To use the archive, run `stowmail archive-location \(path)`."
         }
     }
 }
@@ -64,6 +69,54 @@ public struct ArchiveLocation: Sendable, Equatable {
     /// The recovery bundle beside the database (D-031).
     public var recoveryBundleURL: URL { root.appendingPathComponent("keys.recovery") }
     var lockURL: URL { root.appendingPathComponent(".writer.lock") }
+    /// Left in a folder whose archive was moved (A-10, D-509). Kept even when
+    /// the old copy is deleted, so nothing opens or creates an archive here again.
+    public var movedMarkerURL: URL { root.appendingPathComponent("moved-to.json") }
+
+    struct MovedMarker: Codable {
+        var format = "ee.getstow.moved"
+        var version = 1
+        var movedTo: String
+        var movedAt: Date
+    }
+
+    /// Where the archive in this folder was moved to, or nil if it was not.
+    /// A marker that cannot be read still counts as moved, to the unknown place "?".
+    public func movedTo() -> String? {
+        guard let data = FileManager.default.contents(atPath: movedMarkerURL.path) else { return nil }
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        return (try? decoder.decode(MovedMarker.self, from: data))?.movedTo ?? "?"
+    }
+
+    /// Throws `moved` if this folder's archive was moved.
+    public func refuseIfMoved() throws {
+        if let destination = movedTo() { throw ArchiveLocationError.moved(destination) }
+    }
+
+    /// Writes the marker naming `destination`: a temporary file flushed with
+    /// `F_FULLFSYNC`, renamed into place, the folder flushed. The new path and
+    /// the time only; no keys, no account names.
+    public func writeMovedMarker(to destination: URL, at date: Date = Date(), sync: DiskSync = .system) throws {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        encoder.dateEncodingStrategy = .iso8601
+        let bytes = try encoder.encode(MovedMarker(movedTo: destination.standardizedFileURL.path, movedAt: date))
+        let temporary = root.appendingPathComponent(".moved-to.\(UUID().uuidString).tmp")
+        let descriptor = open(temporary.path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o600)
+        guard descriptor >= 0 else { throw CocoaError(.fileWriteUnknown) }
+        do {
+            let handle = FileHandle(fileDescriptor: descriptor, closeOnDealloc: true)
+            try handle.write(contentsOf: bytes)
+            try sync.flushFile(descriptor, path: temporary.path)
+            try handle.close()
+            try sync.rename(temporary, to: movedMarkerURL)
+        } catch {
+            unlink(temporary.path)
+            throw error
+        }
+        try sync.flushFolder(root)
+    }
 
     /// Throws `offline` when the archive's database is not there although the
     /// folder was chosen (or found) before: never creates a new archive in its

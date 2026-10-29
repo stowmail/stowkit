@@ -28,6 +28,8 @@ public final class Archive: Sendable {
 
     public static func open(_ location: ArchiveLocation, keys: ArchiveKeys, readOnly: Bool = false,
                             diskSync: DiskSync = .system) throws -> Archive {
+        // A moved archive's old folder is never opened or written again (A-10).
+        try location.refuseIfMoved()
         if !readOnly { try location.prepare() }
         let database = try EncryptedDatabase.open(at: location.databaseURL, key: keys.databaseKeyData, readOnly: readOnly)
         if !readOnly {

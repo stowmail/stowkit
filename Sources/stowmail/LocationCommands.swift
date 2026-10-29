@@ -33,6 +33,8 @@ struct ArchiveLocationCommand: AsyncParsableCommand {
         let url = folder == "default" ? ArchiveLocation.defaultForCLI.root
             : URL(fileURLWithPath: (folder as NSString).expandingTildeInPath, isDirectory: true).standardizedFileURL
         let target = ArchiveLocation(root: url)
+        // A folder whose archive was moved says where it went (A-10).
+        try target.refuseIfMoved()
         let current = CLIArchive.location()
         if !target.exists, current.exists, current.root.path != url.path {
             throw ValidationError("There is no archive in \(url.path), and the current one is at \(current.root.path). To move it, run `stowmail archive-move \(url.path)`.")
@@ -65,7 +67,11 @@ struct ArchiveMove: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "archive-move",
         abstract: "Move the archive to another folder: copy, verify the copy, switch, then offer to delete the old one.",
-        discussion: "The original is not changed until the copy has verified and Stow has switched to it."
+        discussion: """
+            The original is not changed until the copy has verified and Stow has switched to it. The background sync \
+            waits until the command finishes. The old folder keeps a note (moved-to.json) naming the new one, so Stow \
+            never opens or writes to it again.
+            """
     )
 
     @Argument(help: "An empty or new folder.") var folder: String
@@ -73,28 +79,10 @@ struct ArchiveMove: AsyncParsableCommand {
     func run() async throws {
         CLI.bootstrapLogging()
         let destination = URL(fileURLWithPath: (folder as NSString).expandingTildeInPath, isDirectory: true).standardizedFileURL
-        var (archive, lock) = try CLIArchive.openForWriting(requireRecovery: false)
-        let old = archive.location
-        if let caution = try ArchiveMover.check(old, destination: destination) { print("Caution: \(caution).") }
-        let report = try ArchiveMover.copy(archive, to: destination, keys: try CLI.keyManager().loadKeys()) { step in print(step + "...") }
-        print("The copy verified: \(report.rebuilt) messages rebuilt byte for byte, \(report.attachments) attachments intact.")
-        if ProcessInfo.processInfo.environment["STOW_ARCHIVE_DIR"] != nil {
-            print("STOW_ARCHIVE_DIR is set, so set it to \(destination.path) to use the copy. The old archive was left in place.")
-            return
-        }
-        ArchiveSettings().setChosenFolder(destination.path == ArchiveLocation.defaultForCLI.root.path ? nil : destination)
-        print("Stow now uses \(destination.path).")
-        try archive.database.close()
-        lock.release()
-        archive = try CLIArchive.open()
-        guard CLI.confirm("Delete the old copy at \(old.root.path)?") else {
-            print("The old copy was kept. You can delete it later.")
-            return
-        }
-        for url in [old.databaseURL, URL(fileURLWithPath: old.databaseURL.path + "-wal"), URL(fileURLWithPath: old.databaseURL.path + "-shm"),
-                    old.rawDirectory, old.attachmentsDirectory, old.recoveryBundleURL] where FileManager.default.fileExists(atPath: url.path) {
-            try FileManager.default.removeItem(at: url)
-        }
-        print("Deleted the old copy.")
+        let (archive, lock) = try CLIArchive.openForWriting(requireRecovery: false)
+        // Held until the end, so the background sync cannot write to the old copy meanwhile (A-10).
+        defer { lock.release() }
+        _ = try ArchiveRelocation.move(archive, to: destination, keys: try CLI.keyManager().loadKeys(),
+                                       say: { print($0) }, confirmDelete: { CLI.confirm($0) })
     }
 }
