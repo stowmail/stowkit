@@ -67,10 +67,11 @@ import Testing
 
     @Test func callbackEvaluation() {
         #expect(LoopbackListener.evaluate(["code": "c", "state": "s"], expectedState: "s") == .success("c"))
-        #expect(LoopbackListener.evaluate(["code": "c", "state": "other"], expectedState: "s") == .failure(.stateMismatch))
-        #expect(LoopbackListener.evaluate(["code": "c"], expectedState: "s") == .failure(.stateMismatch))
+        #expect(LoopbackListener.evaluate(["code": "c", "state": "other"], expectedState: "s") == nil)
+        #expect(LoopbackListener.evaluate(["code": "c"], expectedState: "s") == nil)
+        #expect(LoopbackListener.evaluate(["error": "access_denied"], expectedState: "s") == nil)
         #expect(LoopbackListener.evaluate(["state": "s"], expectedState: "s") == .failure(.missingCode))
-        #expect(LoopbackListener.evaluate(["error": "access_denied", "error_description": "personal text"], expectedState: "s")
+        #expect(LoopbackListener.evaluate(["error": "access_denied", "error_description": "personal text", "state": "s"], expectedState: "s")
             == .failure(.providerError("access_denied")))
     }
 
@@ -94,10 +95,11 @@ import Testing
         await #expect(throws: (any Error).self) { _ = try await Self.get(port: listener.port, path: "/?code=x&state=expected") }
     }
 
-    @Test func rejectsTheWrongStateAndCloses() async throws {
-        let listener = try await LoopbackListener.start(expectedState: "expected", timeout: 30)
+    @Test func rejectsTheWrongStateAndKeepsWaiting() async throws {
+        let listener = try await LoopbackListener.start(expectedState: "expected", timeout: 0.5)
         #expect(try await Self.get(port: listener.port, path: "/?code=stolen&state=forged") == "400")
-        await #expect(throws: LoopbackError.stateMismatch) { _ = try await listener.waitForCode() }
+        #expect(!listener.isClosed)
+        await #expect(throws: LoopbackError.timedOut) { _ = try await listener.waitForCode() }
         #expect(listener.isClosed)
     }
 
@@ -252,8 +254,8 @@ import Testing
 
     @Test func forgedStateNeverReachesTheTokenEndpoint() async throws {
         let endpoint = FakeTokenEndpoint { _ in (200, OAuthClientTests.tokenJSON) }
-        let flow = SignInFlow(client: OAuthClient(config: .google(testAppConfig), http: endpoint), timeout: 30)
-        await #expect(throws: LoopbackError.stateMismatch) {
+        let flow = SignInFlow(client: OAuthClient(config: .google(testAppConfig), http: endpoint), timeout: 1)
+        await #expect(throws: LoopbackError.timedOut) {
             _ = try await flow.run { url in
                 let redirect = URLComponents(url: url, resolvingAgainstBaseURL: false)!.queryItems!.first { $0.name == "redirect_uri" }!.value!
                 Task { _ = try? await URLSession(configuration: .ephemeral).data(from: URL(string: "\(redirect)?code=x&state=forged")!) }

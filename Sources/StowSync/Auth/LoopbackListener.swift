@@ -4,6 +4,8 @@ import Network
 /// Why waiting for the browser's OAuth redirect failed.
 public enum LoopbackError: Error, Equatable, CustomStringConvertible {
     case timedOut
+    /// No longer produced: a reply with a wrong or missing state is ignored and
+    /// the listener keeps waiting (A-06, D-511). Kept so callers still compile.
     case stateMismatch
     case missingCode
     /// The provider redirected with `error=...` (for example the user pressed Cancel).
@@ -26,9 +28,14 @@ public enum LoopbackError: Error, Equatable, CustomStringConvertible {
 /// A one-shot HTTP listener on 127.0.0.1 that receives the OAuth redirect (D-102).
 ///
 /// - Binds to 127.0.0.1 only, on a random free port, and accepts only local connections.
-/// - The first `GET /` request is *the* callback: its `state` is checked against
-///   the expected value and the listener closes straight after, whatever the
-///   outcome. Other paths (such as `/favicon.ico`) get a 404 and are ignored.
+/// - Only a `GET /` whose `state` matches the expected value is *the* callback
+///   (A-06, D-511): it ends the sign-in with its code or the provider's error,
+///   and the listener closes straight after. Any other request (no state, a
+///   wrong one, another path, another method) gets an error page that says
+///   nothing about the sign-in, and the listener keeps waiting, so a web page
+///   that sprays `127.0.0.1` cannot cancel a sign-in.
+/// - Each connection gets one response and is closed; one that has not sent
+///   its request within `requestDeadline` is closed unanswered.
 /// - Gives up after the timeout (five minutes by default).
 ///
 /// All mutable state is only touched on `queue`, which is why the class can be
@@ -38,6 +45,8 @@ public final class LoopbackListener: @unchecked Sendable {
     /// The only address the listener binds to.
     public static let bindHost = "127.0.0.1"
     static let maximumRequestBytes = 16 * 1024
+    /// How long a connection may take to send its request line and headers.
+    static let requestDeadline: TimeInterval = 10
 
     private let listener: NWListener
     private let queue = DispatchQueue(label: "ee.getstow.oauth-loopback")
@@ -162,6 +171,9 @@ public final class LoopbackListener: @unchecked Sendable {
             return
         }
         connection.start(queue: queue)
+        queue.asyncAfter(deadline: .now() + Self.requestDeadline) {
+            connection.cancel()
+        }
         receive(on: connection, buffer: Data())
     }
 
@@ -194,7 +206,11 @@ public final class LoopbackListener: @unchecked Sendable {
             return
         }
         callbackCount += 1
-        let result = Self.evaluate(request.query, expectedState: expectedState)
+        guard let result = Self.evaluate(request.query, expectedState: expectedState) else {
+            // Not this sign-in's reply: say nothing about it, echo nothing, keep waiting.
+            send(status: "400 Bad Request", body: Self.page("Nothing to see here."), on: connection)
+            return
+        }
         switch result {
         case .success:
             send(status: "200 OK", body: Self.page("You can close this tab and go back to the terminal. Stow can now download a copy of your mail to this Mac, and never changes anything in your mailbox.", heading: "You're signed in"), on: connection)
@@ -204,16 +220,19 @@ public final class LoopbackListener: @unchecked Sendable {
         finish(result)
     }
 
-    /// Checks the callback's query: provider error first, then state, then code.
-    static func evaluate(_ query: [String: String], expectedState: String) -> Result<String, LoopbackError> {
+    /// Checks the callback's query: state first (in constant time), then the
+    /// provider's error, then the code. Returns nil when the state is missing
+    /// or wrong: such a request is not this sign-in's reply and ends nothing.
+    /// The provider echoes `state` on errors too (RFC 6749 4.1.2.1).
+    static func evaluate(_ query: [String: String], expectedState: String) -> Result<String, LoopbackError>? {
+        guard let state = query["state"], constantTimeEqual(state, expectedState) else {
+            return nil
+        }
         if let error = query["error"] {
             // The error code is a short fixed word such as access_denied; the
             // free-text description is not kept, as it may carry personal detail.
             let safe = error.filter { $0.isLetter || $0.isNumber || $0 == "_" }.prefix(64)
             return .failure(.providerError(String(safe)))
-        }
-        guard let state = query["state"], constantTimeEqual(state, expectedState) else {
-            return .failure(.stateMismatch)
         }
         guard let code = query["code"], !code.isEmpty else {
             return .failure(.missingCode)

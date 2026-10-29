@@ -2,6 +2,12 @@
 
 Changes to StowKit and the `stowmail` command-line tool, newest first. Security fixes rated Medium or worse also get a GitHub security advisory; Low ones are listed here only (see [SECURITY.md](SECURITY.md)).
 
+## Unreleased
+
+### Security
+
+- **Low:** the sign-in listener on 127.0.0.1 ended the sign-in on the first `GET /` it received, whatever it carried, so a web page in any browser that sent `http://127.0.0.1:<port>/?error=x` across the port range could cancel a sign-in in progress (second review A-06). No token could be obtained this way (PKCE). Only a reply carrying the sign-in's `state`, compared in constant time, now ends it, with its code or the provider's own error; any other request gets a 400 page that says nothing about the sign-in and echoes nothing, and the listener keeps waiting until its 5-minute timeout. A connection that has not sent its request within 10 s is closed. `LoopbackError.stateMismatch` is no longer produced.
+
 ## 0.1.2 (29 October 2026)
 
 ### Security
