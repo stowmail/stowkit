@@ -12,6 +12,7 @@ Changes to StowKit and the `stowmail` command-line tool, newest first. Security 
 
 - GitHub Actions: build, tests and gitleaks on every push to `main` (the required `check`), CodeQL, and a short fuzzing pass.
 - Fuzz targets for HTML to text, encoded words and address lists, the search query parser, the ZIP reader and IMAP reply assembly, with 1 MB inputs (`scripts/fuzz.sh`).
+- Archive schema `v2`: columns for marking an email whose text could not all be read, and for counting import, re-parse and text extraction attempts. Opening an archive with this version upgrades it in place, adding columns only (about 2 seconds for 40,000 emails); every stored email keeps its meaning, and older versions still open an upgraded archive. Nothing sets the new columns yet.
 
 ## 0.1.0 (28 October 2026)
 

@@ -199,6 +199,28 @@ enum SampleRows {
                     VALUES (?, randomblob(32), 0, 1, 'full', 1, 'ok', 1, 0)
                     """, arguments: [account])
                 try SearchIndexWriter.index(db, messageID: db.lastInsertedRowID)
+            case "v2":
+                let account = UUID().uuidString.lowercased()
+                try db.execute(sql: "INSERT INTO accounts (id, provider, email, display_name, created_at) VALUES (?, 'microsoft', ?, 'T', 0)",
+                               arguments: [account, "\(account)@example.com"])
+                try db.execute(sql: """
+                    INSERT INTO messages (account_id, raw_hash, internal_date, size, raw_state, raw_stored_size, parse_status, parser_version,
+                        imported_at, text_state, text_marked_version, text_attempts)
+                    VALUES (?, randomblob(32), 0, 1, 'full', 1, 'failed', 1, 0, 'incomplete', 1, 0)
+                    """, arguments: [account])
+                let message = db.lastInsertedRowID
+                try SearchIndexWriter.index(db, messageID: message)
+                try db.execute(sql: "INSERT INTO folders (account_id, name, kind) VALUES (?, 'INBOX', 'folder')", arguments: [account])
+                try db.execute(sql: """
+                    INSERT INTO download_queue (folder_id, uid_validity, uid, size, queued_at, import_attempts, last_import_attempt_at)
+                    VALUES (?, 1, 1, 1, 0, 2, 0)
+                    """, arguments: [db.lastInsertedRowID])
+                try db.execute(sql: """
+                    INSERT INTO attachments (content_hash, size, stored_size, text_status, created_at, text_attempts, text_last_attempt_at, text_failed_version)
+                    VALUES (randomblob(32), 1, 1, 'ocr_failed', 0, 0, 0, 1)
+                    """)
+                try db.execute(sql: "INSERT INTO message_attachments (message_id, part_path, attachment_id) VALUES (?, '2', ?)",
+                               arguments: [message, db.lastInsertedRowID])
             default:
                 Issue.record("Add sample rows for migration \(version)")
             }

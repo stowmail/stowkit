@@ -9,13 +9,19 @@ import GRDB
 /// A migration that has shipped is never edited: changes go in a new one.
 /// v1 was revised in Phase 2 before any real mail was imported (D-025); it is
 /// frozen from the first real import onwards.
+///
+/// From v2 on, migrations run on real archives: each one is forward only and
+/// keeps the meaning of every existing row. An older build opening a newer
+/// archive ignores the migrations it does not know, so new columns need
+/// defaults that older code can leave alone.
 public enum ArchiveSchema {
     /// Every migration identifier, oldest first. Tests use this to step through versions.
-    public static let migrationIdentifiers = ["v1"]
+    public static let migrationIdentifiers = ["v1", "v2"]
 
     public static var migrator: DatabaseMigrator {
         var migrator = DatabaseMigrator()
         migrator.registerMigration("v1", migrate: v1)
+        migrator.registerMigration("v2", migrate: v2)
         return migrator
     }
 
@@ -294,6 +300,38 @@ public enum ArchiveSchema {
                 tokenize = 'porter unicode61 remove_diacritics 2',
                 prefix = '2 3'
             );
+            """)
+    }
+
+    // MARK: - v2
+
+    /// Text Stow could not read, and attempts recorded before each try (D-481, D-501).
+    ///
+    /// Columns only, each with a constant default, so no table is rebuilt and every
+    /// existing row means what it did: its text is complete and nothing has been
+    /// attempted. The attempt counts start again only when a row is marked (or its
+    /// text is read), never when a retry round starts, so a build that crashes on
+    /// the same item every time still reaches the limit.
+    static func v2(_ db: Database) throws {
+        try db.execute(sql: """
+            ALTER TABLE messages ADD COLUMN text_state TEXT NOT NULL DEFAULT 'complete'
+                CHECK (text_state IN ('complete', 'incomplete'));
+            -- MIMEParser.version when marked: set exactly when the text is incomplete.
+            ALTER TABLE messages ADD COLUMN text_marked_version INTEGER
+                CHECK ((text_marked_version IS NULL) = (text_state = 'complete'));
+            -- Re-parse attempts on a stored message since it was last marked.
+            ALTER TABLE messages ADD COLUMN text_attempts INTEGER NOT NULL DEFAULT 0;
+            CREATE INDEX messages_text_incomplete ON messages(text_marked_version) WHERE text_state = 'incomplete';
+
+            -- Import attempts before a downloaded message becomes a row. `attempts` still counts fetch failures.
+            ALTER TABLE download_queue ADD COLUMN import_attempts INTEGER NOT NULL DEFAULT 0;
+            ALTER TABLE download_queue ADD COLUMN last_import_attempt_at INTEGER;
+
+            ALTER TABLE attachments ADD COLUMN text_attempts INTEGER NOT NULL DEFAULT 0;
+            ALTER TABLE attachments ADD COLUMN text_last_attempt_at INTEGER;
+            -- TextExtractor.version or OCRQueue.version when reading failed; NULL for a type Stow does not read.
+            ALTER TABLE attachments ADD COLUMN text_failed_version INTEGER;
+            CREATE INDEX attachments_text_failed ON attachments(text_status, text_failed_version) WHERE text_failed_version IS NOT NULL;
             """)
     }
 
