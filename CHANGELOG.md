@@ -1,0 +1,24 @@
+# Changelog
+
+Changes to StowKit and the `stowmail` command-line tool, newest first. Security fixes rated Medium or worse also get a GitHub security advisory; Low ones are listed here only (see [SECURITY.md](SECURITY.md)).
+
+## Unreleased
+
+### Security
+
+- **Low:** `AddressListParser.parse` and `AddressListParser.messageIDs` never returned when the string held a CR LF (`"a\r\nb"` was enough), and used memory until the process was stopped. Swift reads CR LF as one character, which the tokeniser did not move past. Email could not trigger this: header values never contain a line feed by the time they reach the parser. Only code calling these functions directly could. Found by fuzzing (second review A-22).
+
+### Added
+
+- GitHub Actions: build, tests and gitleaks on every push to `main` (the required `check`), CodeQL, and a short fuzzing pass.
+- Fuzz targets for HTML to text, encoded words and address lists, the search query parser, the ZIP reader and IMAP reply assembly, with 1 MB inputs (`scripts/fuzz.sh`).
+
+## 0.1.0 (28 October 2026)
+
+First tagged release.
+
+### Security
+
+- **High:** a crafted email could stop archiving: converting its HTML to text, or decoding its headers' encoded words, took time proportional to the square of its size. [GHSA-xhg9-88xv-2q76](https://github.com/stowmail/stowkit/security/advisories/GHSA-xhg9-88xv-2q76).
+- **Low:** a mail server could hold sync without limit. Each IMAP command now has a byte limit and a deadline, replies for messages not asked for are dropped, and one stuck account no longer holds up the others.
+- Text read from each part of an email is capped at 10 MB, and PDF text extraction has a 30-second limit.

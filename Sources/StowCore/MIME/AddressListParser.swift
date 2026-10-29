@@ -105,6 +105,8 @@ public enum AddressListParser {
         }
     }
 
+    private static let atomStops: Set<Character> = [" ", "\t", "\r", "\n", "\r\n", "\"", "(", "<", ",", ":", ";", ">", ")"]
+
     static func tokenise(_ value: String, problem: inout Bool) -> [Token] {
         var tokens: [Token] = []
         let chars = Array(value)
@@ -119,7 +121,8 @@ public enum AddressListParser {
         while i < chars.count {
             let c = chars[i]
             switch c {
-            case " ", "\t", "\r", "\n":
+            // Swift reads CR LF as one Character, distinct from "\r" and "\n" (A-22).
+            case " ", "\t", "\r", "\n", "\r\n":
                 space = true
                 i += 1
             case "\"":
@@ -184,8 +187,11 @@ public enum AddressListParser {
                 problem = true
                 i += 1
             default:
-                var text = ""
-                while i < chars.count, !" \t\r\n\"(<,:;>)".contains(chars[i]) {
+                // Always takes at least one character, so the loop moves on
+                // whatever the stop set holds.
+                var text = String(chars[i])
+                i += 1
+                while i < chars.count, !atomStops.contains(chars[i]) {
                     text.append(chars[i])
                     i += 1
                 }

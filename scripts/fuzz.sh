@@ -63,6 +63,7 @@ seed_words() {
     seed '=?x?' 1048576 > "$OUT/corpus/seed-charset-only"
     seed '=?a?q?x' 1048576 > "$OUT/corpus/seed-text-never-ends"
     printf '=?utf-8?q?caf=C3=A9?= =?UTF-8?B?Y2Fmw6k=?=' > "$OUT/corpus/seed-valid"
+    printf 'a\r\nb' > "$OUT/corpus/seed-crlf"  # A-22: once looped forever
 }
 
 case "$TARGET" in

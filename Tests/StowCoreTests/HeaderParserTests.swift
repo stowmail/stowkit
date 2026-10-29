@@ -251,6 +251,16 @@ import Testing
         #expect(AddressListParser.messageIDs("") == [])
     }
 
+    /// Swift reads CR LF as one Character, which the tokeniser once never
+    /// moved past (A-22). Header values never hold a line feed, but callers of
+    /// the public API can pass one.
+    @Test func crlfIsWhitespace() {
+        #expect(AddressListParser.parse("a\r\nb").addresses == [])
+        #expect(AddressListParser.parse("Sam <sam@example.org>,\r\n alex@example.org").addresses
+            == [EmailAddress(name: "Sam", address: "sam@example.org"), EmailAddress(address: "alex@example.org")])
+        #expect(AddressListParser.messageIDs("<a@x>\r\n<b@y>") == ["a@x", "b@y"])
+    }
+
     // MARK: Dates
 
     @Test(arguments: [
