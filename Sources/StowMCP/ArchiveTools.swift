@@ -152,6 +152,7 @@ public struct ArchiveTools: Sendable {
         var lines = [total == 0 ? "No emails match."
             : hits.isEmpty ? "\(Self.emails(total)) match; none at offset \(offset)."
             : "\(Self.emails(total)) match; showing \(offset + 1) to \(offset + hits.count)\(query.text.isEmpty ? ", newest first" : ", best match first")."]
+        if let notice = query.limitsApplied.notice { lines.append(notice) }
         for hit in hits {
             var marks = [names[hit.accountID].map { "account: \($0)" }]
             if hit.hasAttachments { marks.append("attachments") }

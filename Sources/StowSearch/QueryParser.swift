@@ -65,20 +65,7 @@ public enum QueryParser {
 
     /// Splits on spaces outside double quotes, keeping the quotes.
     static func tokenise(_ input: String) -> [String] {
-        var tokens: [String] = []
-        var current = ""
-        var inQuotes = false
-        for c in input {
-            if c == "\"" { inQuotes.toggle() }
-            if c.isWhitespace, !inQuotes {
-                if !current.isEmpty { tokens.append(current) }
-                current = ""
-            } else {
-                current.append(c)
-            }
-        }
-        if !current.isEmpty { tokens.append(current) }
-        return tokens
+        SearchLimits.tokenise(input)
     }
 
     private static func unquote(_ value: String) -> String {
@@ -104,14 +91,15 @@ public enum QueryParser {
 /// types can never be read as FTS5 syntax (which would be an error, or worse,
 /// a different query). Supported on top: `"exact phrases"`, `prefix*`, `OR`
 /// between two terms, and `-word` to exclude (only alongside a positive term,
-/// since FTS5 cannot search for "not X" alone).
+/// since FTS5 cannot search for "not X" alone). `SearchLimits` caps the text
+/// first (A-18): 1 KB, 32 words, two characters before a `*`.
 public enum FTSExpression {
     public static func build(_ text: String, columns: [String]? = nil) -> String? {
         var positives: [String] = []
         var negatives: [String] = []
         var pendingOr = false
 
-        for token in QueryParser.tokenise(text) {
+        for token in QueryParser.tokenise(SearchLimits.apply(text).text) {
             if token == "OR" {
                 pendingOr = !positives.isEmpty
                 continue

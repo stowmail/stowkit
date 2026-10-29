@@ -119,3 +119,14 @@ import Testing
         #expect(HiddenText.marked(plain) == plain)
     }
 }
+
+@Suite struct SearchLimitNoticeTests {
+    @Test func theAssistantIsToldWhenASearchWasCut() async throws {
+        let fixture = try MCPFixture()
+        try fixture.enable(fixture.work)
+        let long = await fixture.call("search_messages", ["query": .string("boiler " + (0..<40).map { "w\($0)" }.joined(separator: " OR "))])
+        #expect(long.text.contains("Searched for the first 32 words only."))
+        let plain = await fixture.call("search_messages", ["query": "boiler"])
+        #expect(!plain.text.contains("Searched for the first"))
+    }
+}

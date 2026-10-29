@@ -130,6 +130,7 @@ struct Search: AsyncParsableCommand {
         let total = try await searcher.count(parsed)
         let counted = Date().timeIntervalSince(start) - searched
         print(total == 1 ? "1 email" : "\(total) emails")
+        if let notice = parsed.limitsApplied.notice { print(notice) }
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withFullDate]
         for hit in hits {
