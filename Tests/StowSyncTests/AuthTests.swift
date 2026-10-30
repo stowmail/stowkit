@@ -104,17 +104,61 @@ import Testing
     /// The task's result, or `StillWaiting` after `seconds` even if the task
     /// never finishes. A plain `await task.value` on a continuation nobody
     /// resumes hangs for good: cancelling it, which is all `.timeLimit` does,
-    /// cannot end it (checked: such a run printed nothing for 580 s).
+    /// cannot end it (checked: such a run printed nothing for 580 s). The two
+    /// sides race in a task group and the loser is cancelled, so when the result
+    /// arrives first the sleep ends at once and nothing outlives the test.
     static func value<T: Sendable>(of task: Task<T, Error>, within seconds: Double) async throws -> T {
-        let once = ResumeOnce()
-        return try await withCheckedThrowingContinuation { continuation in
-            Task {
-                let result = await task.result
-                if once.claim() { continuation.resume(with: result) }
+        try await withThrowingTaskGroup(of: T.self) { group in
+            group.addTask { try await CancellableResult(of: task).value() }
+            group.addTask {
+                try await Task.sleep(for: .seconds(seconds))
+                throw StillWaiting(seconds: seconds)
             }
-            DispatchQueue.global().asyncAfter(deadline: .now() + seconds) {
-                if once.claim() { continuation.resume(throwing: StillWaiting(seconds: seconds)) }
+            defer { group.cancelAll() }
+            return try await group.next()!
+        }
+    }
+
+    /// A task's result that can be given up on: `value()` returns when the task
+    /// finishes or throws `CancellationError` as soon as its caller is cancelled,
+    /// whichever comes first. A group child awaiting `task.value` directly could
+    /// not be cancelled, and the group would wait for it on exit.
+    final class CancellableResult<T: Sendable>: @unchecked Sendable {
+        private let lock = NSLock()
+        private var continuation: CheckedContinuation<T, Error>?
+        private var outcome: Result<T, Error>?
+        private let task: Task<T, Error>
+
+        init(of task: Task<T, Error>) { self.task = task }
+
+        func value() async throws -> T {
+            // Forwards the result; ends when the task does (if it never does, that is the regression under test).
+            let forward = Task { self.finish(await task.result) }
+            defer { forward.cancel() }
+            return try await withTaskCancellationHandler {
+                try await withCheckedThrowingContinuation { continuation in
+                    lock.lock()
+                    if let outcome {
+                        lock.unlock()
+                        continuation.resume(with: outcome)
+                    } else {
+                        self.continuation = continuation
+                        lock.unlock()
+                    }
+                }
+            } onCancel: {
+                finish(.failure(CancellationError()))
             }
+        }
+
+        private func finish(_ result: Result<T, Error>) {
+            lock.lock()
+            guard outcome == nil else { lock.unlock(); return }
+            outcome = result
+            let waiting = continuation
+            continuation = nil
+            lock.unlock()
+            waiting?.resume(with: result)
         }
     }
 
