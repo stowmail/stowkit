@@ -17,9 +17,8 @@ public enum SenderDMARC: String, Sendable, Codable, CaseIterable {
 /// `ARC-Authentication-Results`, may have been written by the sender. The
 /// topmost field must also be in the provider's own form:
 /// - Gmail: authserv-id `mx.google.com`.
-/// - Microsoft: authserv-id `mx.microsoft.com` (Outlook.com), or no authserv-id,
-///   the field starting straight with a result such as `spf=pass`, as Exchange
-///   Online writes it.
+/// - Microsoft (Outlook.com and Exchange Online): authserv-id `mx.microsoft.com`.
+///   A field with no authserv-id is not Microsoft's: anyone can write one.
 /// - iCloud and anything else: never a result.
 /// The authserv-id may be followed by a version number (`mx.microsoft.com 1`).
 /// The DMARC entry must say `pass` and its `header.from` must be the From
@@ -31,22 +30,15 @@ public enum ProviderAuthentication {
         else { return .none }
         let parts = withoutComments(topmost.value).split(separator: ";").map { $0.trimmingCharacters(in: .whitespaces) }
         guard let first = parts.first else { return .none }
-        let results: ArraySlice<String>
         switch provider {
         case .gmail:
             guard isAuthservID(first, "mx.google.com") else { return .none }
-            results = parts.dropFirst()
         case .microsoft:
-            if isAuthservID(first, "mx.microsoft.com") {
-                results = parts.dropFirst()
-            } else if first.contains("=") {
-                results = parts[...]
-            } else {
-                return .none
-            }
+            guard isAuthservID(first, "mx.microsoft.com") else { return .none }
         case .icloud:
             return .none
         }
+        let results = parts.dropFirst()
         guard let dmarc = results.first(where: { $0.lowercased().hasPrefix("dmarc=") }) else { return .none }
         let words = dmarc.lowercased().split(whereSeparator: \.isWhitespace)
         let result = words.first.map { $0.dropFirst("dmarc=".count) }

@@ -4,9 +4,13 @@ Changes to StowKit and the `stowmail` command-line tool, newest first. Security 
 
 ## Unreleased
 
+### Security
+
+- **Informational:** for a Microsoft account, the "known billing sender" label (I-08) accepted a topmost `Authentication-Results` field with no authserv-id, the form in Microsoft's published examples, which any sender can write, for example someone in the same organisation, whose mail can arrive without Microsoft adding a field of its own above theirs. Real Outlook.com and Exchange Online fields both start with `mx.microsoft.com`, so `ProviderAuthentication.dmarc` now requires that authserv-id and gives no result without it. Protection was never affected; only the label's wording.
+
 ### Fixed
 
-- The "known billing sender" label (I-08) never showed for Outlook.com mail: Outlook.com starts its `Authentication-Results` field with the authserv-id `mx.microsoft.com` and a version number (`mx.microsoft.com 1;`), and only Exchange Online's form, with no authserv-id, was read. `ProviderAuthentication.dmarc` now accepts either form for a Microsoft account. An authserv-id may be followed only by a version number, for Gmail too. `dmarc=bestguesspass` (no DMARC policy published) is not a pass. Protection was never affected.
+- The "known billing sender" label (I-08) never showed for Microsoft mail as delivered: Outlook.com and Exchange Online start their `Authentication-Results` field with the authserv-id and a version number (`mx.microsoft.com 1;`), which was refused. It is now read; an authserv-id may be followed only by a version number, for Gmail too. `dmarc=bestguesspass` (no DMARC policy published) is not a pass. Protection was never affected.
 
 ## 0.1.3 (30 October 2026)
 

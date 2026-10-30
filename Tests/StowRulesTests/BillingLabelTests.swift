@@ -21,7 +21,10 @@ struct BillingLabelTests {
     }
 
     static let googlePass = "mx.google.com; dkim=pass header.i=@paypal.com header.s=pp-dkim1; spf=pass (google.com: domain of service@paypal.com designates 1.2.3.4 as permitted sender) smtp.mailfrom=service@paypal.com; dmarc=pass (p=REJECT sp=REJECT dis=NONE) header.from=paypal.com"
-    static let microsoftPass = "spf=pass (sender IP is 1.2.3.4) smtp.mailfrom=paypal.com; dkim=pass (signature was verified) header.d=paypal.com;dmarc=pass action=none header.from=paypal.com;compauth=pass reason=100"
+    /// Exchange Online's form (a Microsoft 365 work account, seen 2026-10-30): the same as Outlook.com's, folded inside the comments.
+    static let exchangeOnlinePass = "mx.microsoft.com 1; spf=pass (sender IP is\r\n 2001:db8::334) smtp.mailfrom=paypal.com; dkim=pass (signature\r\n was verified) header.d=paypal.com;dmarc=pass action=none\r\n header.from=paypal.com;compauth=pass reason=100"
+    /// Microsoft's published examples, with no authserv-id: anyone can write this (D-521).
+    static let unlabelledMicrosoftPass = "spf=pass (sender IP is 1.2.3.4) smtp.mailfrom=paypal.com; dkim=pass (signature was verified) header.d=paypal.com;dmarc=pass action=none header.from=paypal.com;compauth=pass reason=100"
     /// Outlook.com's form (seen 2026-10-30): authserv-id and version, ";" without a space, compauth after DMARC.
     static let outlookPass = "mx.microsoft.com 1; spf=pass (sender IP is 192.0.2.1) smtp.mailfrom=paypal.com; dkim=pass (signature was verified) header.d=paypal.com;dmarc=pass action=none header.from=paypal.com;compauth=pass reason=100"
     /// The same, folded as a server writes it (unfolded by `HeaderParser`).
@@ -38,7 +41,10 @@ struct BillingLabelTests {
 
     static let cases: [Case] = [
         Case(name: "(a) Gmail, provider says pass", provider: .gmail, headers: [googlePass], expected: .pass),
-        Case(name: "(a) Microsoft, provider says pass", provider: .microsoft, headers: [microsoftPass], expected: .pass),
+        Case(name: "(a) Exchange Online, provider says pass", provider: .microsoft, headers: [exchangeOnlinePass], expected: .pass),
+        Case(name: "Exchange Online, bestguesspass is not a pass", provider: .microsoft,
+             headers: [exchangeOnlinePass.replacingOccurrences(of: "dmarc=pass", with: "dmarc=bestguesspass")], expected: .fail),
+        Case(name: "Microsoft, no authserv-id", provider: .microsoft, headers: [unlabelledMicrosoftPass], expected: .none),
         Case(name: "(b) provider says fail", provider: .gmail,
              headers: [googlePass.replacingOccurrences(of: "dmarc=pass", with: "dmarc=fail")], expected: .fail),
         Case(name: "(b) pass for another domain", provider: .gmail,
