@@ -10,6 +10,7 @@ Changes to StowKit and the `stowmail` command-line tool, newest first. Security 
 
 ### Changed
 
+- `docs/security-review.md`: I-08's row said the billing-label fix was unreleased and the stored check still to come; it now says the label shipped in 0.1.3 and the stored result and backfill in 0.1.4.
 - Archive schema `v4`: clears every stored DMARC result once (`messages.sender_dmarc`), so the backfill reads them all again by the fixed rule when the background sync next starts (a few seconds for 10,000 emails). Data only; older versions still open an upgraded archive.
 
 ## 0.1.4 (30 October 2026)
