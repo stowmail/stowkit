@@ -12,6 +12,10 @@ Changes to StowKit and the `stowmail` command-line tool, newest first. Security 
 
 - The "known billing sender" label (I-08) never showed for Microsoft mail as delivered: Outlook.com and Exchange Online start their `Authentication-Results` field with the authserv-id and a version number (`mx.microsoft.com 1;`), which was refused. It is now read; an authserv-id may be followed only by a version number, for Gmail too. `dmarc=bestguesspass` (no DMARC policy published) is not a pass. Protection was never affected.
 
+### Added
+
+- Archive schema `v3`: a column for the provider's DMARC result on each email (`messages.sender_dmarc`), for the "known billing sender" label, and an index of the emails not yet checked. Opening an archive with this version upgrades it in place, adding the column and the index only (about 2 seconds for 40,000 emails); every stored email keeps its meaning and reads as not yet checked. Nothing fills the column yet. Older versions still open an upgraded archive and write to it.
+
 ## 0.1.3 (30 October 2026)
 
 ### Security

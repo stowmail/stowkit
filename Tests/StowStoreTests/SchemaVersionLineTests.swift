@@ -9,7 +9,7 @@ import Testing
         let test = try TestArchive()
         defer { test.remove() }
         let line = try test.archive.database.read { try ArchiveSchema.versionSummary($0) }
-        #expect(line == "Schema: v2. This build knows up to v2.")
+        #expect(line == "Schema: v3. This build knows up to v3.")
     }
 
     @Test func aV1ArchiveOpenedReadOnly() throws {
@@ -22,7 +22,7 @@ import Testing
         try db.close()
         let archive = try Archive.open(location, keys: keys, readOnly: true)
         let line = try archive.database.read { try ArchiveSchema.versionSummary($0) }
-        #expect(line == "Schema: v1 (upgrades the next time this build writes to it). This build knows up to v2.")
+        #expect(line == "Schema: v1 (upgrades the next time this build writes to it). This build knows up to v3.")
     }
 
     /// An archive a newer build has written is shown as such, not as an error.
@@ -30,9 +30,9 @@ import Testing
         let test = try TestArchive()
         defer { test.remove() }
         try test.archive.database.write { db in
-            try db.execute(sql: "INSERT INTO grdb_migrations (identifier) VALUES ('v3')")
+            try db.execute(sql: "INSERT INTO grdb_migrations (identifier) VALUES ('v4')")
         }
         let line = try test.archive.database.read { try ArchiveSchema.versionSummary($0) }
-        #expect(line == "Schema: v3, newer than this build, which knows up to v2 and reads what it knows.")
+        #expect(line == "Schema: v4, newer than this build, which knows up to v3 and reads what it knows.")
     }
 }

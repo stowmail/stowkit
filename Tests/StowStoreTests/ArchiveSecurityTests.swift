@@ -223,6 +223,16 @@ enum SampleRows {
                     """)
                 try db.execute(sql: "INSERT INTO message_attachments (message_id, part_path, attachment_id) VALUES (?, '2', ?)",
                                arguments: [message, db.lastInsertedRowID])
+            case "v3":
+                let account = UUID().uuidString.lowercased()
+                try db.execute(sql: "INSERT INTO accounts (id, provider, email, display_name, created_at) VALUES (?, 'gmail', ?, 'T', 0)",
+                               arguments: [account, "\(account)@example.com"])
+                try db.execute(sql: """
+                    INSERT INTO messages (account_id, raw_hash, internal_date, size, raw_state, raw_stored_size, parse_status, parser_version,
+                        imported_at, sender_dmarc)
+                    VALUES (?, randomblob(32), 0, 1, 'full', 1, 'ok', 1, 0, 'pass')
+                    """, arguments: [account])
+                try SearchIndexWriter.index(db, messageID: db.lastInsertedRowID)
             default:
                 Issue.record("Add sample rows for migration \(version)")
             }

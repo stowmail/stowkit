@@ -74,7 +74,7 @@ import Testing
         let fileSize = try FileManager.default.attributesOfItem(atPath: copy.path)[.size] as? Int ?? 0
         let db = try EncryptedDatabase.open(at: copy, key: keys.databaseKeyData)
         let started = Date()
-        try ArchiveSchema.migrate(db)
+        try ArchiveSchema.migrator.migrate(db, upTo: "v2")
         let migrateSeconds = Date().timeIntervalSince(started)
 
         let after = try db.read { db -> AfterUpgrade in
@@ -172,10 +172,11 @@ enum V1Snapshot {
     static let addedInV2: Set<String> = ["text_state", "text_marked_version", "text_attempts", "import_attempts",
                                          "last_import_attempt_at", "text_last_attempt_at", "text_failed_version"]
 
-    static func digests(_ db: Database) throws -> [String: Data] {
+    /// `excluding` names the columns a later migration added; v3's upgrade test leaves out only its own.
+    static func digests(_ db: Database, excluding: Set<String> = addedInV2) throws -> [String: Data] {
         var result: [String: Data] = [:]
         for table in tables {
-            let columns = try db.columns(in: table).map(\.name).filter { !addedInV2.contains($0) }
+            let columns = try db.columns(in: table).map(\.name).filter { !excluding.contains($0) }
             var hash = SHA256()
             let cursor = try Row.fetchCursor(db, sql: "SELECT \(columns.joined(separator: ", ")) FROM \(table) ORDER BY rowid")
             while let row = try cursor.next() { hash.update(data: Data(row.description.utf8)) }

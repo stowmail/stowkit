@@ -16,12 +16,13 @@ import GRDB
 /// defaults that older code can leave alone.
 public enum ArchiveSchema {
     /// Every migration identifier, oldest first. Tests use this to step through versions.
-    public static let migrationIdentifiers = ["v1", "v2"]
+    public static let migrationIdentifiers = ["v1", "v2", "v3"]
 
     public static var migrator: DatabaseMigrator {
         var migrator = DatabaseMigrator()
         migrator.registerMigration("v1", migrate: v1)
         migrator.registerMigration("v2", migrate: v2)
+        migrator.registerMigration("v3", migrate: v3)
         return migrator
     }
 
@@ -351,6 +352,24 @@ public enum ArchiveSchema {
             -- TextExtractor.version or OCRQueue.version when reading failed; NULL for a type Stow does not read.
             ALTER TABLE attachments ADD COLUMN text_failed_version INTEGER;
             CREATE INDEX attachments_text_failed ON attachments(text_status, text_failed_version) WHERE text_failed_version IS NOT NULL;
+            """)
+    }
+
+    // MARK: - v3
+
+    /// The provider's own DMARC result for the From domain, per message (D-521, D-522).
+    ///
+    /// One nullable column with no default, so no row is rewritten and every
+    /// existing message reads NULL: not yet read. An older build that does not know
+    /// the column inserts NULL too, which means the same. The partial index holds
+    /// only those rows, so the backfill and its "anything left?" check read nothing
+    /// once every message has a result.
+    static func v3(_ db: Database) throws {
+        try db.execute(sql: """
+            -- ProviderAuthentication.dmarc's answer; NULL until the message's headers are read.
+            ALTER TABLE messages ADD COLUMN sender_dmarc TEXT
+                CHECK (sender_dmarc IN ('pass', 'fail', 'none'));
+            CREATE INDEX messages_dmarc_pending ON messages(id) WHERE sender_dmarc IS NULL;
             """)
     }
 
