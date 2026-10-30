@@ -95,12 +95,23 @@ import Testing
         await #expect(throws: (any Error).self) { _ = try await Self.get(port: listener.port, path: "/?code=x&state=expected") }
     }
 
+    /// A reply with the wrong state ends nothing (A-06): the wait it was sent
+    /// into is still open afterwards, and only this sign-in's own reply ends it,
+    /// with that reply's code. No timer is involved, so a busy Mac cannot make
+    /// the listener give up before the forged request arrives; the timeout is a
+    /// test setting far beyond any request, and `timesOut` covers the timer.
     @Test func rejectsTheWrongStateAndKeepsWaiting() async throws {
-        let listener = try await LoopbackListener.start(expectedState: "expected", timeout: 0.5)
+        let listener = try await LoopbackListener.start(expectedState: "expected", timeout: 60)
+        defer { listener.close() }
+        let waiting = Task { try await listener.waitForCode() }
         #expect(try await Self.get(port: listener.port, path: "/?code=stolen&state=forged") == "400")
+        #expect(try await Self.get(port: listener.port, path: "/?error=access_denied") == "400")
         #expect(!listener.isClosed)
-        await #expect(throws: LoopbackError.timedOut) { _ = try await listener.waitForCode() }
+        #expect(listener.callbacksReceived == 2)
+        #expect(try await Self.get(port: listener.port, path: "/?code=the-code&state=expected") == "200")
+        #expect(try await waiting.value == "the-code")
         #expect(listener.isClosed)
+        #expect(listener.callbacksReceived == 3)
     }
 
     @Test func timesOut() async throws {
