@@ -17,9 +17,11 @@ public enum SenderDMARC: String, Sendable, Codable, CaseIterable {
 /// `ARC-Authentication-Results`, may have been written by the sender. The
 /// topmost field must also be in the provider's own form:
 /// - Gmail: authserv-id `mx.google.com`.
-/// - Microsoft (Exchange Online): no authserv-id, the field starting straight with
-///   a result such as `spf=pass`, as Exchange Online writes it.
+/// - Microsoft: authserv-id `mx.microsoft.com` (Outlook.com), or no authserv-id,
+///   the field starting straight with a result such as `spf=pass`, as Exchange
+///   Online writes it.
 /// - iCloud and anything else: never a result.
+/// The authserv-id may be followed by a version number (`mx.microsoft.com 1`).
 /// The DMARC entry must say `pass` and its `header.from` must be the From
 /// address's domain, exactly (lowercased).
 public enum ProviderAuthentication {
@@ -32,12 +34,16 @@ public enum ProviderAuthentication {
         let results: ArraySlice<String>
         switch provider {
         case .gmail:
-            // "mx.google.com" possibly followed by a version number.
-            guard first.split(separator: " ").first?.lowercased() == "mx.google.com" else { return .none }
+            guard isAuthservID(first, "mx.google.com") else { return .none }
             results = parts.dropFirst()
         case .microsoft:
-            guard first.contains("=") else { return .none }
-            results = parts[...]
+            if isAuthservID(first, "mx.microsoft.com") {
+                results = parts.dropFirst()
+            } else if first.contains("=") {
+                results = parts[...]
+            } else {
+                return .none
+            }
         case .icloud:
             return .none
         }
@@ -46,6 +52,13 @@ public enum ProviderAuthentication {
         let result = words.first.map { $0.dropFirst("dmarc=".count) }
         let headerFrom = words.first { $0.hasPrefix("header.from=") }.map { String($0.dropFirst("header.from=".count)) }
         return result == "pass" && headerFrom == from ? .pass : .fail
+    }
+
+    /// Whether `part` is exactly `id`, possibly followed by a version number (RFC 8601).
+    static func isAuthservID(_ part: String, _ id: String) -> Bool {
+        let words = part.split(whereSeparator: \.isWhitespace)
+        guard words.first?.lowercased() == id else { return false }
+        return words.count == 1 || (words.count == 2 && words[1].allSatisfy({ $0.isASCII && $0.isNumber }))
     }
 
     /// Removes RFC 5322 comments, `( ... )`, nested or not, which may hold any text.
