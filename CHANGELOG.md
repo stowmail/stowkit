@@ -2,7 +2,7 @@
 
 Changes to StowKit and the `stowmail` command-line tool, newest first. Security fixes rated Medium or worse also get a GitHub security advisory; Low ones are listed here only (see [SECURITY.md](SECURITY.md)).
 
-## Unreleased
+## 0.1.4 (30 October 2026)
 
 ### Security
 
