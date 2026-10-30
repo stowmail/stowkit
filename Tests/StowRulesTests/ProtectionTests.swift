@@ -53,7 +53,8 @@ struct ProtectionTests {
         #expect(set.assess(bulk(from: "border@shop.example", subject: "Hello")).protection == nil)
         let billing = set.assess(bulk(from: "auto-confirm@amazon.co.uk", subject: "Hello"))
         #expect(billing.protection?.kind == .billingSender)
-        #expect(billing.reasons.first == "Protected: amazon.co.uk is a known billing sender.")
+        // Without the provider's DMARC pass the email is kept without vouching for the sender (D-521).
+        #expect(billing.reasons.first == "Kept: from a billing address at amazon.co.uk.")
         // Billing senders match a full address exactly, not the rest of the domain.
         #expect(set.assess(bulk(from: "store-news@amazon.co.uk", subject: "Hello")).protection == nil)
     }

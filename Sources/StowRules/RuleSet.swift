@@ -159,10 +159,14 @@ public struct RuleSet: Codable, Hashable, Sendable {
     }
 
     /// Assess one message from its headers alone.
+    /// `senderDMARC`: what the provider's own header said (`ProviderAuthentication`), when known.
+    /// It changes only the wording of a billing sender's protection (D-521), never whether
+    /// the message is protected.
     public func assess(
         _ headers: MessageHeaders,
         ownAddresses: Set<String> = [],
-        data: RulesData = .bundled
+        data: RulesData = .bundled,
+        senderDMARC: SenderDMARC = .none
     ) -> Assessment {
         let context = SignalContext(ownAddresses: ownAddresses, recipientThreshold: recipientThreshold, data: data)
         var outcomes: [RuleOutcome] = []
@@ -202,7 +206,7 @@ public struct RuleSet: Codable, Hashable, Sendable {
 
         // Protection comes last and wins over everything, overrides included:
         // protected mail is never suggested for removal (D-407).
-        let protection = protection(headers, data: data)
+        let protection = protection(headers, data: data, senderDMARC: senderDMARC)
         if let protection {
             if suggestion != .keep, overriddenBy != nil {
                 reasons.append("Protected mail is always kept, so your override does not apply to it.")
@@ -225,13 +229,18 @@ public struct RuleSet: Codable, Hashable, Sendable {
     /// Whether the message is protected, and why: the user's protected senders
     /// first, then known billing senders, then keywords in the sender's address
     /// and in the subject.
-    public func protection(_ headers: MessageHeaders, data: RulesData = .bundled) -> Protection? {
+    /// A known billing sender is protected either way; it is called "a known billing sender"
+    /// only when the provider's DMARC check passed for it (D-486, D-521), since anyone can
+    /// put a billing company's address in a From line.
+    public func protection(_ headers: MessageHeaders, data: RulesData = .bundled, senderDMARC: SenderDMARC = .none) -> Protection? {
         if let sender = headers.from.first {
             if protectedSenders.contains(where: { SenderOverride(match: $0, suggestion: .keep).matches(sender) }) {
                 return Protection(kind: .userSender, reason: "Protected: you protect mail from \(sender.domain).")
             }
             if data.billingSender(sender) != nil {
-                return Protection(kind: .billingSender, reason: "Protected: \(sender.domain) is a known billing sender.")
+                return Protection(kind: .billingSender, reason: senderDMARC == .pass
+                    ? "Protected: \(sender.domain) is a known billing sender."
+                    : "Kept: from a billing address at \(sender.domain).")
             }
             if let keyword = data.protectedSenderKeyword(inLocalPart: sender.localPart) {
                 return Protection(kind: .senderKeyword, reason: "Protected: sender address contains '\(keyword)'.")

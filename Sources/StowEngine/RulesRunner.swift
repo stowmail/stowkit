@@ -75,7 +75,10 @@ public enum RulesRunner {
                         report.unreadable += 1
                         continue
                     }
-                    let assessment = set.assess(HeaderParser().parseHeaders(header), ownAddresses: own)
+                    let headers = HeaderParser().parseHeaders(header)
+                    // The full header is here, so the billing label can use the provider's own check (D-521).
+                    let assessment = set.assess(headers, ownAddresses: own,
+                                                senderDMARC: ProviderAuthentication.dmarc(headers, provider: record.account.provider))
                     updates.append((id, EngineRules.stored(assessment)))
                     report.messages += 1
                     report.bySuggestion[assessment.suggestion, default: RulesReport.Group()].messages += 1
