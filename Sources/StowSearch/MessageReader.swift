@@ -61,6 +61,8 @@ public final class MessageReader: MessageReading, InlinePartReading, MessageBody
         let bodyLength: Int = row["body_length"] ?? 0
         let body: String? = row["body"]
         let attachments = try attachments(db, message: id)
+        let newSender = try Self.senderDomainIsNew(db, message: id, account: row["account_id"], threadKey: row["thread_key"],
+                                                   date: row["internal_date"], domain: addresses["from"]?.first?.domain)
         return MessageDetail(
             messageID: id,
             accountID: AccountID(rawValue: row["account_id"]),
@@ -80,7 +82,29 @@ public final class MessageReader: MessageReading, InlinePartReading, MessageBody
             places: try places(db, message: id),
             importedAt: Date(timeIntervalSince1970: TimeInterval(row["imported_at"] as Int64)),
             sourceStateAt: (row["source_state_at"] as Int64?).map { Date(timeIntervalSince1970: TimeInterval($0)) },
-            textIncomplete: row["text_incomplete"] || attachments.contains(where: \.textUnreadable))
+            textIncomplete: row["text_incomplete"] || attachments.contains(where: \.textUnreadable),
+            senderDomainNewToThread: newSender)
+    }
+
+    /// Whether the From address's domain (as stored: lowercased, exact, no registrable-domain
+    /// logic, as billing senders match) is in no From, To or Cc of an earlier message of the
+    /// same conversation: same account and thread key, earlier by arrival time, ties by ID
+    /// (D-486, D-520). False for the first message, and for one with no thread or no sender.
+    static func senderDomainIsNew(_ db: Database, message id: StoredMessageID, account: String, threadKey: String?,
+                                  date: Int64, domain: String?) throws -> Bool {
+        guard let threadKey, let domain, !domain.isEmpty else { return false }
+        let earlier = "e.account_id = ? AND e.thread_key = ? AND (e.internal_date < ? OR (e.internal_date = ? AND e.id < ?))"
+        let arguments: StatementArguments = [account, threadKey, date, date, id]
+        guard try Bool.fetchOne(db, sql: "SELECT EXISTS (SELECT 1 FROM messages e WHERE \(earlier))", arguments: arguments) == true else {
+            return false
+        }
+        let seen = try Bool.fetchOne(db, sql: """
+            SELECT EXISTS (SELECT 1 FROM messages e
+                           JOIN message_addresses ma ON ma.message_id = e.id AND ma.role IN ('from', 'to', 'cc')
+                           JOIN addresses a ON a.id = ma.address_id
+                           WHERE \(earlier) AND a.domain = ?)
+            """, arguments: arguments + [domain])
+        return seen != true
     }
 
     /// Where the provider has the message now (R11): every folder or label holding a copy the

@@ -230,6 +230,9 @@ public struct ArchiveTools: Sendable {
 
     static func headerLines(_ detail: MessageDetail) -> [String] {
         var lines = ["From: \(address(detail.from))"]
+        if detail.senderDomainNewToThread, let domain = detail.from?.domain {
+            lines.append("Sender's domain \(oneLine(domain)) is new to this conversation.")
+        }
         if !detail.to.isEmpty { lines.append("To: \(clip(detail.to.map { address($0) }.joined(separator: ", "), 1_000))") }
         if !detail.cc.isEmpty { lines.append("Cc: \(clip(detail.cc.map { address($0) }.joined(separator: ", "), 1_000))") }
         lines.append("Date: \(time(detail.date))")

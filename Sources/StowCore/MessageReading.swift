@@ -90,11 +90,16 @@ public struct MessageDetail: Hashable, Sendable, Codable, Identifiable {
     /// Stow tries again after an update. A message whose own text was not read
     /// has no subject, sender or body here until then.
     public var textIncomplete: Bool
+    /// The From address's domain appears in no From, To or Cc of an earlier message in this
+    /// conversation (D-486, D-520): someone new joined it. Never set on the first message.
+    /// A prompt to look twice, not a verdict.
+    public var senderDomainNewToThread: Bool
 
     public init(messageID: StoredMessageID, accountID: AccountID, threadKey: String?, date: Date, sentDate: Date?,
                 from: EmailAddress?, to: [EmailAddress], cc: [EmailAddress], subject: String?, sourceState: SourceState,
                 body: String?, bodyFromHTML: Bool, bodyLength: Int, bodyTruncated: Bool, attachments: [AttachmentInfo],
-                places: [ArchiveFolder] = [], importedAt: Date? = nil, sourceStateAt: Date? = nil, textIncomplete: Bool = false) {
+                places: [ArchiveFolder] = [], importedAt: Date? = nil, sourceStateAt: Date? = nil, textIncomplete: Bool = false,
+                senderDomainNewToThread: Bool = false) {
         self.messageID = messageID
         self.accountID = accountID
         self.threadKey = threadKey
@@ -114,14 +119,16 @@ public struct MessageDetail: Hashable, Sendable, Codable, Identifiable {
         self.importedAt = importedAt
         self.sourceStateAt = sourceStateAt
         self.textIncomplete = textIncomplete
+        self.senderDomainNewToThread = senderDomainNewToThread
     }
 
     enum CodingKeys: String, CodingKey {
         case messageID, accountID, threadKey, date, sentDate, from, to, cc, subject, sourceState, body, bodyFromHTML,
-             bodyLength, bodyTruncated, attachments, places, importedAt, sourceStateAt, textIncomplete
+             bodyLength, bodyTruncated, attachments, places, importedAt, sourceStateAt, textIncomplete,
+             senderDomainNewToThread
     }
 
-    /// `places`, `importedAt`, `sourceStateAt` and `textIncomplete` decode with defaults when missing, so a value
+    /// `places`, `importedAt`, `sourceStateAt`, `textIncomplete` and `senderDomainNewToThread` decode with defaults when missing, so a value
     /// encoded before R11 (or D-481's mark) still reads (as D-418 did for `SearchHit.sourceState`).
     public init(from decoder: any Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -143,7 +150,8 @@ public struct MessageDetail: Hashable, Sendable, Codable, Identifiable {
                   places: try c.decodeIfPresent([ArchiveFolder].self, forKey: .places) ?? [],
                   importedAt: try c.decodeIfPresent(Date.self, forKey: .importedAt),
                   sourceStateAt: try c.decodeIfPresent(Date.self, forKey: .sourceStateAt),
-                  textIncomplete: try c.decodeIfPresent(Bool.self, forKey: .textIncomplete) ?? false)
+                  textIncomplete: try c.decodeIfPresent(Bool.self, forKey: .textIncomplete) ?? false,
+                  senderDomainNewToThread: try c.decodeIfPresent(Bool.self, forKey: .senderDomainNewToThread) ?? false)
     }
 }
 
