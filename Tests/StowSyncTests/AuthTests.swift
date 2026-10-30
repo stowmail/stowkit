@@ -95,13 +95,41 @@ import Testing
         await #expect(throws: (any Error).self) { _ = try await Self.get(port: listener.port, path: "/?code=x&state=expected") }
     }
 
+    /// The test stopped waiting for a task that had not finished.
+    struct StillWaiting: Error, CustomStringConvertible {
+        var seconds: Double
+        var description: String { "Still waiting after \(Int(seconds)) s: the wait for the sign-in code was never resumed." }
+    }
+
+    /// The task's result, or `StillWaiting` after `seconds` even if the task
+    /// never finishes. A plain `await task.value` on a continuation nobody
+    /// resumes hangs for good: cancelling it, which is all `.timeLimit` does,
+    /// cannot end it (checked: such a run printed nothing for 580 s).
+    static func value<T: Sendable>(of task: Task<T, Error>, within seconds: Double) async throws -> T {
+        let once = ResumeOnce()
+        return try await withCheckedThrowingContinuation { continuation in
+            Task {
+                let result = await task.result
+                if once.claim() { continuation.resume(with: result) }
+            }
+            DispatchQueue.global().asyncAfter(deadline: .now() + seconds) {
+                if once.claim() { continuation.resume(throwing: StillWaiting(seconds: seconds)) }
+            }
+        }
+    }
+
     /// A reply with the wrong state ends nothing (A-06): the wait it was sent
     /// into is still open afterwards, and only this sign-in's own reply ends it,
-    /// with that reply's code. No timer is involved, so a busy Mac cannot make
-    /// the listener give up before the forged request arrives; the timeout is a
-    /// test setting far beyond any request, and `timesOut` covers the timer.
-    @Test func rejectsTheWrongStateAndKeepsWaiting() async throws {
-        let listener = try await LoopbackListener.start(expectedState: "expected", timeout: 60)
+    /// with that reply's code. No timer decides the result, so a busy Mac cannot
+    /// make the listener give up before the forged request arrives; `timesOut`
+    /// covers the timer. A regression fails rather than hangs: if the genuine
+    /// reply does not end the wait, the listener's own timeout (a test setting,
+    /// far beyond any request) ends it with `timedOut` after 20 s; if the wait is
+    /// never resumed at all, the test stops waiting after 30 s (`StillWaiting`).
+    /// The time limit is a last backstop for anything else that runs long.
+    @Test(.timeLimit(.minutes(1)))
+    func rejectsTheWrongStateAndKeepsWaiting() async throws {
+        let listener = try await LoopbackListener.start(expectedState: "expected", timeout: 20)
         defer { listener.close() }
         let waiting = Task { try await listener.waitForCode() }
         #expect(try await Self.get(port: listener.port, path: "/?code=stolen&state=forged") == "400")
@@ -109,7 +137,7 @@ import Testing
         #expect(!listener.isClosed)
         #expect(listener.callbacksReceived == 2)
         #expect(try await Self.get(port: listener.port, path: "/?code=the-code&state=expected") == "200")
-        #expect(try await waiting.value == "the-code")
+        #expect(try await Self.value(of: waiting, within: 30) == "the-code")
         #expect(listener.isClosed)
         #expect(listener.callbacksReceived == 3)
     }
