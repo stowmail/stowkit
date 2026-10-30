@@ -5,16 +5,16 @@ import Testing
 @testable import StowStore
 
 /// Migration v3 (D-521, D-522): the provider's DMARC result for the From domain,
-/// per message, added to archives that already hold real mail. Nothing writes it
-/// yet; these tests cover the column, its index and the upgrade.
+/// per message, added to archives that already hold real mail. These tests cover
+/// the column, its index and the upgrade; `SenderDMARCStoreTests` what writes it.
 @Suite(.serialized) struct SchemaV3Tests {
-    @Test func freshArchiveImportsWithNoResultYet() async throws {
+    @Test func freshArchiveImportsWithAResultForEveryMessage() async throws {
         let test = try TestArchive()
         defer { test.remove() }
         _ = try await Importer(archive: test.archive).importAll(from: MemorySource(try test.fixtureMessages()))
         #expect(try test.count("messages") == 25)
-        #expect(try test.count("messages", "sender_dmarc IS NULL") == 25)
-        #expect(try pending(test.archive.database) == 25)
+        #expect(try test.count("messages", "sender_dmarc IS NULL") == 0)
+        #expect(try pending(test.archive.database) == 0)
         let applied = try await test.archive.database.read { db in try ArchiveSchema.migrator.appliedIdentifiers(db) }
         #expect(applied == Set(ArchiveSchema.migrationIdentifiers))
         #expect(ArchiveSchema.migrationIdentifiers.last == "v3")
@@ -24,6 +24,7 @@ import Testing
         let test = try TestArchive()
         defer { test.remove() }
         _ = try await Importer(archive: test.archive).importAll(from: MemorySource(try test.fixtureMessages()))
+        try await forget(test)
         for refused in ["bestguesspass", "PASS", "", "softfail"] {
             await #expect(throws: DatabaseError.self, "\(refused)") {
                 try await test.archive.database.write { db in
@@ -46,6 +47,7 @@ import Testing
         let test = try TestArchive()
         defer { test.remove() }
         _ = try await Importer(archive: test.archive).importAll(from: MemorySource(try test.fixtureMessages()))
+        try await forget(test)
         var after: Int64 = 0
         var read: [Int64] = []
         while true {
@@ -152,6 +154,11 @@ import Testing
     }
 
     private let addedInV3: Set<String> = ["sender_dmarc"]
+
+    /// As mail archived before v3: no result yet.
+    private func forget(_ test: TestArchive) async throws {
+        try await test.archive.database.write { db in try db.execute(sql: "UPDATE messages SET sender_dmarc = NULL") }
+    }
 
     private func pending(_ db: some DatabaseReader) throws -> Int {
         try db.read { db in try Int.fetchOne(db, sql: BackfillQueries.count)! }

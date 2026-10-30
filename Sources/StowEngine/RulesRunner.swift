@@ -63,22 +63,22 @@ public enum RulesRunner {
             let set = try EngineRules.ruleSet(settings: settings, archive: archive, account: record.account.id)
             let own: Set<String> = [record.account.email.lowercased()]
             let messages = try archive.database.read { db in
-                try Row.fetchAll(db, sql: "SELECT id, size FROM messages WHERE account_id = ? \(senderFilter) ORDER BY id",
+                try Row.fetchAll(db, sql: "SELECT id, size, sender_dmarc FROM messages WHERE account_id = ? \(senderFilter) ORDER BY id",
                                  arguments: StatementArguments([record.account.id.rawValue] + senderArguments))
-                    .map { ($0["id"] as Int64, $0["size"] as Int) }
+                    .map { ($0["id"] as Int64, $0["size"] as Int, ($0["sender_dmarc"] as String?).flatMap(SenderDMARC.init(rawValue:))) }
             }
             for start in stride(from: 0, to: messages.count, by: 500) {
                 let batch = messages[start..<min(start + 500, messages.count)]
                 var updates: [(Int64, StoredRuleResult)] = []
-                for (id, size) in batch {
+                for (id, size, senderDMARC) in batch {
                     guard let header = try? autoreleasepool(invoking: { try archive.headerBlock(id) }) else {
                         report.unreadable += 1
                         continue
                     }
                     let headers = HeaderParser().parseHeaders(header)
-                    // The full header is here, so the billing label can use the provider's own check (D-521).
-                    let assessment = set.assess(headers, ownAddresses: own,
-                                                senderDMARC: ProviderAuthentication.dmarc(headers, provider: record.account.provider))
+                    // The billing label only from the stored result, as everywhere else: one not
+                    // read yet (NULL) shows none until the backfill reads it (D-521, D-522).
+                    let assessment = set.assess(headers, ownAddresses: own, senderDMARC: senderDMARC ?? .none)
                     updates.append((id, EngineRules.stored(assessment)))
                     report.messages += 1
                     report.bySuggestion[assessment.suggestion, default: RulesReport.Group()].messages += 1

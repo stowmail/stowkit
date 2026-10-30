@@ -78,13 +78,14 @@ extension Importer {
     func readAgain(_ id: StoredMessageID) throws {
         guard let row = try archive.database.read({ db in
             try Row.fetchOne(db, sql: """
-                SELECT m.raw_hash, m.raw_state, m.thread_key, a.email FROM messages m JOIN accounts a ON a.id = m.account_id
+                SELECT m.raw_hash, m.raw_state, m.thread_key, a.email, a.provider FROM messages m JOIN accounts a ON a.id = m.account_id
                 WHERE m.id = ?
                 """, arguments: [id])
         }) else { return }
         let bytes = try archive.rawMessage(hash: row["raw_hash"], state: row["raw_state"])
         let rawHash: Data = row["raw_hash"]
         let ownAddress: String = row["email"]
+        let provider = Provider(rawValue: row["provider"])
         let prepared = try prepareWithinLimit(timedOut: .retryTimedOut(id)) { [self] in
             let parsed = parse(bytes)
             return (parsed: parsed, attachments: try parsed.attachments.map(prepare),
@@ -92,6 +93,7 @@ extension Importer {
         }
         let parsed = prepared.parsed
         let headers = parsed.headers
+        let senderDMARC = Self.senderDMARC(headers, provider: provider)
         // A Gmail thread ID never changes; otherwise the key comes from the headers now they can be read.
         let oldKey: String? = row["thread_key"]
         let threadKey = oldKey.flatMap { $0.hasPrefix("g:") ? $0 : nil }
@@ -107,7 +109,7 @@ extension Importer {
                         from_address_id = ?, has_attachments = ?, raw_inline_attachments = ?,
                         parse_status = ?, parse_warnings = ?, parser_version = ?,
                         rule_suggestion = coalesce(?, rule_suggestion), rule_score = coalesce(?, rule_score),
-                        rule_signals = coalesce(?, rule_signals),
+                        rule_signals = coalesce(?, rule_signals), sender_dmarc = ?,
                         text_state = 'complete', text_marked_version = NULL, text_attempts = 0
                     WHERE id = ?
                     """, arguments: [
@@ -116,7 +118,7 @@ extension Importer {
                         row["raw_state"] as String == "full" ? RawCompaction.inlineCandidates(parsed) : 0,
                         parsed.status.rawValue, warnings, parserVersion,
                         prepared.rules?.suggestion.rawValue, prepared.rules?.score,
-                        prepared.rules.map { $0.signals.joined(separator: ",") }, id,
+                        prepared.rules.map { $0.signals.joined(separator: ",") }, senderDMARC.rawValue, id,
                     ])
                 try db.execute(sql: "DELETE FROM message_addresses WHERE message_id = ?", arguments: [id])
                 try insertAddresses(db, messageID: id, headers: headers)

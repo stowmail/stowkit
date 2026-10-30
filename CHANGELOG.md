@@ -14,7 +14,8 @@ Changes to StowKit and the `stowmail` command-line tool, newest first. Security 
 
 ### Added
 
-- Archive schema `v3`: a column for the provider's DMARC result on each email (`messages.sender_dmarc`), for the "known billing sender" label, and an index of the emails not yet checked. Opening an archive with this version upgrades it in place, adding the column and the index only (about 2 seconds for 40,000 emails); every stored email keeps its meaning and reads as not yet checked. Nothing fills the column yet. Older versions still open an upgraded archive and write to it.
+- Archive schema `v3`: a column for the provider's DMARC result on each email (`messages.sender_dmarc`), for the "known billing sender" label, and an index of the emails not yet checked. Opening an archive with this version upgrades it in place, adding the column and the index only (about 2 seconds for 40,000 emails); every stored email keeps its meaning and reads as not yet checked. Older versions still open an upgraded archive and write to it.
+- The provider's DMARC result is now stored with every email Stow imports (`pass`, `fail` or `none`, never left empty), read from the topmost `Authentication-Results` field by the I-08 rule. Emails archived before are read by a backfill when the background sync starts: in batches of 500, from each email's header block only, one stored file at a time, resumable and safe to stop at any point; an email whose stored file cannot be read gets `none`. The "known billing sender" label in `stowmail rules report` and in Tidy up's count of protected mail now shows only where the stored result is `pass` (Tidy up reads "120 from known billing senders, 180 from addresses on the billing list"). An email not yet read shows "Kept" until the backfill reaches it. Protection is unchanged in every case.
 
 ## 0.1.3 (30 October 2026)
 

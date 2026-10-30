@@ -98,6 +98,7 @@ public actor Scheduler {
     private var lastLogged: RoundResult?
     private var swept = false
     private var retried = false
+    private var backfilled = false
     private var recordedHold: String?
 
     /// The `archive_meta` key holding the reason while the app holds sync, for `stowmail status`.
@@ -226,6 +227,25 @@ public actor Scheduler {
                 logger.warning("Reading again after an update stopped", metadata: ["error": "\(Self.plainWords(error))"])
             }
             if restartWhen() { return (.worked, [:]) }
+        }
+        if !backfilled {
+            // The provider's DMARC result for mail stored without one, once per process (D-521,
+            // D-522). Stopped by a hold or a pause, it goes on from where it stopped next round.
+            let backfill = SenderDMARCBackfill(archive: archive)
+            do {
+                let summary = try backfill.run(shouldStop: { [hold, power] in
+                    Task.isCancelled || hold() != nil || power().pauseReason != nil
+                })
+                backfilled = !summary.stopped
+                if summary != SenderDMARCBackfillSummary() {
+                    logger.notice("Read the provider's check for older emails", metadata: [
+                        "summary": "\(summary)", "left": "\((try? backfill.pending()).map(String.init) ?? "unknown")",
+                    ])
+                }
+            } catch {
+                backfilled = true
+                logger.warning("Reading the provider's check for older emails stopped", metadata: ["error": "\(Self.plainWords(error))"])
+            }
         }
 
         let accounts = ArchiveAccounts(archive: archive)

@@ -227,14 +227,14 @@ public final class Importer: Sendable {
         within: ((Database, ImportOutcome) throws -> Void)? = nil
     ) throws -> ImportOutcome {
         let key = raw.key
-        guard let ownAddress = try accountAddress(key.accountID) else { throw ImportError.unknownAccount(key.accountID) }
+        guard let (ownAddress, provider) = try account(key.accountID) else { throw ImportError.unknownAccount(key.accountID) }
         let rawHash = archive.rawFiles.hash(of: raw.bytes)
         if let outcome = try storedBefore(raw, rawHash: rawHash, restoring: restoring, within: within) { return outcome }
 
         // Work outside the transaction, on a thread of its own under a time limit
         // (D-502): parse, store attachments, build and check the skeleton, extract text.
         let prepared = try prepareWithinLimit(timedOut: .timedOut(key)) { [self] in
-            try prepareMessage(raw, hash: rawHash, ownAddress: ownAddress)
+            try prepareMessage(raw, hash: rawHash, ownAddress: ownAddress, provider: provider)
         }
 
         if prepared.stored.written || prepared.attachments.contains(where: \.written) {
@@ -267,14 +267,15 @@ public final class Importer: Sendable {
     /// all, so nothing that stopped the earlier tries runs again. It is marked
     /// "couldn't read all of this email" with this parser's version, and a newer
     /// parser reads it again (`retryMarkedMessages`). It has no subject, sender
-    /// or text until then; opening and exporting it work from its stored bytes.
+    /// or text until then, and no provider result (`none`, D-521): its headers
+    /// are not read either. Opening and exporting it work from its stored bytes.
     public func storeUnread(
         _ raw: RawMessage,
         restoring: Bool = false,
         within: ((Database, ImportOutcome) throws -> Void)? = nil
     ) throws -> ImportOutcome {
         let key = raw.key
-        guard try accountAddress(key.accountID) != nil else { throw ImportError.unknownAccount(key.accountID) }
+        guard try account(key.accountID) != nil else { throw ImportError.unknownAccount(key.accountID) }
         let rawHash = archive.rawFiles.hash(of: raw.bytes)
         if let outcome = try storedBefore(raw, rawHash: rawHash, restoring: restoring, within: within) { return outcome }
         let stored = try storeRawFile(raw, hash: rawHash, skeleton: nil, keptInline: 0)
@@ -290,8 +291,8 @@ public final class Importer: Sendable {
                 INSERT INTO messages (
                     account_id, raw_hash, gmail_msgid, gmail_thrid, thread_key, internal_date, size,
                     raw_state, raw_stored_size, parse_status, parse_warnings, parser_version,
-                    text_state, text_marked_version, imported_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'failed', ?, ?, 'incomplete', ?, ?)
+                    text_state, text_marked_version, sender_dmarc, imported_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'failed', ?, ?, 'incomplete', ?, 'none', ?)
                 """, arguments: [
                     key.accountID.rawValue, rawHash,
                     raw.gmailMessageID.map { Int64(bitPattern: $0) }, raw.gmailThreadID.map { Int64(bitPattern: $0) },
@@ -348,16 +349,19 @@ public final class Importer: Sendable {
         var attachments: [PreparedAttachment]
         var stored: StoredRaw
         var rules: StoredRuleResult?
+        /// The provider's own DMARC result for the From domain (D-521).
+        var senderDMARC: SenderDMARC
     }
 
-    private func prepareMessage(_ raw: RawMessage, hash: Data, ownAddress: String) throws -> Prepared {
+    private func prepareMessage(_ raw: RawMessage, hash: Data, ownAddress: String, provider: Provider?) throws -> Prepared {
         let parsed = parse(raw.bytes)
         let attachments = try parsed.attachments.map(prepare)
         let skeleton = RawCompaction.skeleton(raw.bytes, parsed: parsed, hashOf: archive.attachmentFiles.hash(of:))
         let stored = try storeRawFile(raw, hash: hash, skeleton: skeleton?.skeleton,
                                       keptInline: skeleton?.keptInline ?? RawCompaction.inlineCandidates(parsed))
         return Prepared(parsed: parsed, attachments: attachments, stored: stored,
-                        rules: classifier?(parsed.headers, [ownAddress.lowercased()]))
+                        rules: classifier?(parsed.headers, [ownAddress.lowercased()]),
+                        senderDMARC: Self.senderDMARC(parsed.headers, provider: provider))
     }
 
     /// Runs `work` under `preparation`'s time limit. On timeout the work is
@@ -374,10 +378,18 @@ public final class Importer: Sendable {
         }
     }
 
-    func accountAddress(_ id: AccountID) throws -> String? {
+    /// The account's own address and its provider (nil for a provider this build does not know).
+    func account(_ id: AccountID) throws -> (address: String, provider: Provider?)? {
         try archive.database.writeWithoutTransaction { db in
-            try String.fetchOne(db, sql: "SELECT email FROM accounts WHERE id = ?", arguments: [id.rawValue])
+            try Row.fetchOne(db, sql: "SELECT email, provider FROM accounts WHERE id = ?", arguments: [id.rawValue])
+                .map { ($0["email"], Provider(rawValue: $0["provider"])) }
         }
+    }
+
+    /// What the provider's own topmost `Authentication-Results` said (D-521). A
+    /// provider this build does not know gives `none`, as iCloud does.
+    static func senderDMARC(_ headers: MessageHeaders, provider: Provider?) -> SenderDMARC {
+        provider.map { ProviderAuthentication.dmarc(headers, provider: $0) } ?? .none
     }
 
     private func existingMessage(account: AccountID, rawHash: Data) throws -> StoredMessageID? {
@@ -515,8 +527,8 @@ public final class Importer: Sendable {
                 account_id, raw_hash, rfc822_message_id, gmail_msgid, gmail_thrid, thread_key,
                 internal_date, sent_date, date_raw, subject, from_address_id, size, has_attachments,
                 raw_state, raw_stored_size, raw_inline_attachments, parse_status, parse_warnings, parser_version,
-                rule_suggestion, rule_score, rule_signals, imported_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                rule_suggestion, rule_score, rule_signals, sender_dmarc, imported_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, arguments: [
                 raw.key.accountID.rawValue, rawHash, headers.messageID,
                 raw.gmailMessageID.map { Int64(bitPattern: $0) }, raw.gmailThreadID.map { Int64(bitPattern: $0) },
@@ -525,7 +537,8 @@ public final class Importer: Sendable {
                 headers.dateRaw, headers.subject, fromID, raw.size > 0 ? raw.size : raw.bytes.count, hasAttachments,
                 stored.state, stored.storedSize, stored.keptInline, parsed.status.rawValue, warnings, parserVersion,
 
-                rules?.suggestion.rawValue, rules?.score, rules.map { $0.signals.joined(separator: ",") }, now,
+                rules?.suggestion.rawValue, rules?.score, rules.map { $0.signals.joined(separator: ",") },
+                prepared.senderDMARC.rawValue, now,
             ])
         let id = db.lastInsertedRowID
         if parsed.textPlain != nil || parsed.textFromHTML != nil {

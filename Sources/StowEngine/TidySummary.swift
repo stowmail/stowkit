@@ -61,6 +61,9 @@ public struct TidySummary: Sendable, Equatable {
     public var sourceStates: [SourceGroup]
     /// Protected mail by why it is protected (D-407).
     public var protectedByKind: [Protection.Kind: Int]
+    /// Of `protectedByKind[.billingSender]`, those whose stored provider result is
+    /// `pass`: the only ones called "known billing senders" (D-521).
+    public var knownBillingSenders = 0
     public var protectedTotal: Int
     /// Messages in the summary's scope.
     public var messages: Int
@@ -162,11 +165,12 @@ public struct TidySummary: Sendable, Equatable {
                 states.append(group)
             }
 
-            // Why protected mail is protected: from the stored From address and subject, not the message.
+            // Why protected mail is protected: from the stored From address, subject and provider result, not the message.
             var byKind: [Protection.Kind: Int] = [:]
+            var knownBillingSenders = 0
             var protectedTotal = 0
             for row in try Row.fetchAll(db, sql: """
-                SELECT ma.display_name, a.address, m.subject FROM messages m
+                SELECT ma.display_name, a.address, m.subject, m.sender_dmarc FROM messages m
                 LEFT JOIN message_addresses ma ON ma.message_id = m.id AND ma.role = 'from' AND ma.position = 0
                 LEFT JOIN addresses a ON a.id = ma.address_id
                 WHERE \(scope) AND \(isProtected)
@@ -175,8 +179,9 @@ public struct TidySummary: Sendable, Equatable {
                 let from = (row["address"] as String?).map { [EmailAddress(name: row["display_name"], address: $0)] } ?? []
                 let kind = protectionRules.protection(MessageHeaders(from: from, subject: row["subject"]), data: data)?.kind ?? .subjectKeyword
                 byKind[kind, default: 0] += 1
+                if kind == .billingSender, row["sender_dmarc"] as String? == SenderDMARC.pass.rawValue { knownBillingSenders += 1 }
             }
-            return TidySummary(suggestions: groups, sourceStates: states, protectedByKind: byKind,
+            return TidySummary(suggestions: groups, sourceStates: states, protectedByKind: byKind, knownBillingSenders: knownBillingSenders,
                                protectedTotal: protectedTotal, messages: total, rulesProblem: data.loadProblem?.description)
         }
     }
