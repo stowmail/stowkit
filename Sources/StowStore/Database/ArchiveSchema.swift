@@ -16,13 +16,14 @@ import GRDB
 /// defaults that older code can leave alone.
 public enum ArchiveSchema {
     /// Every migration identifier, oldest first. Tests use this to step through versions.
-    public static let migrationIdentifiers = ["v1", "v2", "v3"]
+    public static let migrationIdentifiers = ["v1", "v2", "v3", "v4"]
 
     public static var migrator: DatabaseMigrator {
         var migrator = DatabaseMigrator()
         migrator.registerMigration("v1", migrate: v1)
         migrator.registerMigration("v2", migrate: v2)
         migrator.registerMigration("v3", migrate: v3)
+        migrator.registerMigration("v4", migrate: v4)
         return migrator
     }
 
@@ -371,6 +372,17 @@ public enum ArchiveSchema {
                 CHECK (sender_dmarc IN ('pass', 'fail', 'none'));
             CREATE INDEX messages_dmarc_pending ON messages(id) WHERE sender_dmarc IS NULL;
             """)
+    }
+
+    // MARK: - v4
+
+    /// The DMARC rule loosened (D-523: a pass for a parent of the From domain
+    /// counts), so every stored result is cleared and the backfill reads it again
+    /// by the new rule (D-522). Data only: no column or index changes. A migration
+    /// runs once per archive, so results written afterwards are kept. An older
+    /// build skips it and keeps reading the column.
+    static func v4(_ db: Database) throws {
+        try db.execute(sql: "UPDATE messages SET sender_dmarc = NULL")
     }
 
     /// "Name address", or just the address when there is no display name.

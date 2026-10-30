@@ -223,7 +223,7 @@ enum SampleRows {
                     """)
                 try db.execute(sql: "INSERT INTO message_attachments (message_id, part_path, attachment_id) VALUES (?, '2', ?)",
                                arguments: [message, db.lastInsertedRowID])
-            case "v3":
+            case "v3", "v4":   // v4 adds no column
                 let account = UUID().uuidString.lowercased()
                 try db.execute(sql: "INSERT INTO accounts (id, provider, email, display_name, created_at) VALUES (?, 'gmail', ?, 'T', 0)",
                                arguments: [account, "\(account)@example.com"])

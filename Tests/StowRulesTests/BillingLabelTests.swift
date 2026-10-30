@@ -92,4 +92,45 @@ struct BillingLabelTests {
             #expect(reason == "Kept: from a billing address at paypal.com.")
         }
     }
+
+    /// D-523: Gmail names the parent domain whose policy it applied when the From
+    /// address is at a subdomain (seen on 28 delivered messages, 2026-10-30).
+    struct ParentCase: Sendable, CustomStringConvertible {
+        var name: String
+        var provider: Provider
+        var from: String
+        var header: String
+        var expected: SenderDMARC
+        var description: String { name }
+    }
+
+    static let parentCases: [ParentCase] = [
+        ParentCase(name: "Gmail, From at a subdomain, header.from its parent", provider: .gmail,
+                   from: "service@mail.paypal.com", header: googlePass, expected: .pass),
+        ParentCase(name: "Gmail, From two labels below header.from", provider: .gmail,
+                   from: "service@a.mail.paypal.com", header: googlePass, expected: .pass),
+        ParentCase(name: "Microsoft, From at a subdomain, header.from its parent", provider: .microsoft,
+                   from: "service@mail.paypal.com", header: exchangeOnlinePass, expected: .pass),
+        ParentCase(name: "parent domain, but the provider says fail", provider: .gmail,
+                   from: "service@mail.paypal.com", header: googlePass.replacingOccurrences(of: "dmarc=pass", with: "dmarc=fail"),
+                   expected: .fail),
+        ParentCase(name: "look-alike: header.from is a suffix without a dot", provider: .gmail,
+                   from: "service@evilpaypal.com", header: googlePass, expected: .fail),
+        ParentCase(name: "header.from is a subdomain of the From domain", provider: .gmail,
+                   from: "service@paypal.com",
+                   header: googlePass.replacingOccurrences(of: "header.from=paypal.com", with: "header.from=mail.paypal.com"),
+                   expected: .fail),
+        ParentCase(name: "header.from a single label", provider: .gmail,
+                   from: "service@paypal.com", header: googlePass.replacingOccurrences(of: "header.from=paypal.com", with: "header.from=com"),
+                   expected: .fail),
+        ParentCase(name: "parent domain in another authserv-id's field", provider: .gmail,
+                   from: "service@mail.paypal.com", header: googlePass.replacingOccurrences(of: "mx.google.com;", with: "mx.evil.example;"),
+                   expected: .none),
+    ]
+
+    @Test(arguments: parentCases)
+    func aPassForTheParentDomainCounts(_ test: ParentCase) {
+        let headers = Self.message([test.header], from: "PayPal <\(test.from)>")
+        #expect(ProviderAuthentication.dmarc(headers, provider: test.provider) == test.expected)
+    }
 }

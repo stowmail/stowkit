@@ -17,7 +17,7 @@ import Testing
         #expect(try pending(test.archive.database) == 0)
         let applied = try await test.archive.database.read { db in try ArchiveSchema.migrator.appliedIdentifiers(db) }
         #expect(applied == Set(ArchiveSchema.migrationIdentifiers))
-        #expect(ArchiveSchema.migrationIdentifiers.last == "v3")
+        #expect(ArchiveSchema.migrationIdentifiers.contains("v3"))
     }
 
     @Test func onlyTheThreeResultsOrNothing() async throws {
@@ -117,7 +117,7 @@ import Testing
         let fileSize = try FileManager.default.attributesOfItem(atPath: copy.path)[.size] as? Int ?? 0
         let db = try EncryptedDatabase.open(at: copy, key: keys.databaseKeyData)
         let started = Date()
-        try ArchiveSchema.migrate(db)
+        try ArchiveSchema.migrator.migrate(db, upTo: "v3")
         let migrateSeconds = Date().timeIntervalSince(started)
 
         let after = try db.read { db in

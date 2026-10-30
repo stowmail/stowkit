@@ -22,7 +22,7 @@ public enum SenderDMARC: String, Sendable, Codable, CaseIterable {
 /// - iCloud and anything else: never a result.
 /// The authserv-id may be followed by a version number (`mx.microsoft.com 1`).
 /// The DMARC entry must say `pass` and its `header.from` must be the From
-/// address's domain, exactly (lowercased).
+/// address's domain (lowercased) or a parent of it (D-523).
 public enum ProviderAuthentication {
     public static func dmarc(_ headers: MessageHeaders, provider: Provider) -> SenderDMARC {
         guard let from = headers.from.first?.domain, !from.isEmpty,
@@ -43,7 +43,16 @@ public enum ProviderAuthentication {
         let words = dmarc.lowercased().split(whereSeparator: \.isWhitespace)
         let result = words.first.map { $0.dropFirst("dmarc=".count) }
         let headerFrom = words.first { $0.hasPrefix("header.from=") }.map { String($0.dropFirst("header.from=".count)) }
-        return result == "pass" && headerFrom == from ? .pass : .fail
+        return result == "pass" && headerFrom.map({ isFromOrParent($0, of: from) }) == true ? .pass : .fail
+    }
+
+    /// Whether `headerFrom` is the From domain or a parent of it (D-523): Gmail
+    /// names the parent domain whose DMARC policy it applied when the From address
+    /// is at a subdomain (`mail.example.com` gives `header.from=example.com`).
+    /// A single label is never a parent; nor is a suffix without a dot
+    /// (`example.com` is not a parent of `badexample.com`).
+    static func isFromOrParent(_ headerFrom: String, of from: String) -> Bool {
+        headerFrom == from || (headerFrom.contains(".") && from.hasSuffix("." + headerFrom))
     }
 
     /// Whether `part` is exactly `id`, possibly followed by a version number (RFC 8601).

@@ -2,6 +2,16 @@
 
 Changes to StowKit and the `stowmail` command-line tool, newest first. Security fixes rated Medium or worse also get a GitHub security advisory; Low ones are listed here only (see [SECURITY.md](SECURITY.md)).
 
+## Unreleased
+
+### Fixed
+
+- The "known billing sender" label (I-08) never showed for mail from a company's subdomain: Gmail writes `dmarc=pass` with `header.from` naming the parent domain whose policy it applied (`mail.example.com` gives `header.from=example.com`), which was read as `fail`. A pass for the From domain or a parent of it now counts (D-523); a suffix without a dot or a single label does not. Protection was never affected.
+
+### Changed
+
+- Archive schema `v4`: clears every stored DMARC result once (`messages.sender_dmarc`), so the backfill reads them all again by the fixed rule when the background sync next starts (a few seconds for 10,000 emails). Data only; older versions still open an upgraded archive.
+
 ## 0.1.4 (30 October 2026)
 
 ### Security
