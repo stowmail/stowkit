@@ -32,6 +32,14 @@ public final class Archive: Sendable {
         try location.refuseIfMoved()
         if !readOnly { try location.prepare() }
         let database = try EncryptedDatabase.open(at: location.databaseURL, key: KeyBuffer(keys.databaseKey), readOnly: readOnly)
+        // An archive a newer Stow needs is refused before the migrator runs or
+        // anything is written, read-only or not (D-536).
+        do {
+            try database.read(ArchiveSchema.checkReaderLevel)
+        } catch {
+            try? database.close()
+            throw error
+        }
         if !readOnly {
             try ArchiveSchema.migrate(database)
             try database.write { db in
@@ -181,11 +189,15 @@ public final class Archive: Sendable {
 public enum ArchiveError: Error, Equatable, CustomStringConvertible {
     case missingArchiveID
     case unknownAccount(String)
+    /// The archive needs reader level `needs` (nil: a value this build cannot
+    /// read as a level); this build reads up to `knows` (D-536).
+    case newerArchive(needs: Int?, knows: Int)
 
     public var description: String {
         switch self {
         case .missingArchiveID: "The archive has no archive ID; it was not opened for writing yet"
         case .unknownAccount: "No account in the archive matches that. See `stowmail account list`."
+        case .newerArchive: "This archive was made by a newer version of Stow. Update Stow to open it."
         }
     }
 }

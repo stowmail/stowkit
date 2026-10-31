@@ -27,6 +27,41 @@ public enum ArchiveSchema {
         return migrator
     }
 
+    /// The newest reader level this build reads (D-536). An archive records the
+    /// oldest level that reads it correctly under `min_reader_level` in
+    /// `archive_meta`; a missing key means 1. A migration whose change an older
+    /// build would misread (a new file flag, a column that must not be ignored)
+    /// raises it with `requireReaderLevel`, before anything in the new form is
+    /// written, and this constant goes up in the same build.
+    public static let readerLevel = 1
+    static let readerLevelKey = "min_reader_level"
+
+    /// Refuses an archive that needs a newer reader than this build. Reads only,
+    /// so `Archive.open` runs it before the migrator, read-only or not.
+    public static func checkReaderLevel(_ db: Database) throws {
+        guard try db.tableExists("archive_meta"),
+              let value = try String.fetchOne(db, sql: "SELECT value FROM archive_meta WHERE key = ?", arguments: [readerLevelKey])
+        else { return }
+        guard let needed = Int(value) else { throw ArchiveError.newerArchive(needs: nil, knows: readerLevel) }
+        if needed > readerLevel { throw ArchiveError.newerArchive(needs: needed, knows: readerLevel) }
+    }
+
+    /// Raises the archive's reader level to `level`, never lowering it. For the
+    /// migration that introduces a change an older reader would misread.
+    static func requireReaderLevel(_ level: Int, _ db: Database) throws {
+        try db.execute(sql: """
+            INSERT INTO archive_meta (key, value) VALUES (?, ?)
+            ON CONFLICT (key) DO UPDATE SET value = CAST(max(CAST(value AS INTEGER), CAST(excluded.value AS INTEGER)) AS TEXT)
+            """, arguments: [readerLevelKey, String(level)])
+    }
+
+    /// One line for `stowmail doctor`: the level the archive needs and the newest this build reads.
+    public static func readerLevelSummary(_ db: Database) throws -> String {
+        let value = try db.tableExists("archive_meta")
+            ? try String.fetchOne(db, sql: "SELECT value FROM archive_meta WHERE key = ?", arguments: [readerLevelKey]) : nil
+        return "Reader level: needs \(value ?? "1"); this build reads up to \(readerLevel)."
+    }
+
     /// Applies every outstanding migration.
     public static func migrate(_ writer: some DatabaseWriter) throws {
         try migrator.migrate(writer)

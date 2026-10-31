@@ -7,6 +7,8 @@ import StowSecrets
 public enum EncryptedFileError: Error, Equatable, CustomStringConvertible {
     case notAStowFile
     case unsupportedVersion(UInt8)
+    /// A flag bit this build does not know, such as a newer compression (D-536).
+    case unsupportedFeature(UInt8)
     /// Wrong key, a damaged file, or a file moved to a different name.
     case authenticationFailed
     case decompressionFailed
@@ -16,6 +18,7 @@ public enum EncryptedFileError: Error, Equatable, CustomStringConvertible {
         switch self {
         case .notAStowFile: "Not a Stow archive file"
         case .unsupportedVersion(let version): "Unsupported archive file version \(version)"
+        case .unsupportedFeature: "Archive file uses a feature this version of Stow does not know. Update Stow to open it."
         case .authenticationFailed: "Archive file failed authentication (wrong key, damaged, or renamed)"
         case .decompressionFailed: "Archive file could not be decompressed"
         case .missing: "Archive file is missing"
@@ -53,6 +56,9 @@ public struct EncryptedFileStore: Sendable {
     static let version: UInt8 = 1
     static let flagCompressed: UInt8 = 1
     static let flagSkeleton: UInt8 = 2
+    /// Every flag this build reads. Any other bit means a newer format, which
+    /// must be refused rather than read as if the bit were not there (D-536).
+    static let knownFlags: UInt8 = flagCompressed | flagSkeleton
     /// Header (magic, version, flags), nonce and tag around the sealed payload.
     static let overhead = 6 + 12 + 16
 
@@ -207,6 +213,8 @@ public struct EncryptedFileStore: Sendable {
         } catch {
             throw EncryptedFileError.authenticationFailed
         }
+        // After authentication, so a damaged or forged header says so (D-536).
+        guard flags & ~Self.knownFlags == 0 else { throw EncryptedFileError.unsupportedFeature(flags) }
         guard flags & Self.flagCompressed != 0 else { return payload }
         do {
             return try (payload as NSData).decompressed(using: .lzfse) as Data

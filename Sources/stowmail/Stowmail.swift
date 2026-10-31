@@ -101,8 +101,12 @@ struct Doctor: AsyncParsableCommand {
         }
         if location.exists {
             print("  database: present\(RecoveryBundle.exists(in: location.root) ? ", recovery bundle present" : ", NO recovery bundle")")
-            if let archive = try? CLIArchive.open(readOnly: true) {
+            let opened = Result { try CLIArchive.open(readOnly: true) }
+            if case .failure(let error as ArchiveError) = opened, case .newerArchive = error {
+                print("  NOT OPENED: \(error.description)")
+            } else if let archive = try? opened.get() {
                 if let schema = try? await archive.database.read({ try ArchiveSchema.versionSummary($0) }) { print("  \(schema)") }
+                if let level = try? await archive.database.read({ try ArchiveSchema.readerLevelSummary($0) }) { print("  \(level)") }
                 switch ArchiveSetup.recoveryState(archive) {
                 case .confirmed: print("  recovery key confirmed: yes")
                 case .unconfirmed: print("  recovery key confirmed: NO (run `stowmail recovery-key create`)")
