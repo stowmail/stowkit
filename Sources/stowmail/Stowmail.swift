@@ -16,7 +16,7 @@ struct Stowmail: AsyncParsableCommand {
         subcommands: [
             Doctor.self, Status.self, Init.self, RecoveryKeyCommand.self, Recover.self, AccountCommand.self, Folders.self,
             Sync.self, Size.self, Daemon.self, Verify.self, Export.self, Rules.self, Tidy.self, Remove.self, Removed.self, Restore.self,
-            Coverage.self, DeletionCheckCommand.self, ArchiveLocationCommand.self, ArchiveMove.self, Import.self, Stats.self, Search.self, ThreadCommand.self, OCR.self, MCPCommand.self,
+            Coverage.self, DeletionCheckCommand.self, ArchiveLocationCommand.self, ArchiveMove.self, ArchiveDelete.self, Import.self, Stats.self, Search.self, ThreadCommand.self, OCR.self, MCPCommand.self,
         ]
     )
 

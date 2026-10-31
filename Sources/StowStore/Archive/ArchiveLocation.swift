@@ -12,6 +12,8 @@ public enum ArchiveLocationError: Error, Equatable, CustomStringConvertible {
     case offline(String)
     /// The archive in this folder was moved to the given folder (`moved-to.json`, A-10).
     case moved(String)
+    /// Deleting the archive in this folder started and did not finish (`deleting.json`, R17, D-530).
+    case beingDeleted(String)
 
     public var description: String {
         switch self {
@@ -25,6 +27,8 @@ public enum ArchiveLocationError: Error, Equatable, CustomStringConvertible {
             "Archive offline: \(path) is not available. If it is on an external disk, connect the disk. Sync is paused until then."
         case .moved(let path):
             "This archive was moved to \(path), and Stow no longer uses this folder. To use the archive, run `stowmail archive-location \(path)`."
+        case .beingDeleted(let path):
+            "The archive at \(path) was being deleted when Stow stopped, so Stow will not open it or make a new one there. To finish deleting it, run `stowmail archive-delete \(path)`."
         }
     }
 }
@@ -68,7 +72,7 @@ public struct ArchiveLocation: Sendable, Equatable {
 
     /// The recovery bundle beside the database (D-031).
     public var recoveryBundleURL: URL { root.appendingPathComponent("keys.recovery") }
-    var lockURL: URL { root.appendingPathComponent(".writer.lock") }
+    public var lockURL: URL { root.appendingPathComponent(".writer.lock") }
     /// Left in a folder whose archive was moved (A-10, D-509). Kept even when
     /// the old copy is deleted, so nothing opens or creates an archive here again.
     public var movedMarkerURL: URL { root.appendingPathComponent("moved-to.json") }
@@ -89,10 +93,19 @@ public struct ArchiveLocation: Sendable, Equatable {
         return (try? decoder.decode(MovedMarker.self, from: data))?.movedTo ?? "?"
     }
 
-    /// Throws `moved` if this folder's archive was moved.
+    /// Throws `moved` if this folder's archive was moved, and `beingDeleted` if
+    /// deleting it started and did not finish (R17, D-530): either way nothing
+    /// opens, writes to or creates an archive here.
     public func refuseIfMoved() throws {
         if let destination = movedTo() { throw ArchiveLocationError.moved(destination) }
+        if isBeingDeleted { throw ArchiveLocationError.beingDeleted(root.path) }
     }
+
+    /// Left in the folder while the archive is deleted (R17, D-530), and removed
+    /// only once everything else is gone. Visible, like `moved-to.json`.
+    public var deletingMarkerURL: URL { root.appendingPathComponent("deleting.json") }
+
+    public var isBeingDeleted: Bool { FileManager.default.fileExists(atPath: deletingMarkerURL.path) }
 
     /// Writes the marker naming `destination`: a temporary file flushed with
     /// `F_FULLFSYNC`, renamed into place, the folder flushed. The new path and
@@ -102,7 +115,13 @@ public struct ArchiveLocation: Sendable, Equatable {
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         encoder.dateEncodingStrategy = .iso8601
         let bytes = try encoder.encode(MovedMarker(movedTo: destination.standardizedFileURL.path, movedAt: date))
-        let temporary = root.appendingPathComponent(".moved-to.\(UUID().uuidString).tmp")
+        try writeMarker(bytes, to: movedMarkerURL, sync: sync)
+    }
+
+    /// Writes a marker file durably: a temporary file flushed with
+    /// `F_FULLFSYNC`, renamed into place, the folder flushed.
+    public func writeMarker(_ bytes: Data, to url: URL, sync: DiskSync = .system) throws {
+        let temporary = root.appendingPathComponent(".\(url.deletingPathExtension().lastPathComponent).\(UUID().uuidString).tmp")
         let descriptor = open(temporary.path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o600)
         guard descriptor >= 0 else { throw CocoaError(.fileWriteUnknown) }
         do {
@@ -110,7 +129,7 @@ public struct ArchiveLocation: Sendable, Equatable {
             try handle.write(contentsOf: bytes)
             try sync.flushFile(descriptor, path: temporary.path)
             try handle.close()
-            try sync.rename(temporary, to: movedMarkerURL)
+            try sync.rename(temporary, to: url)
         } catch {
             unlink(temporary.path)
             throw error
@@ -177,6 +196,56 @@ public struct ArchiveLocation: Sendable, Equatable {
             }
         }
         return VolumeInfo(fileSystem: fileSystem, isLocal: isLocal, verdict: verdict)
+    }
+
+    // MARK: - Folder check for the app (R16, D-529)
+
+    /// What D-035's rules say about a folder before anything is made there,
+    /// what is in it, and the space free on its disk. Changes nothing.
+    public struct FolderCheck: Sendable, Equatable {
+        public enum Contents: Sendable, Equatable {
+            /// Not there yet, or holding nothing but Finder's `.DS_Store`.
+            case empty
+            /// A Stow archive (its database) is there.
+            case archive
+            /// The archive here was moved to this folder (`moved-to.json`, D-509).
+            case moved(String)
+            /// Deleting the archive here started and did not finish (D-530).
+            case beingDeleted
+            /// Something else is there.
+            case otherFiles
+        }
+
+        public var volume: VolumeInfo
+        public var contents: Contents
+        /// Free space on that disk for files the user asked for (purgeable space
+        /// included, as Finder counts it), or nil when the disk cannot say.
+        public var availableBytes: Int64?
+        /// The disk's name as Finder shows it, for example "Macintosh HD" or "Samsung T7".
+        public var volumeName: String?
+    }
+
+    /// Checks `url` for the app's location step (J1 step 2) and the free-space
+    /// check after sign-in (step 5). Reads only: nothing is created.
+    public static func checkFolder(_ url: URL) -> FolderCheck {
+        let folder = ArchiveLocation(root: url)
+        var probe = folder.root
+        while !FileManager.default.fileExists(atPath: probe.path), probe.pathComponents.count > 1 {
+            probe.deleteLastPathComponent()
+        }
+        let values = try? probe.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey,
+                                                         .volumeAvailableCapacityKey, .volumeLocalizedNameKey])
+        let available = values?.volumeAvailableCapacityForImportantUsage ?? values?.volumeAvailableCapacity.map(Int64.init)
+        return FolderCheck(volume: checkVolume(url), contents: folder.contents(), availableBytes: available,
+                           volumeName: values?.volumeLocalizedName)
+    }
+
+    func contents() -> FolderCheck.Contents {
+        if let destination = movedTo() { return .moved(destination) }
+        if isBeingDeleted { return .beingDeleted }
+        if exists { return .archive }
+        let names = (try? FileManager.default.contentsOfDirectory(atPath: root.path)) ?? []
+        return names.allSatisfy { $0 == ".DS_Store" } ? .empty : .otherFiles
     }
 
     public var databaseURL: URL { root.appendingPathComponent("archive.sqlite") }

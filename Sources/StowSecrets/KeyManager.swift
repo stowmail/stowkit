@@ -60,6 +60,26 @@ public struct ArchiveKeys: Sendable {
 public struct KeysDigest: Sendable {
     let bytes: Data
 
+    init(bytes: Data) {
+        self.bytes = bytes
+    }
+
+    /// Read back from `hex`; nil for anything but 64 hex digits.
+    public init?(hex: String) {
+        let digits = Array(hex.utf8)
+        guard digits.count == 64 else { return nil }
+        var bytes = Data(capacity: 32)
+        for index in stride(from: 0, to: 64, by: 2) {
+            guard let byte = UInt8(String(decoding: digits[index...index + 1], as: UTF8.self), radix: 16) else { return nil }
+            bytes.append(byte)
+        }
+        self.bytes = bytes
+    }
+
+    /// Lowercase hex, for a marker that must name the keys without holding
+    /// them: deleting an archive (R17, D-530) records it before it starts.
+    public var hex: String { bytes.map { String(format: "%02x", $0) }.joined() }
+
     public func matches(_ other: KeysDigest) -> Bool {
         guard bytes.count == other.bytes.count else { return false }
         var difference: UInt8 = 0
@@ -171,6 +191,13 @@ public struct KeyManager: Sendable {
             if case KeychainError.alreadyExists = error { throw KeyManagerError.keysAlreadyExist }
             throw error
         }
+    }
+
+    /// Deletes both key items, for deleting the archive they open (R17, D-530),
+    /// whose caller has checked they are that archive's. Missing items are not an error.
+    public func deleteKeys() throws {
+        try keychain.delete(Self.databaseKeyItem)
+        try keychain.delete(Self.fileKeyItem)
     }
 
     /// Loads both keys. Never creates them.

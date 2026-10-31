@@ -86,3 +86,57 @@ struct ArchiveMove: AsyncParsableCommand {
                                        say: { print($0) }, confirmDelete: { CLI.confirm($0) })
     }
 }
+
+struct ArchiveDelete: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "archive-delete",
+        abstract: "Delete the whole archive and its keys from this Mac. Your mailboxes are not touched.",
+        discussion: """
+            Removes every account first, as `stowmail account remove` does, so Stow forgets their sign-ins; then deletes \
+            the archive's files and its two keys in the Keychain. Nothing outside the archive folder is deleted. Asks you \
+            to type `delete` first. Refused while the background sync is using the archive. If a deletion was stopped \
+            part-way, the folder is refused everywhere until you run this again, which finishes it (R17, D-530).
+            """
+    )
+
+    @Argument(help: "The archive folder (default: the one Stow uses).") var folder: String?
+
+    func run() async throws {
+        CLI.bootstrapLogging()
+        let location = folder.map {
+            ArchiveLocation(root: URL(fileURLWithPath: ($0 as NSString).expandingTildeInPath, isDirectory: true))
+        } ?? CLIArchive.location()
+        if location.isBeingDeleted {
+            print("Deleting the archive at \(location.root.path) was stopped part-way; it cannot be opened any more.")
+        } else {
+            try ArchiveOpening.requireArchive(at: location)
+            let archive = try Archive.open(location, keys: try CLI.keyManager().loadKeys(), readOnly: true)
+            let stats = try ArchiveStats.collect(archive)
+            let connected = try ArchiveAccounts(archive: archive).all().filter(\.isConnected).count
+            try archive.database.close()
+            print("""
+                This deletes the archive at \(location.root.path): \(stats.messages) emails, \
+                \(CLI.megabytes(stats.totalStoredBytes)) on disk, and its keys in this Mac's Keychain. \
+                Stow also forgets the sign-ins of \(connected) connected \(connected == 1 ? "account" : "accounts"). \
+                Your mailboxes are not touched, but anything you already deleted from them is gone for good \
+                unless a backup holds it. This cannot be undone.
+                """)
+        }
+        guard CLI.ask("To delete it, type delete: ") == "delete" else {
+            print("Nothing was deleted.")
+            return
+        }
+        let outcome = try ArchiveDeletion.delete(location, keyManager: CLI.keyManager())
+        for account in outcome.removedAccounts {
+            print("Removed account \(account.id) (\(account.provider.rawValue)); its \(account.provider.credentialKind.label) \(account.provider.oauth == nil ? "is" : "are") deleted from this Mac.")
+            if account.provider.oauth == nil { print(ICloudSignIn.revokeSteps) }
+        }
+        print("Deleted the archive at \(location.root.path).")
+        if !outcome.deletedKeys {
+            print("Its keys were not found in this Mac's Keychain, so none were deleted.")
+        }
+        if !outcome.removedFolder {
+            print("The folder still holds files Stow did not make, so it was left in place.")
+        }
+    }
+}

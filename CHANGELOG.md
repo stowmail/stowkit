@@ -2,6 +2,13 @@
 
 Changes to StowKit and the `stowmail` command-line tool, newest first. Security fixes rated Medium or worse also get a GitHub security advisory; Low ones are listed here only (see [SECURITY.md](SECURITY.md)).
 
+## Unreleased
+
+### Added
+
+- `ArchiveLocation.checkFolder` (R16, D-529): what Stow's disk rules say about a folder before anything is made there (suitable, allowed with a caution, or refused with the reason), what is in it (nothing, an archive, a moved or half-deleted archive, other files) and the free space on its disk. Reads only.
+- `stowmail archive-delete` and `ArchiveDeletion.delete` (R17, D-530): deletes the whole archive and its two keys under the writer lock, after removing every account as `account remove` does. Asks for the word `delete` first; refused while the background sync holds the lock, for a moved folder, and when the Keychain's keys do not open that archive. Nothing outside the archive folder is deleted. A deletion stopped part-way leaves `deleting.json` in the folder, so every way of opening, creating or choosing it refuses with a message saying how to finish, and running the command again finishes it.
+
 ## 0.1.5 (30 October 2026)
 
 ### Fixed
