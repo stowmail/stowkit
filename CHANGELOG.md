@@ -2,13 +2,17 @@
 
 Changes to StowKit and the `stowmail` command-line tool, newest first. Security fixes rated Medium or worse also get a GitHub security advisory; Low ones are listed here only (see [SECURITY.md](SECURITY.md)).
 
-## Unreleased
+## 0.1.6 (31 October 2026)
 
 ### Added
 
 - `ArchiveLocation.checkFolder` (R16, D-529): what Stow's disk rules say about a folder before anything is made there (suitable, allowed with a caution, or refused with the reason), what is in it (nothing, an archive, a moved or half-deleted archive, other files) and the free space on its disk. Reads only.
 - `stowmail archive-delete` and `ArchiveDeletion.delete` (R17, D-530): deletes the whole archive and its two keys under the writer lock, after removing every account as `account remove` does. Asks for the word `delete` first; refused while the background sync holds the lock, for a moved folder, and when the Keychain's keys do not open that archive. Nothing outside the archive folder is deleted. A deletion stopped part-way leaves `deleting.json` in the folder, so every way of opening, creating or choosing it refuses with a message saying how to finish, and running the command again finishes it.
 - Older versions now refuse newer archives (D-536). `EncryptedFileStore` refuses a file with a flag bit it does not know (`EncryptedFileError.unsupportedFeature`) instead of reading it as if the bit were not there, and `Archive.open` refuses, before upgrading or writing anything, an archive whose `min_reader_level` is above what this build reads (`ArchiveError.newerArchive`): "This archive was made by a newer version of Stow. Update Stow to open it." Nothing writes the level yet, so every archive opens as before; it protects from this release on. `stowmail doctor` shows the level.
+
+### Changed
+
+- `docs/security-review.md`: the rows that said "(unreleased)" now name the release that shipped each fix (0.1.1 to 0.1.5).
 
 ## 0.1.5 (30 October 2026)
 
