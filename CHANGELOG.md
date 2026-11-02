@@ -2,6 +2,12 @@
 
 Changes to StowKit and the `stowmail` command-line tool, newest first. Security fixes rated Medium or worse also get a GitHub security advisory; Low ones are listed here only (see [SECURITY.md](SECURITY.md)).
 
+## Unreleased
+
+### Added
+
+- `ArchiveSetup.confirmedAt` (R18, D-551): when the recovery key that opens the archive was confirmed, for the app's Settings > Security. Nil unless the key is confirmed, so a key file replaced without a new confirmation (D-086) shows no date. Reads only.
+
 ## 0.1.6 (31 October 2026)
 
 ### Added

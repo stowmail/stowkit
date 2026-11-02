@@ -235,6 +235,15 @@ public enum ArchiveSetup {
     }
 
     /// Both rows in one commit that is on the drive before the caller renames anything.
+    /// When the key that opens the archive was last confirmed, for Settings >
+    /// Security (R18, D-551). Nil unless `recoveryState` is `.confirmed`, so a
+    /// replaced bundle (D-086) never shows an old date.
+    public static func confirmedAt(_ archive: Archive) -> Date? {
+        guard recoveryState(archive) == .confirmed,
+              let text = try? archive.meta(confirmedKey), let seconds = Int(text) else { return nil }
+        return Date(timeIntervalSince1970: TimeInterval(seconds))
+    }
+
     private static func record(_ archive: Archive, bundle fingerprint: String, at date: Date) throws {
         try archive.setMetaDurably([confirmedBundleKey: fingerprint, confirmedKey: String(Int(date.timeIntervalSince1970))])
     }

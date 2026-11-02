@@ -38,6 +38,26 @@ import Testing
         try ArchiveSetup.requireConfirmed(archive)
     }
 
+    @Test func theConfirmationDateFollowsTheKeyInUse() throws {
+        defer { cleanUp() }
+        let manager = KeyManager(keychain: keychain)
+        let (archive, shown) = try ArchiveSetup.initialise(location, keyManager: manager)
+        let first = try #require(shown)
+        #expect(ArchiveSetup.confirmedAt(archive) == nil)
+        let firstDate = Date(timeIntervalSince1970: 1_800_000_000)
+        try ArchiveSetup.confirm(archive, recoveryKey: first, typed: [0: first.groups[0], 7: first.groups[7]], at: firstDate)
+        #expect(ArchiveSetup.confirmedAt(archive) == firstDate)
+        // A new key waiting leaves the old date; confirming it moves the date.
+        let second = try ArchiveSetup.rotate(archive, keys: try manager.loadKeys())
+        #expect(ArchiveSetup.confirmedAt(archive) == firstDate)
+        let secondDate = firstDate.addingTimeInterval(86_400)
+        try ArchiveSetup.confirm(archive, recoveryKey: second, typed: [2: second.groups[2], 9: second.groups[9]], at: secondDate)
+        #expect(ArchiveSetup.confirmedAt(archive) == secondDate)
+        // A key file replaced without a new confirmation shows no date (D-086).
+        try Data("not the confirmed bundle".utf8).write(to: location.recoveryBundleURL)
+        #expect(ArchiveSetup.confirmedAt(archive) == nil)
+    }
+
     @Test func threeWrongTriesLeaveTheOldKeyWorking() throws {
         defer { cleanUp() }
         let (archive, manager, first) = try confirmedArchive()
