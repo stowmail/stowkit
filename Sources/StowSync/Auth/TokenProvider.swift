@@ -18,6 +18,8 @@ public enum SignInCredential: Sendable {
 /// - Refresh when the token has less than five minutes left.
 /// - On `invalid_grant`, mark the account as needing sign-in and stop. Never retry.
 /// - An account already marked is refused at once, without touching the network.
+/// - A Gmail token granted before D-583, under `https://mail.google.com/`, is
+///   refused with its own message and marks the account once (D-583).
 /// - A refused app-specific password marks the account the same way; it is
 ///   never retried, since there is nothing to refresh (D-467 item 5).
 /// - A removed (disconnected) account is refused before anything else, and a
@@ -83,8 +85,19 @@ public actor TokenProvider {
             throw SyncError.protocolViolation("This account signs in with an app-specific password, not a token")
         }
         guard record.isConnected else { throw SyncError.accountRemoved(accountID) }
+        let tokens = try tokenStore.tokens(for: accountID)
+        if let tokens, Self.isOldPermission(tokens, for: oauth) {
+            // Signed in before D-583 under `https://mail.google.com/`: the token
+            // cannot reach the Gmail API's read-only calls, and refreshing keeps
+            // the old grant. Marked once; nothing is sent (D-110).
+            if !record.needsSignIn {
+                logger.notice("Token was granted under the previous Gmail permission; account needs sign-in", metadata: ["account": "\(accountID)"])
+                try registry.setNeedsSignIn(accountID, true)
+            }
+            throw SyncError.oldPermission(accountID)
+        }
         guard !record.needsSignIn else { throw SyncError.needsSignIn(accountID) }
-        guard let tokens = try tokenStore.tokens(for: accountID) else {
+        guard let tokens else {
             try registry.setNeedsSignIn(accountID, true)
             throw SyncError.needsSignIn(accountID)
         }
@@ -107,5 +120,13 @@ public actor TokenProvider {
             try registry.setNeedsSignIn(accountID, true)
             throw SyncError.needsSignIn(accountID)
         }
+    }
+
+    /// A Gmail token whose recorded grant lacks `gmail.readonly`. A token with
+    /// no recorded scope is not judged here: Google always sends one, and the
+    /// API's own refusal catches anything this misses.
+    static func isOldPermission(_ tokens: OAuthTokens, for provider: OAuthProvider) -> Bool {
+        guard provider == .gmail, let scope = tokens.scope else { return false }
+        return !scope.split(separator: " ").contains { $0 == OAuthProviderConfig.gmailReadOnlyScope }
     }
 }

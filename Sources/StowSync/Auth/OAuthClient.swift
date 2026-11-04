@@ -59,6 +59,9 @@ public enum OAuthError: Error, Equatable, CustomStringConvertible {
     case noRefreshToken
     /// The signed-in address could not be worked out from the sign-in.
     case noEmailAddress
+    /// The person unticked a permission Stow needs on the consent screen, so
+    /// the grant was refused and nothing was stored (D-583).
+    case scopeNotGranted
 
     public var description: String {
         switch self {
@@ -72,6 +75,8 @@ public enum OAuthError: Error, Equatable, CustomStringConvertible {
             "The provider did not return a refresh token. Remove Stow's access in the account's security settings, then sign in again."
         case .noEmailAddress:
             "Could not tell which address signed in. Pass it with --email."
+        case .scopeNotGranted:
+            "Stow needs the permission to view your email to download a copy, and it was not given on the sign-in page. Nothing was saved. Sign in again and leave that permission ticked."
         }
     }
 }
@@ -108,6 +113,7 @@ public struct OAuthClient: Sendable {
         ]
         if let secret = config.clientSecret { fields.append(("client_secret", secret)) }
         let response = try await post(fields)
+        guard config.grants(response.scope) else { throw OAuthError.scopeNotGranted }
         guard let refresh = response.refreshToken, !refresh.isEmpty else { throw OAuthError.noRefreshToken }
         let tokens = OAuthTokens(
             accessToken: response.accessToken,

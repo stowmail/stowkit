@@ -7,6 +7,10 @@ public enum SyncError: Error, Equatable, CustomStringConvertible {
     /// The refresh token was rejected or is missing. The account is marked and
     /// sync will not try again until the user signs in (D-110).
     case needsSignIn(AccountID)
+    /// A Gmail account signed in before Stow moved to the Gmail API, under the
+    /// previous, wider permission. Signing in once more fixes it; nothing archived
+    /// is lost (D-583).
+    case oldPermission(AccountID)
     /// The account was removed (disconnected) from Stow. Nothing is refreshed
     /// or saved for it; adding the address again reconnects it (A-12, D-513).
     case accountRemoved(AccountID)
@@ -48,6 +52,8 @@ public enum SyncError: Error, Equatable, CustomStringConvertible {
     case timedOut
     /// The server asked Stow to slow down. Retried with back-off (D-107).
     case throttled(String)
+    /// The provider had a fault on its side (an HTTP 5xx). Retried with back-off.
+    case providerUnavailable(String)
     /// A provider limit for the day was reached (for example Gmail's bandwidth cap). Not retried today.
     case quotaExceeded(String)
     case commandFailed(command: String, status: String, text: String)
@@ -65,7 +71,7 @@ public enum SyncError: Error, Equatable, CustomStringConvertible {
     /// Whether reconnecting after a pause might help.
     public var isRetryable: Bool {
         switch self {
-        case .connectionFailed, .connectionClosed, .timedOut, .throttled, .hostNotFound, .connectionRefused: true
+        case .connectionFailed, .connectionClosed, .timedOut, .throttled, .hostNotFound, .connectionRefused, .providerUnavailable: true
         default: false
         }
     }
@@ -74,6 +80,8 @@ public enum SyncError: Error, Equatable, CustomStringConvertible {
         switch self {
         case .needsSignIn(let id):
             "Account \(id) needs to sign in again. Run `stowmail account signin \(id)`."
+        case .oldPermission(let id):
+            "Account \(id) was signed in under Google's previous permission. Stow now asks only to view your email, so sign in once more with `stowmail account signin \(id)`. Nothing archived is lost."
         case .importOnly: "This is an import-only account: its mail came from files, and it never syncs."
         case .accountRemoved(let id):
             "Account \(id) was removed from Stow, so it no longer signs in or syncs. Add the address again with `stowmail account add` to reconnect it."
@@ -101,6 +109,7 @@ public enum SyncError: Error, Equatable, CustomStringConvertible {
         case .connectionClosed(let text): "The mail server closed the connection\(text.map { ": \($0)" } ?? ".")"
         case .timedOut: "The mail server stopped responding."
         case .throttled(let text): "The mail server asked Stow to slow down: \(text)"
+        case .providerUnavailable(let text): "The mail service had a fault on its side: \(text). The background sync tries again."
         case .quotaExceeded(let text): "The provider's daily limit was reached: \(text). Try again tomorrow."
         case .commandFailed(let command, let status, let text): "\(command) failed (\(status)): \(text)"
         case .protocolViolation(let text): "Unexpected reply from the mail server: \(text)"

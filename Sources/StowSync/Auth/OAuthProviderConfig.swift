@@ -18,6 +18,10 @@ public struct OAuthProviderConfig: Sendable, Equatable {
     public let redirectHost: String
     /// Extra query parameters on the authorisation URL.
     public let extraAuthorizationParameters: [(String, String)]
+    /// Scopes the token response must list. Google lets people untick a scope
+    /// on its consent screen, so a sign-in can succeed without them; such a
+    /// grant is refused before anything is stored (D-583).
+    public let requiredGrantedScopes: [String]
 
     public init(
         provider: Provider,
@@ -27,7 +31,8 @@ public struct OAuthProviderConfig: Sendable, Equatable {
         clientSecret: String?,
         scopes: [String],
         redirectHost: String,
-        extraAuthorizationParameters: [(String, String)] = []
+        extraAuthorizationParameters: [(String, String)] = [],
+        requiredGrantedScopes: [String] = []
     ) {
         self.provider = provider
         self.authorizationEndpoint = authorizationEndpoint
@@ -37,6 +42,7 @@ public struct OAuthProviderConfig: Sendable, Equatable {
         self.scopes = scopes
         self.redirectHost = redirectHost
         self.extraAuthorizationParameters = extraAuthorizationParameters
+        self.requiredGrantedScopes = requiredGrantedScopes
     }
 
     public static func == (lhs: Self, rhs: Self) -> Bool {
@@ -45,6 +51,16 @@ public struct OAuthProviderConfig: Sendable, Equatable {
             && lhs.clientSecret == rhs.clientSecret && lhs.scopes == rhs.scopes && lhs.redirectHost == rhs.redirectHost
             && lhs.extraAuthorizationParameters.map(\.0) == rhs.extraAuthorizationParameters.map(\.0)
             && lhs.extraAuthorizationParameters.map(\.1) == rhs.extraAuthorizationParameters.map(\.1)
+            && lhs.requiredGrantedScopes == rhs.requiredGrantedScopes
+    }
+
+    /// Whether a token response's space-separated `scope` lists every required
+    /// scope. Scopes are case-sensitive strings (RFC 6749 section 3.3). With
+    /// none required, any answer passes, including none.
+    public func grants(_ scope: String?) -> Bool {
+        guard !requiredGrantedScopes.isEmpty else { return true }
+        let granted = Set((scope ?? "").split(separator: " ").map(String.init))
+        return requiredGrantedScopes.allSatisfy(granted.contains)
     }
 
     /// The redirect URI for a listener on `port`.
@@ -52,10 +68,14 @@ public struct OAuthProviderConfig: Sendable, Equatable {
         "http://\(redirectHost):\(port)/"
     }
 
-    /// Google: full IMAP access needs `https://mail.google.com/`. `openid email`
-    /// are added so the token response says which address signed in, which
-    /// XOAUTH2 needs (D-103). `access_type=offline` asks for a refresh token and
-    /// `prompt=consent` makes Google send one again on a repeat sign-in.
+    /// The Gmail API scope that only reads (D-583). Stow asks for nothing wider.
+    public static let gmailReadOnlyScope = "https://www.googleapis.com/auth/gmail.readonly"
+
+    /// Google: `gmail.readonly` lets the Gmail API read mail and nothing else
+    /// (D-583). `openid email` are added so the token response says which
+    /// address signed in, which names the account (D-103). `access_type=offline`
+    /// asks for a refresh token and `prompt=consent` makes Google send one again
+    /// on a repeat sign-in.
     public static func google(_ config: AppConfig) -> OAuthProviderConfig {
         OAuthProviderConfig(
             provider: .gmail,
@@ -63,9 +83,10 @@ public struct OAuthProviderConfig: Sendable, Equatable {
             tokenEndpoint: URL(string: "https://oauth2.googleapis.com/token")!,
             clientID: config.googleClientID,
             clientSecret: config.googleClientSecret,
-            scopes: ["https://mail.google.com/", "openid", "email"],
+            scopes: [gmailReadOnlyScope, "openid", "email"],
             redirectHost: "127.0.0.1",
-            extraAuthorizationParameters: [("access_type", "offline"), ("prompt", "consent")]
+            extraAuthorizationParameters: [("access_type", "offline"), ("prompt", "consent")],
+            requiredGrantedScopes: [gmailReadOnlyScope]
         )
     }
 

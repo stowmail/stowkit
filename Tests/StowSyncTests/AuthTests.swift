@@ -35,7 +35,7 @@ import Testing
         #expect(url.host == "accounts.google.com")
         let q = query(url)
         #expect(q["redirect_uri"] == "http://127.0.0.1:51234/")
-        #expect(q["scope"] == "https://mail.google.com/ openid email")
+        #expect(q["scope"] == "https://www.googleapis.com/auth/gmail.readonly openid email")
         #expect(q["code_challenge"] == pkce.challenge)
         #expect(q["code_challenge_method"] == "S256")
         #expect(q["state"] == "abc")
@@ -237,11 +237,11 @@ import Testing
 }
 
 @Suite struct OAuthClientTests {
-    static let tokenJSON = #"{"access_token":"at-1","refresh_token":"rt-1","expires_in":3599,"scope":"https://mail.google.com/","token_type":"Bearer"}"#
+    static let tokenJSON = #"{"access_token":"at-1","refresh_token":"rt-1","expires_in":3599,"scope":"https://www.googleapis.com/auth/gmail.readonly openid https://www.googleapis.com/auth/userinfo.email","token_type":"Bearer"}"#
 
     @Test func exchangeSendsVerifierAndSecretAndReadsEmail() async throws {
         let id = fakeIDToken(["email": "sam@example.com", "email_verified": true])
-        let endpoint = FakeTokenEndpoint { _ in (200, #"{"access_token":"at-1","refresh_token":"rt-1","expires_in":3600,"id_token":"\#(id)"}"#) }
+        let endpoint = FakeTokenEndpoint { _ in (200, #"{"access_token":"at-1","refresh_token":"rt-1","expires_in":3600,"scope":"https://www.googleapis.com/auth/gmail.readonly openid https://www.googleapis.com/auth/userinfo.email","id_token":"\#(id)"}"#) }
         let now = Date(timeIntervalSince1970: 1_000_000)
         let client = OAuthClient(config: .google(testAppConfig), http: endpoint, now: { now })
         let pkce = PKCE.generate()
@@ -265,6 +265,29 @@ import Testing
         await #expect(throws: OAuthError.noRefreshToken) {
             _ = try await client.exchange(code: "c", redirectURI: "http://localhost:1/", pkce: .generate())
         }
+    }
+
+    /// Google lets people untick a scope on the consent screen. A grant without
+    /// `gmail.readonly` is refused, so the caller never has tokens to store (D-583).
+    @Test func googleGrantWithoutReadOnlyIsRefused() async throws {
+        for scope in [nil, "openid https://www.googleapis.com/auth/userinfo.email", "https://mail.google.com/ openid",
+                      "https://www.googleapis.com/auth/gmail.readonly.extra openid", "HTTPS://WWW.GOOGLEAPIS.COM/AUTH/GMAIL.READONLY"] {
+            let field = scope.map { #","scope":"\#($0)""# } ?? ""
+            let endpoint = FakeTokenEndpoint { _ in (200, #"{"access_token":"at-1","refresh_token":"rt-1","expires_in":3600\#(field)}"#) }
+            let client = OAuthClient(config: .google(testAppConfig), http: endpoint)
+            await #expect(throws: OAuthError.scopeNotGranted, "\(scope ?? "no scope")") {
+                _ = try await client.exchange(code: "c", redirectURI: "http://127.0.0.1:1/", pkce: .generate())
+            }
+        }
+        #expect(OAuthError.scopeNotGranted.description.contains("Nothing was saved"))
+        // Microsoft is unchanged: it never had a required scope.
+        #expect(OAuthProviderConfig.microsoft(testAppConfig).grants(nil))
+    }
+
+    @Test func googleGrantWithReadOnlyAmongOthersIsAccepted() {
+        let config = OAuthProviderConfig.google(testAppConfig)
+        #expect(config.grants("https://www.googleapis.com/auth/gmail.readonly openid https://www.googleapis.com/auth/userinfo.email"))
+        #expect(config.grants("openid https://www.googleapis.com/auth/gmail.readonly"))
     }
 
     @Test func refreshKeepsTheOldRefreshTokenAndSendsScopeForMicrosoft() async throws {
@@ -318,7 +341,7 @@ import Testing
     @Test func endToEndWithAFakeBrowser() async throws {
         let id = fakeIDToken(["email": "sam@example.com"])
         let endpoint = FakeTokenEndpoint { fields in
-            fields["code"] == "browser-code" ? (200, #"{"access_token":"at","refresh_token":"rt","expires_in":3600,"id_token":"\#(id)"}"#) : (400, #"{"error":"invalid_request"}"#)
+            fields["code"] == "browser-code" ? (200, #"{"access_token":"at","refresh_token":"rt","expires_in":3600,"scope":"https://www.googleapis.com/auth/gmail.readonly openid https://www.googleapis.com/auth/userinfo.email","id_token":"\#(id)"}"#) : (400, #"{"error":"invalid_request"}"#)
         }
         let flow = SignInFlow(client: OAuthClient(config: .google(testAppConfig), http: endpoint), timeout: 30)
         let grant = try await flow.run { url in
@@ -365,7 +388,10 @@ import Testing
         #expect(notice.contains("client_id=test-client.apps.googleusercontent.com"))
         #expect(notice.contains("scope="))
         let items = try #require(URLComponents(string: lines[1])?.queryItems)
-        #expect(items.first { $0.name == "scope" }?.value == "https://mail.google.com/ openid email")
+        // Exactly the three scopes D-583 allows, nothing wider.
+        let scope = try #require(items.first { $0.name == "scope" }?.value)
+        #expect(scope.split(separator: " ").map(String.init) == ["https://www.googleapis.com/auth/gmail.readonly", "openid", "email"])
+        #expect(!notice.contains("mail.google.com"))
         #expect(Array(items.prefix(4).map(\.name)) == ["client_id", "response_type", "redirect_uri", "scope"])
         for secret in ["code_verifier", "client_secret", "test-secret-value", "code=", "token"] {
             #expect(!notice.contains(secret))
@@ -452,6 +478,39 @@ import Testing
         await #expect(throws: SyncError.needsSignIn(account.id)) { _ = try await provider.accessToken(for: account.id, forceRefresh: true) }
         #expect(await endpoint.requests.count == 1)
         #expect(SyncError.needsSignIn(account.id).description.contains("stowmail account signin"))
+    }
+
+    /// A Gmail token from before D-583 (`https://mail.google.com/`) is refused with
+    /// its own message, marks the account once and never reaches the network.
+    @Test func oldGmailPermissionNeedsOneSignIn() async throws {
+        defer { try? keychain.deleteAll() }
+        let (registry, tokens, account) = try setUp(expiresIn: -10)
+        try tokens.save(OAuthTokens(accessToken: "old-access", refreshToken: "refresh", expiresAt: Date(), scope: "https://mail.google.com/"), for: account.id)
+        let endpoint = FakeTokenEndpoint { _ in (200, #"{"access_token":"new","expires_in":3600}"#) }
+        let provider = TokenProvider(tokenStore: tokens, registry: registry) { _ in OAuthClient(config: .google(testAppConfig), http: endpoint) }
+        for force in [false, true, false] {
+            await #expect(throws: SyncError.oldPermission(account.id)) { _ = try await provider.accessToken(for: account.id, forceRefresh: force) }
+        }
+        #expect(try registry.record(account.id)?.needsSignIn == true)
+        #expect(await endpoint.requests.isEmpty)
+        #expect(try tokens.tokens(for: account.id)?.accessToken == "old-access")
+        let message = SyncError.oldPermission(account.id).description
+        #expect(message.contains("stowmail account signin") && message.contains("Nothing archived is lost"))
+        #expect(!message.contains("old-access"))
+
+        // Signing in again under the new scope clears it.
+        try tokens.save(OAuthTokens(accessToken: "fresh", refreshToken: "refresh", expiresAt: Date().addingTimeInterval(3600), scope: "https://www.googleapis.com/auth/gmail.readonly openid https://www.googleapis.com/auth/userinfo.email"), for: account.id)
+        try registry.setNeedsSignIn(account.id, false)
+        #expect(try await provider.accessToken(for: account.id) == "fresh")
+    }
+
+    /// Microsoft tokens are judged by nothing new.
+    @Test func microsoftTokensAreNotCheckedForTheGmailScope() async throws {
+        defer { try? keychain.deleteAll() }
+        let (registry, tokens, account) = try setUp(provider: .microsoft, expiresIn: 3600)
+        try tokens.save(OAuthTokens(accessToken: "ms", refreshToken: "refresh", expiresAt: Date().addingTimeInterval(3600), scope: "https://outlook.office.com/IMAP.AccessAsUser.All"), for: account.id)
+        let provider = TokenProvider(tokenStore: tokens, registry: registry) { _ in OAuthClient(config: .microsoft(testAppConfig)) }
+        #expect(try await provider.accessToken(for: account.id) == "ms")
     }
 }
 

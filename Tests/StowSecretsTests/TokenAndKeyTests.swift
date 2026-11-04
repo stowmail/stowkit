@@ -13,7 +13,7 @@ import Testing
         let bob = AccountID.generate()
 
         let tokens = OAuthTokens(accessToken: "fake-access", refreshToken: "fake-refresh",
-                                 expiresAt: Date(timeIntervalSince1970: 2_000_000_000), scope: "https://mail.google.com/")
+                                 expiresAt: Date(timeIntervalSince1970: 2_000_000_000), scope: "https://www.googleapis.com/auth/gmail.readonly")
         try store.save(tokens, for: alice)
         #expect(try store.tokens(for: alice) == tokens)
         #expect(try store.tokens(for: bob) == nil)
