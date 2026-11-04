@@ -6,49 +6,6 @@ import StowSearch
 import StowSecrets
 import StowStore
 
-/// `stowmail import <dir>`: from a Phase 1 file store (D-015), or a folder of .eml files with `--eml`.
-struct Import: AsyncParsableCommand {
-    static let configuration = CommandConfiguration(
-        abstract: "Import raw messages into the encrypted archive.",
-        discussion: """
-            <dir> is a development store written by Phase 1's `stowmail sync`; its accounts must be in the archive \
-            (`stowmail init` moves them in). Sync can then carry on from it without downloading those messages again. \
-            With --eml, <dir> is a folder of .eml files imported into one placeholder account, for development and benchmarks.
-            """
-    )
-
-    @Argument(help: "Folder to import from.") var directory: String
-    @Flag(help: "Treat <dir> as a plain folder of .eml files.") var eml = false
-    @Flag(help: "Skip attachment text extraction (for measuring import speed only).") var noExtraction = false
-
-    func run() async throws {
-        CLI.bootstrapLogging()
-        let (archive, lock) = try CLIArchive.openForWriting()
-        defer { lock.release() }
-        let url = URL(fileURLWithPath: (directory as NSString).expandingTildeInPath, isDirectory: true)
-        let rules = try EngineRules.ruleSet(archive: archive, account: nil)
-        let importer = Importer(archive: archive, extractText: !noExtraction, classifier: EngineRules.classifier(rules))
-        let progress: @Sendable (ImportSummary) -> Void = { summary in print("  \(summary)") }
-
-        let summary: ImportSummary
-        if eml {
-            let account = AccountID(rawValue: "eml-import")
-            try archive.register(PlaceholderAccount.make(account, provider: .microsoft))
-            summary = try await importer.importAll(from: try EMLDirectorySource(directory: url, accountID: account), progress: progress)
-        } else {
-            let store = try FileRawMessageStore(root: url)
-            let accounts = CLIArchive.accounts(archive)
-            for id in Set(try await store.listKeys().map(\.accountID)) where try accounts.record(id) == nil {
-                throw ValidationError("Account \(id) is not in the archive. Run `stowmail init` to move Phase 1 accounts in, or add it with `stowmail account add`.")
-            }
-            summary = try await importer.importAll(from: store, progress: progress)
-        }
-        print(summary)
-        let queue = try OCRQueue(archive: archive).status()
-        if queue.pending > 0 { print("\(queue.pending) attachments queued for OCR; run `stowmail ocr run`.") }
-    }
-}
-
 /// Imports from a plain folder of .eml files go to one clearly fake account,
 /// in the reserved `.invalid` domain (D-208).
 enum PlaceholderAccount {
@@ -135,7 +92,8 @@ struct Search: AsyncParsableCommand {
         formatter.formatOptions = [.withFullDate]
         for hit in hits {
             let from = hit.from.map { $0.name ?? $0.address } ?? "(no sender)"
-            let flags = [hit.hasAttachments ? "attachments" : nil, hit.ocrPending ? "OCR pending" : nil].compactMap { $0 }
+            let flags = [hit.hasAttachments ? "attachments" : nil, hit.ocrPending ? "OCR pending" : nil,
+                         hit.isImported ? "imported" : nil].compactMap { $0 }
             print("\(hit.messageID)  \(formatter.string(from: hit.date))  \(from)  \(hit.subject ?? "(no subject)")\(flags.isEmpty ? "" : "  [\(flags.joined(separator: ", "))]")")
             // With no text the snippet is just the subject again.
             if hit.snippet != (hit.subject ?? "") { print("    \(hit.snippet)") }

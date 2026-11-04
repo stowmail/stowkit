@@ -78,8 +78,8 @@ extension AccountDirectory {
         }
     }
 
-    /// Accounts that sync: connected ones.
+    /// Accounts that sync: connected ones, leaving out import-only accounts (D-568).
     public func connected() throws -> [AccountRecord] {
-        try all().filter(\.isConnected)
+        try all().filter { $0.isConnected && $0.account.provider.syncs }
     }
 }

@@ -35,7 +35,8 @@ public enum ProviderAuthentication {
             guard isAuthservID(first, "mx.google.com") else { return .none }
         case .microsoft:
             guard isAuthservID(first, "mx.microsoft.com") else { return .none }
-        case .icloud:
+        case .icloud, .imported:
+            // An import-only account has no provider to trust (D-568).
             return .none
         }
         let results = parts.dropFirst()

@@ -56,7 +56,7 @@ jobs:
 
       - name: Fuzz each target for three minutes
         run: |
-          for target in mime html words query zip imap; do
+          for target in mime html words query zip imap mbox; do
             scripts/fuzz.sh "$target" 180
           done
 

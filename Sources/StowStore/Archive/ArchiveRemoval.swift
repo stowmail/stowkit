@@ -132,10 +132,11 @@ public struct ArchiveRemoval: Sendable {
                     arguments += [domain, "%.\(Self.likeLiteral(domain))"]
                 }
             case .sourceState(let state):
-                conditions.append("m.source_state = ?")
+                // A change in the mailbox: imported mail's state came from its file (D-567), as TidySummary counts it.
+                conditions.append("m.source_state = ? AND m.origin = 'synced'")
                 arguments.append(state.rawValue)
             case .recentSourceState(let state):
-                conditions.append("m.source_state = ?")
+                conditions.append("m.source_state = ? AND m.origin = 'synced'")
                 arguments.append(state.rawValue)
                 if state != .spam {
                     // Leave out what each account's retention explains (D-022, D-039), as TidySummary counts it.

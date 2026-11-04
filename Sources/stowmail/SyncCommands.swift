@@ -18,7 +18,7 @@ struct Folders: AsyncParsableCommand {
         CLI.bootstrapLogging()
         let accounts = CLIArchive.accounts(try CLIArchive.open())
         let record = try accounts.find(account)
-        let profile = ProviderProfile.forProvider(record.account.provider)
+        let profile = try ProviderProfile.forProvider(record.account.provider)
         let session = try await SessionFactory(account: record.account, endpoint: profile.endpoint,
                                                tokens: try CLI.tokenProvider(accounts: accounts)).open()
         do {
@@ -247,7 +247,7 @@ struct Verify: AsyncParsableCommand {
         let accounts = CLIArchive.accounts(archive)
         let record = try accounts.find(query)
         if record.needsSignIn { throw SyncError.needsSignIn(record.account.id) }
-        let profile = ProviderProfile.forProvider(record.account.provider)
+        let profile = try ProviderProfile.forProvider(record.account.provider)
         let factory = SessionFactory(account: record.account, endpoint: profile.endpoint, tokens: try CLI.tokenProvider(accounts: accounts))
         let source: RawMessageSource
         if let out {
@@ -263,6 +263,12 @@ struct Verify: AsyncParsableCommand {
         )
         let report = try await verifier.run(sample: all ? nil : sample)
         print("Archived messages for this account: \(report.storedMessages). Checked: \(report.sampled).")
+        // D-567: imported mail has no copy on the server to compare with; `stowmail verify` checks it like the rest.
+        let imported = try await archive.database.read { db in
+            try Int.fetchOne(db, sql: "SELECT count(*) FROM messages WHERE account_id = ? AND origin = 'imported'",
+                             arguments: [record.account.id.rawValue]) ?? 0
+        }
+        if imported > 0 { print("Imported from files, not compared (no server copy): \(imported). `stowmail verify` checks them in the archive.") }
         print("Compared with the server: \(report.compared). Identical: \(report.identical).")
         for item in report.mismatched { print("  MISMATCH: \(item)") }
         if !report.goneFromServer.isEmpty { print("Deleted on the server since sync (not compared): \(report.goneFromServer.count)") }

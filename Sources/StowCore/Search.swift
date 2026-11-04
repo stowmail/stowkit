@@ -114,6 +114,8 @@ public struct SearchHit: Hashable, Sendable, Codable, Identifiable {
     public var ocrPending: Bool
     /// Where the message stands at the provider, so a list can mark spam when it is shown (D-039, D-418).
     public var sourceState: SourceState
+    /// Stored from an imported file, with no server copy Stow has seen (D-562, D-567).
+    public var isImported: Bool
 
     public init(
         messageID: StoredMessageID,
@@ -127,7 +129,8 @@ public struct SearchHit: Hashable, Sendable, Codable, Identifiable {
         matchedFields: Set<SearchField> = [],
         hasAttachments: Bool = false,
         ocrPending: Bool = false,
-        sourceState: SourceState = .present
+        sourceState: SourceState = .present,
+        isImported: Bool = false
     ) {
         self.messageID = messageID
         self.accountID = accountID
@@ -141,11 +144,13 @@ public struct SearchHit: Hashable, Sendable, Codable, Identifiable {
         self.hasAttachments = hasAttachments
         self.ocrPending = ocrPending
         self.sourceState = sourceState
+        self.isImported = isImported
     }
 
-    // Decoded by hand so a hit encoded before `sourceState` existed still reads (as present).
+    // Decoded by hand so a hit encoded before `sourceState` or `isImported` existed still reads (as present, not imported).
     private enum CodingKeys: String, CodingKey {
-        case messageID, accountID, threadKey, date, from, subject, snippet, rank, matchedFields, hasAttachments, ocrPending, sourceState
+        case messageID, accountID, threadKey, date, from, subject, snippet, rank, matchedFields, hasAttachments, ocrPending, sourceState,
+             isImported
     }
 
     public init(from decoder: Decoder) throws {
@@ -161,7 +166,8 @@ public struct SearchHit: Hashable, Sendable, Codable, Identifiable {
                   matchedFields: try c.decode(Set<SearchField>.self, forKey: .matchedFields),
                   hasAttachments: try c.decode(Bool.self, forKey: .hasAttachments),
                   ocrPending: try c.decode(Bool.self, forKey: .ocrPending),
-                  sourceState: try c.decodeIfPresent(SourceState.self, forKey: .sourceState) ?? .present)
+                  sourceState: try c.decodeIfPresent(SourceState.self, forKey: .sourceState) ?? .present,
+                  isImported: try c.decodeIfPresent(Bool.self, forKey: .isImported) ?? false)
     }
 }
 

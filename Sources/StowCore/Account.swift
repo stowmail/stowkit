@@ -38,6 +38,7 @@ public struct AccountID: Hashable, Sendable, Codable, CustomStringConvertible, C
 
 /// Which mail provider an account belongs to. All are reached over IMAP:
 /// Google and Microsoft with OAuth (D-004), iCloud with an app-specific password (D-467).
+/// An import-only account is reached by nothing: its mail came from files (D-568).
 public enum Provider: String, Sendable, Codable, CaseIterable {
     /// Gmail and Google Workspace.
     case gmail
@@ -45,22 +46,33 @@ public enum Provider: String, Sendable, Codable, CaseIterable {
     case microsoft
     /// iCloud Mail: @icloud.com, @me.com and @mac.com, and custom domains on iCloud+ (D-466).
     case icloud
+    /// An import-only account (D-556, D-568): mail from mbox files, no
+    /// credential, never synced. Stored as `import`; an older build does not
+    /// know it and leaves the account out (D-025).
+    case imported = "import"
 
     /// The OAuth provider behind this one, or nil for iCloud, which signs in
-    /// with an app-specific password. Code that needs OAuth takes an
-    /// `OAuthProvider`, so it cannot be called for iCloud at all.
+    /// with an app-specific password, and for an import-only account. Code that
+    /// needs OAuth takes an `OAuthProvider`, so it cannot be called for either.
     public var oauth: OAuthProvider? {
         switch self {
         case .gmail: .gmail
         case .microsoft: .microsoft
-        case .icloud: nil
+        case .icloud, .imported: nil
         }
     }
 
     /// How the account signs in.
     public var credentialKind: CredentialKind {
-        oauth == nil ? .appSpecificPassword : .oauthTokens
+        switch self {
+        case .gmail, .microsoft: .oauthTokens
+        case .icloud: .appSpecificPassword
+        case .imported: .none
+        }
     }
+
+    /// False for an import-only account: nothing ever connects to a server for it.
+    public var syncs: Bool { self != .imported }
 }
 
 /// The providers that sign in with OAuth in the browser.
@@ -81,12 +93,15 @@ public enum OAuthProvider: String, Sendable, Codable, CaseIterable {
 public enum CredentialKind: String, Sendable, Codable {
     case oauthTokens
     case appSpecificPassword
+    /// An import-only account keeps nothing in the Keychain (D-568).
+    case none
 
-    /// For output: "sign-in tokens" or "app-specific password".
+    /// For output: "sign-in tokens", "app-specific password" or "no sign-in".
     public var label: String {
         switch self {
         case .oauthTokens: "sign-in tokens"
         case .appSpecificPassword: "app-specific password"
+        case .none: "no sign-in"
         }
     }
 }

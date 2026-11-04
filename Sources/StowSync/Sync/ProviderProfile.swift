@@ -31,11 +31,13 @@ public struct ProviderProfile: Sendable, Equatable {
     /// Stow keeps to two, as for Microsoft, and sets no daily cap (D-475).
     public static let icloud = ProviderProfile(provider: .icloud, endpoint: .icloud, maxConnections: 2, dailyByteLimit: nil)
 
-    public static func forProvider(_ provider: Provider) -> ProviderProfile {
+    /// Throws `SyncError.importOnly` for an import-only account, which has no server (D-568).
+    public static func forProvider(_ provider: Provider) throws -> ProviderProfile {
         switch provider {
         case .gmail: gmail
         case .microsoft: microsoft
         case .icloud: icloud
+        case .imported: throw SyncError.importOnly
         }
     }
 }

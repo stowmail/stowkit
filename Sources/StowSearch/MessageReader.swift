@@ -41,7 +41,7 @@ public final class MessageReader: MessageReading, InlinePartReading, MessageBody
         // An archive not yet upgraded to v2 (opened read-only) has no marks.
         let marks = try UnreadText.hasMarks(db)
         guard let row = try Row.fetchOne(db, sql: """
-            SELECT m.account_id, m.thread_key, m.internal_date, m.sent_date, m.subject, m.source_state, m.imported_at, m.source_state_at,
+            SELECT m.account_id, m.thread_key, m.internal_date, m.sent_date, m.subject, m.source_state, m.imported_at, m.source_state_at, m.origin,
                    \(marks ? "m.text_state = 'incomplete'" : "0") AS text_incomplete,
                    b.text_plain IS NULL AND b.text_from_html IS NOT NULL AS from_html,
                    substr(coalesce(b.text_plain, b.text_from_html), 1, ?) AS body,
@@ -83,7 +83,8 @@ public final class MessageReader: MessageReading, InlinePartReading, MessageBody
             importedAt: Date(timeIntervalSince1970: TimeInterval(row["imported_at"] as Int64)),
             sourceStateAt: (row["source_state_at"] as Int64?).map { Date(timeIntervalSince1970: TimeInterval($0)) },
             textIncomplete: row["text_incomplete"] || attachments.contains(where: \.textUnreadable),
-            senderDomainNewToThread: newSender)
+            senderDomainNewToThread: newSender,
+            isImported: (row["origin"] as String) == "imported")
     }
 
     /// Whether the From address's domain (as stored: lowercased, exact, no registrable-domain

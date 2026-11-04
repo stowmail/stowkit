@@ -9,7 +9,7 @@
 # Package.swift, so it never reaches a release build.
 #
 # Usage: scripts/fuzz.sh <target> [seconds] [libFuzzer flags...]
-#   targets: mime, html, words, query, zip, imap   (default 3600 seconds)
+#   targets: mime, html, words, query, zip, imap, mbox   (default 3600 seconds)
 # Corpus: .build/fuzz/<target>/corpus, seeded from the fixtures and from the
 # large hostile inputs of the A-01 and A-02 timing tests; findings land in
 # .build/fuzz/<target>/artifacts. A unit slower than -timeout is a finding,
@@ -17,7 +17,7 @@
 
 set -euo pipefail
 
-TARGET="${1:?usage: scripts/fuzz.sh <mime|html|words|query|zip|imap> [seconds] [libFuzzer flags...]}"
+TARGET="${1:?usage: scripts/fuzz.sh <mime|html|words|query|zip|imap|mbox> [seconds] [libFuzzer flags...]}"
 SECONDS_TO_RUN="${2:-3600}"
 shift $(( $# < 2 ? $# : 2 ))
 TOOLCHAIN="${STOW_FUZZ_TOOLCHAIN:-$HOME/Library/Developer/Toolchains/swift-6.4.0-RELEASE.xctoolchain}"
@@ -127,6 +127,20 @@ imap)
         Sources/StowSync/IMAP/FetchAssembler.swift Sources/StowSync/IMAP/IMAPTypes.swift Sources/StowSync/SyncError.swift \
         "$SPM"/release/*.o -o "$OUT/fuzz"
     printf '* 1 FETCH (UID 1 RFC822.SIZE 12 FLAGS (\\Seen) BODY[] {12}\r\nSubject: x\r\n)\r\nS1 OK done\r\n' > "$OUT/corpus/seed-fetch"
+    MAX_LEN=1048576
+    ;;
+mbox)
+    echo "==> Building the mbox target"
+    swiftc "${SANITIZE[@]}" -module-name MboxFuzz Fuzz/MboxFuzz.swift Sources/StowStore/Import/MboxReader.swift -o "$OUT/fuzz"
+    # The first byte picks the read size and variant; the rest is the file.
+    { printf '\x07'; printf 'From a Thu Oct 23 09:27:00 2026\r\nSubject: x\r\n\r\n>From y\r\n>>From z\r\n\r\n'
+      printf 'From b Mon Sep 18 10:12:13 +0000 2023\nFrom c\n\nFrom the desk\n\nFrom d Thu Oct 23 09:28 2026\nend'; } \
+        > "$OUT/corpus/seed-mbox"
+    if [ -d Tests/Fixtures/eml ]; then
+        for eml in Tests/Fixtures/eml/0*.eml; do
+            { printf '\x41From MAILER-DAEMON Thu Oct 23 09:27:00 2026\n'; cat "$eml"; printf '\n'; } > "$OUT/corpus/seed-$(basename "$eml" .eml)"
+        done
+    fi
     MAX_LEN=1048576
     ;;
 *)

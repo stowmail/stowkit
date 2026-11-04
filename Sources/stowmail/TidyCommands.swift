@@ -210,7 +210,7 @@ struct Coverage: AsyncParsableCommand {
         }
         print("Safe to delete from the mailbox: \(report.safeToDelete) message(s), \(CLI.megabytes(report.safeToDeleteBytes)).")
         print(RetentionGuide.warning(count: report.safeToDelete, bytes: report.safeToDeleteBytes, lastBackup: TimeMachineStatus.latestBackup()))
-        let kind = RetentionGuide.kind(provider: record.account.provider, email: record.account.email)
+        guard let kind = RetentionGuide.kind(provider: record.account.provider, email: record.account.email) else { return }
         for (index, step) in RetentionGuide.steps(kind, before: before).enumerated() {
             print("  \(index + 1). \(step)")
         }

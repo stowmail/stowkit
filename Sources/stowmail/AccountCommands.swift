@@ -91,6 +91,7 @@ struct AccountCommand: AsyncParsableCommand {
             CLI.bootstrapLogging()
             let accounts = CLIArchive.accounts(try CLIArchive.open())
             let record = try accounts.find(account)
+            guard record.account.provider.syncs else { throw SyncError.importOnly }
             guard let oauthProvider = record.account.provider.oauth else {
                 return try await ICloudSignIn.signInAgain(record, accounts: accounts)
             }
@@ -129,6 +130,10 @@ struct AccountCommand: AsyncParsableCommand {
             try CLI.tokenStore().delete(for: record.account.id)
             try CLI.passwordStore().delete(for: record.account.id)
             try accounts.disconnect(record.account.id)
+            guard record.account.provider.syncs else {
+                print("Removed import-only account \(record.account.id) from the list of accounts. Its imported mail is kept and still searchable.")
+                return
+            }
             print("Disconnected account \(record.account.id). It no longer syncs and its \(record.account.provider.credentialKind.label) \(record.account.provider.oauth == nil ? "is" : "are") deleted from this Mac.")
             print("Its archived mail is kept and still searchable. Adding the same address again reconnects it.")
             if record.account.provider.oauth == nil {

@@ -28,7 +28,7 @@ public struct SessionFactory: Sendable {
     /// full address until measured (iCloud brief step 5).
     public static func username(for account: Account) -> String {
         switch account.provider {
-        case .gmail, .microsoft, .icloud: account.email
+        case .gmail, .microsoft, .icloud, .imported: account.email
         }
     }
 

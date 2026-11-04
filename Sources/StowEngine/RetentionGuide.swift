@@ -20,12 +20,14 @@ public enum RetentionGuide {
         "outlook.com", "hotmail.com", "live.com", "msn.com", "outlook.co.uk", "hotmail.co.uk", "live.co.uk",
     ]
 
-    public static func kind(provider: Provider, email: String) -> MailboxKind {
+    /// Nil for an import-only account: there is no mailbox to delete from (D-568).
+    public static func kind(provider: Provider, email: String) -> MailboxKind? {
         let domain = EmailAddress(address: email).domain
         switch provider {
         case .gmail: return consumerGoogle.contains(domain) ? .gmail : .googleWorkspace
         case .microsoft: return consumerMicrosoft.contains(domain) ? .outlookCom : .microsoft365
         case .icloud: return .icloud
+        case .imported: return nil
         }
     }
 

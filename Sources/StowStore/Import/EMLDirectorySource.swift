@@ -2,7 +2,7 @@ import Foundation
 import StowCore
 
 /// A `RawMessageSource` over a plain folder of `.eml` files, for development
-/// and benchmarks (for example `stowmail import --eml engine/Tests/Fixtures/eml`).
+/// and benchmarks (for example `stowmail import dev --eml engine/Tests/Fixtures/eml`).
 ///
 /// Messages are assigned to one account and a folder named "Imported", with
 /// UIDs in file name order. The arrival date is the Date header when it

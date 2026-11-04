@@ -24,8 +24,9 @@ import Testing
             """.utf8)
     }
 
-    @Test func v4IsTheNewest() {
-        #expect(ArchiveSchema.migrationIdentifiers.last == "v4")
+    @Test func v4FollowsV3() {
+        let ids = ArchiveSchema.migrationIdentifiers
+        #expect(ids.firstIndex(of: "v4") == ids.firstIndex(of: "v3").map { $0 + 1 })
     }
 
     @Test func v4ClearsEveryStoredResultAndTheBackfillReadsThemAgain() throws {

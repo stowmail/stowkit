@@ -174,11 +174,12 @@ public enum Coverage {
 
     /// Archived messages from before `date` that the provider still has
     /// (`source_state = 'present'`, D-039): what is safe to delete there, and,
-    /// after the user deleted, what is left (D-408).
+    /// after the user deleted, what is left (D-408). Imported mail is left out:
+    /// Stow vouches only for mail it downloaded itself (D-556, D-567).
     static func presentBefore(_ db: Database, account: AccountID, date: Date) throws -> (count: Int, bytes: Int) {
         let row = try Row.fetchOne(db, sql: """
             SELECT count(*) AS n, coalesce(sum(size), 0) AS bytes FROM messages
-            WHERE account_id = ? AND source_state = 'present' AND internal_date < ?
+            WHERE account_id = ? AND source_state = 'present' AND origin = 'synced' AND internal_date < ?
             """, arguments: [account.rawValue, Int(date.timeIntervalSince1970)])!
         return (row["n"], row["bytes"])
     }

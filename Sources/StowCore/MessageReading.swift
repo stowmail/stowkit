@@ -94,12 +94,14 @@ public struct MessageDetail: Hashable, Sendable, Codable, Identifiable {
     /// conversation (D-486, D-520): someone new joined it. Never set on the first message.
     /// A prompt to look twice, not a verdict.
     public var senderDomainNewToThread: Bool
+    /// Stored from an imported file, with no server copy Stow has seen (D-562, D-567).
+    public var isImported: Bool
 
     public init(messageID: StoredMessageID, accountID: AccountID, threadKey: String?, date: Date, sentDate: Date?,
                 from: EmailAddress?, to: [EmailAddress], cc: [EmailAddress], subject: String?, sourceState: SourceState,
                 body: String?, bodyFromHTML: Bool, bodyLength: Int, bodyTruncated: Bool, attachments: [AttachmentInfo],
                 places: [ArchiveFolder] = [], importedAt: Date? = nil, sourceStateAt: Date? = nil, textIncomplete: Bool = false,
-                senderDomainNewToThread: Bool = false) {
+                senderDomainNewToThread: Bool = false, isImported: Bool = false) {
         self.messageID = messageID
         self.accountID = accountID
         self.threadKey = threadKey
@@ -120,12 +122,13 @@ public struct MessageDetail: Hashable, Sendable, Codable, Identifiable {
         self.sourceStateAt = sourceStateAt
         self.textIncomplete = textIncomplete
         self.senderDomainNewToThread = senderDomainNewToThread
+        self.isImported = isImported
     }
 
     enum CodingKeys: String, CodingKey {
         case messageID, accountID, threadKey, date, sentDate, from, to, cc, subject, sourceState, body, bodyFromHTML,
              bodyLength, bodyTruncated, attachments, places, importedAt, sourceStateAt, textIncomplete,
-             senderDomainNewToThread
+             senderDomainNewToThread, isImported
     }
 
     /// `places`, `importedAt`, `sourceStateAt`, `textIncomplete` and `senderDomainNewToThread` decode with defaults when missing, so a value
@@ -151,7 +154,8 @@ public struct MessageDetail: Hashable, Sendable, Codable, Identifiable {
                   importedAt: try c.decodeIfPresent(Date.self, forKey: .importedAt),
                   sourceStateAt: try c.decodeIfPresent(Date.self, forKey: .sourceStateAt),
                   textIncomplete: try c.decodeIfPresent(Bool.self, forKey: .textIncomplete) ?? false,
-                  senderDomainNewToThread: try c.decodeIfPresent(Bool.self, forKey: .senderDomainNewToThread) ?? false)
+                  senderDomainNewToThread: try c.decodeIfPresent(Bool.self, forKey: .senderDomainNewToThread) ?? false,
+                  isImported: try c.decodeIfPresent(Bool.self, forKey: .isImported) ?? false)
     }
 }
 

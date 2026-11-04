@@ -172,11 +172,14 @@ enum V1Snapshot {
     static let addedInV2: Set<String> = ["text_state", "text_marked_version", "text_attempts", "import_attempts",
                                          "last_import_attempt_at", "text_last_attempt_at", "text_failed_version"]
 
+    /// v5's columns (D-562) have constant defaults; every upgrade test leaves them out.
+    static let addedInV5: Set<String> = ["origin", "import_batch_id"]
+
     /// `excluding` names the columns a later migration added; v3's upgrade test leaves out only its own.
     static func digests(_ db: Database, excluding: Set<String> = addedInV2) throws -> [String: Data] {
         var result: [String: Data] = [:]
         for table in tables {
-            let columns = try db.columns(in: table).map(\.name).filter { !excluding.contains($0) }
+            let columns = try db.columns(in: table).map(\.name).filter { !excluding.contains($0) && !addedInV5.contains($0) }
             var hash = SHA256()
             let cursor = try Row.fetchCursor(db, sql: "SELECT \(columns.joined(separator: ", ")) FROM \(table) ORDER BY rowid")
             while let row = try cursor.next() { hash.update(data: Data(row.description.utf8)) }

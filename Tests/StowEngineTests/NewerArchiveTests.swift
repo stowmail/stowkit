@@ -15,21 +15,21 @@ import Testing
     let keychain = KeychainStore(service: "ee.getstow.stow.tests.\(UUID().uuidString)", backend: .file, fileVaultIsOn: { true })
     var keyManager: KeyManager { KeyManager(keychain: keychain) }
     let gmail = Account(id: .generate(), provider: .gmail, email: "sam@example.com", displayName: "Sam")
-    var refusal: ArchiveError { .newerArchive(needs: 2, knows: ArchiveSchema.readerLevel) }
+    var refusal: ArchiveError { .newerArchive(needs: ArchiveSchema.readerLevel + 1, knows: ArchiveSchema.readerLevel) }
 
     func cleanUp() {
         try? keychain.deleteAll()
         try? FileManager.default.removeItem(at: parent)
     }
 
-    /// A confirmed archive with one account and its sign-in, marked as needing reader level 2.
+    /// A confirmed archive with one account and its sign-in, marked as needing a newer reader than this build.
     func makeNewerArchive() throws {
         let archive = try ArchiveSetup.createArchive(location, keyManager: keyManager)
         try archive.register(gmail)
         try TokenStore(keychain: keychain).save(OAuthTokens(accessToken: "a", refreshToken: "r", expiresAt: nil), for: gmail.id)
         _ = try ArchiveSetup.makeRecoveryKey(archive, keyManager: keyManager)
         try ArchiveSetup.markConfirmed(archive)
-        try archive.setMeta("min_reader_level", "2")
+        try archive.setMeta("min_reader_level", String(ArchiveSchema.readerLevel + 1))
         try archive.database.close()
     }
 

@@ -111,7 +111,8 @@ public struct ArchiveTools: Sendable {
         var lines: [String] = []
         for account in accounts {
             let total = try await archive.count(SearchQuery(text: "", accounts: [account.id]))
-            lines.append("Account \"\(Self.oneLine(account.displayName))\" <\(Self.oneLine(account.email))> (\(account.provider.rawValue), \(Self.emails(total)))")
+            let kind = account.provider.syncs ? account.provider.rawValue : "import only: mail from files, never synced"
+            lines.append("Account \"\(Self.oneLine(account.displayName))\" <\(Self.oneLine(account.email))> (\(kind), \(Self.emails(total)))")
             for folder in folders where folder.accountID == account.id {
                 let use = folder.specialUse.map { " [\(Self.oneLine($0))]" } ?? ""
                 lines.append("  \(folder.kind == .label ? "label" : "folder"): \(Self.oneLine(folder.name))\(use)")
@@ -157,7 +158,7 @@ public struct ArchiveTools: Sendable {
             var marks = [names[hit.accountID].map { "account: \($0)" }]
             if hit.hasAttachments { marks.append("attachments") }
             if hit.ocrPending { marks.append("attachment text pending") }
-            lines.append("[\(hit.messageID)] \(Self.time(hit.date)) | \(Self.address(hit.from)) | \(Self.subject(hit.subject)) | "
+            lines.append("[\(hit.messageID)] \(Self.time(hit.date))\(hit.isImported ? " (imported)" : "") | \(Self.address(hit.from)) | \(Self.subject(hit.subject)) | "
                          + marks.compactMap { $0 }.joined(separator: ", "))
             if !query.text.isEmpty || hit.snippet != (hit.subject ?? "") { lines.append("    \(Self.clip(hit.snippet, 400))") }
         }
@@ -235,9 +236,15 @@ public struct ArchiveTools: Sendable {
         }
         if !detail.to.isEmpty { lines.append("To: \(clip(detail.to.map { address($0) }.joined(separator: ", "), 1_000))") }
         if !detail.cc.isEmpty { lines.append("Cc: \(clip(detail.cc.map { address($0) }.joined(separator: ", "), 1_000))") }
-        lines.append("Date: \(time(detail.date))")
+        lines.append("Date: \(time(detail.date))\(detail.isImported ? " (imported)" : "")")
         lines.append("Subject: \(subject(detail.subject))")
-        if detail.sourceState != .present { lines.append("In the mailbox: \(detail.sourceState.rawValue) (kept in the archive)") }
+        if detail.isImported {
+            // D-567: from a file the user imported, not downloaded from the mailbox.
+            lines.append("Source: imported from a file, not downloaded from the mailbox")
+            if detail.sourceState != .present { lines.append("Marked \(detail.sourceState.rawValue) in the imported file (kept in the archive)") }
+        } else if detail.sourceState != .present {
+            lines.append("In the mailbox: \(detail.sourceState.rawValue) (kept in the archive)")
+        }
         if detail.textIncomplete {
             lines.append("Not read in full: Stow could not read all of this email, so search misses part of it. It is stored whole; Stow tries again after an update.")
         }

@@ -141,13 +141,14 @@ public struct TidySummary: Sendable, Equatable {
             }
 
             // "You changed these in Gmail": by source state, with what retention explains (D-022, D-039).
+            // Imported mail's state came from the file's labels, not from a change in the mailbox (D-567).
             let cutoffs = try ArchiveRemoval.retentionCutoffs(db, now: now)
             var states: [SourceGroup] = []
             for state in [SourceState.spam, .trashed, .gone] {
                 let rows = try Row.fetchAll(db, sql: """
                     SELECT m.account_id, count(*) AS n, sum(m.size) AS bytes, max(m.internal_date) AS newest,
                         sum(\(isProtected)) AS protected
-                    FROM messages m WHERE \(scope) AND m.source_state = ? GROUP BY m.account_id
+                    FROM messages m WHERE \(scope) AND m.source_state = ? AND m.origin = 'synced' GROUP BY m.account_id
                     """, arguments: StatementArguments(scopeArguments + [state.rawValue]))
                 var group = SourceGroup(state: state, messages: 0, bytes: 0, newest: nil, protectedIncluded: 0, olderThanRetention: 0)
                 for row in rows {
@@ -158,7 +159,7 @@ public struct TidySummary: Sendable, Equatable {
                     group.newest = max(group.newest ?? newest, newest)
                     if state != .spam, let cutoff = cutoffs[row["account_id"] as String] {
                         group.olderThanRetention += try Int.fetchOne(db, sql: """
-                            SELECT count(*) FROM messages WHERE account_id = ? AND source_state = ? AND internal_date < ?
+                            SELECT count(*) FROM messages WHERE account_id = ? AND source_state = ? AND origin = 'synced' AND internal_date < ?
                             """, arguments: [row["account_id"] as String, state.rawValue, cutoff]) ?? 0
                     }
                 }

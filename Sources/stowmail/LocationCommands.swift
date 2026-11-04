@@ -127,7 +127,7 @@ struct ArchiveDelete: AsyncParsableCommand {
             return
         }
         let outcome = try ArchiveDeletion.delete(location, keyManager: CLI.keyManager())
-        for account in outcome.removedAccounts {
+        for account in outcome.removedAccounts where account.provider.syncs {
             print("Removed account \(account.id) (\(account.provider.rawValue)); its \(account.provider.credentialKind.label) \(account.provider.oauth == nil ? "is" : "are") deleted from this Mac.")
             if account.provider.oauth == nil { print(ICloudSignIn.revokeSteps) }
         }

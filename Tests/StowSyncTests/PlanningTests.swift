@@ -126,8 +126,9 @@ import Testing
         #expect(ProviderProfile.gmail.endpoint.useTLS && ProviderProfile.microsoft.endpoint.useTLS)
     }
 
-    @Test func icloudKeepsToTwoConnectionsOnImplicitTLS() {
-        #expect(ProviderProfile.forProvider(.icloud) == .icloud)
+    @Test func icloudKeepsToTwoConnectionsOnImplicitTLS() throws {
+        #expect(try ProviderProfile.forProvider(.icloud) == .icloud)
+        #expect(throws: SyncError.importOnly) { try ProviderProfile.forProvider(.imported) }
         #expect(ProviderProfile.icloud.endpoint == IMAPEndpoint(host: "imap.mail.me.com", port: 993))
         #expect(ProviderProfile.icloud.endpoint.useTLS && ProviderProfile.icloud.endpoint.allowsPassword)
         #expect(ProviderProfile.icloud.maxConnections == 2) // D-475

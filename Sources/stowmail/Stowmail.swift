@@ -135,6 +135,10 @@ struct Doctor: AsyncParsableCommand {
             print("Accounts:")
             for record in records where record.isConnected {
                 let id = record.account.id
+                guard record.account.provider.syncs else {
+                    print("  \(id.rawValue.prefix(8)) \(record.account.provider.rawValue): import only, no sign-in")
+                    continue
+                }
                 let present = record.account.provider.oauth == nil
                     ? (try? CLI.passwordStore().hasPassword(for: id)) == true
                     : ((try? CLI.tokenStore().tokens(for: id)) ?? nil) != nil

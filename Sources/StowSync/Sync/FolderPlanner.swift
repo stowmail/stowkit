@@ -30,6 +30,7 @@ public enum FolderPlanner {
         case .gmail: try planGmail(folders: folders, capabilities: capabilities)
         case .microsoft: planMicrosoft(folders: folders)
         case .icloud: planICloud(folders: folders)
+        case .imported: throw SyncError.importOnly
         }
     }
 

@@ -10,6 +10,8 @@ public enum SyncError: Error, Equatable, CustomStringConvertible {
     /// The account was removed (disconnected) from Stow. Nothing is refreshed
     /// or saved for it; adding the address again reconnects it (A-12, D-513).
     case accountRemoved(AccountID)
+    /// An import-only account: its mail came from files and nothing ever connects for it (D-568).
+    case importOnly
     /// The server rejected XOAUTH2 even with a freshly refreshed token.
     case authenticationFailed(String)
     /// Sign-in worked but there is no IMAP mailbox behind the account, for
@@ -55,6 +57,7 @@ public enum SyncError: Error, Equatable, CustomStringConvertible {
         switch self {
         case .needsSignIn(let id):
             "Account \(id) needs to sign in again. Run `stowmail account signin \(id)`."
+        case .importOnly: "This is an import-only account: its mail came from files, and it never syncs."
         case .accountRemoved(let id):
             "Account \(id) was removed from Stow, so it no longer signs in or syncs. Add the address again with `stowmail account add` to reconnect it."
         case .authenticationFailed(let text):

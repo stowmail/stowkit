@@ -53,6 +53,7 @@ public actor TokenProvider {
             throw AccountDirectoryError.notFound(accountID.rawValue)
         }
         guard record.isConnected else { throw SyncError.accountRemoved(accountID) }
+        guard record.account.provider.syncs else { throw SyncError.importOnly }
         guard record.account.provider.oauth == nil else {
             return .accessToken(try await accessToken(for: accountID, forceRefresh: forceRefresh))
         }

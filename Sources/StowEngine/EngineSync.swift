@@ -28,15 +28,17 @@ public struct EngineSync: Sendable {
     /// Sessions signed in with the account's tokens, to the provider's server.
     public init(archive: Archive, tokens: TokenProvider, settingsURL: URL = EngineRules.defaultSettingsURL) {
         self.init(archive: archive, settingsURL: settingsURL) { account in
-            let factory = SessionFactory(account: account, endpoint: ProviderProfile.forProvider(account.provider).endpoint, tokens: tokens)
-            return { try await factory.open() }
+            return {
+                let factory = SessionFactory(account: account, endpoint: try ProviderProfile.forProvider(account.provider).endpoint, tokens: tokens)
+                return try await factory.open()
+            }
         }
     }
 
     public func syncer(for account: Account) throws -> AccountSyncer {
         let rules = try EngineRules.ruleSet(settings: settingsURL, archive: archive, account: account.id)
         let store = ArchiveSyncStore(archive: archive, importer: Importer(archive: archive, classifier: EngineRules.classifier(rules)))
-        let profile = ProviderProfile.forProvider(account.provider)
+        let profile = try ProviderProfile.forProvider(account.provider)
         return AccountSyncer(
             account: account,
             openSession: sessions(account),

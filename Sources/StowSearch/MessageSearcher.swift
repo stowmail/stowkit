@@ -216,7 +216,7 @@ public final class MessageSearcher: MessageSearching, Sendable {
         let ids = ranked.map(\.id)
         let placeholders = Array(repeating: "?", count: ids.count).joined(separator: ",")
         let details = try Row.fetchAll(db, sql: """
-            SELECT m.id, m.account_id, m.thread_key, m.internal_date, m.subject, m.has_attachments, m.source_state,
+            SELECT m.id, m.account_id, m.thread_key, m.internal_date, m.subject, m.has_attachments, m.source_state, m.origin,
                    a.address AS from_address, ma.display_name AS from_name,
                    EXISTS (SELECT 1 FROM message_attachments x JOIN attachments t ON t.id = x.attachment_id
                            WHERE x.message_id = m.id AND t.text_status = 'ocr_pending') AS ocr_pending
@@ -261,7 +261,8 @@ public final class MessageSearcher: MessageSearching, Sendable {
                 matchedFields: fields,
                 hasAttachments: row["has_attachments"],
                 ocrPending: row["ocr_pending"],
-                sourceState: SourceState(rawValue: row["source_state"]) ?? .present
+                sourceState: SourceState(rawValue: row["source_state"]) ?? .present,
+                isImported: (row["origin"] as String) == "imported"
             )
         }
     }

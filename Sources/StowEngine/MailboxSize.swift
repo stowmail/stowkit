@@ -39,6 +39,7 @@ extension EngineSync {
 extension MailboxSize {
     /// What the listing recorded for the account: queued (and unfetchable)
     /// messages, plus archived ones still at the provider, with their sizes.
+    /// Imported mail is left out: Stow does not know the provider has it (D-567).
     public static func totals(_ archive: Archive, account: AccountID) throws -> MailboxSize {
         try archive.database.read { db in
             let queued = try Row.fetchOne(db, sql: """
@@ -46,7 +47,8 @@ extension MailboxSize {
                 FROM download_queue q JOIN folders f ON f.id = q.folder_id WHERE f.account_id = ?
                 """, arguments: [account.rawValue])!
             let archived = try Row.fetchOne(db, sql: """
-                SELECT count(*) AS n, coalesce(sum(size), 0) AS bytes FROM messages WHERE account_id = ? AND source_state = 'present'
+                SELECT count(*) AS n, coalesce(sum(size), 0) AS bytes FROM messages
+                WHERE account_id = ? AND source_state = 'present' AND origin = 'synced'
                 """, arguments: [account.rawValue])!
             let provider = try String.fetchOne(db, sql: "SELECT provider FROM accounts WHERE id = ?", arguments: [account.rawValue])
             return MailboxSize(account: account, messages: (queued["n"] as Int) + (archived["n"] as Int),
@@ -62,7 +64,7 @@ extension MailboxSize {
     static func sizesAreEstimates(_ provider: String?) -> Bool {
         switch provider.flatMap(Provider.init(rawValue:)) {
         case .microsoft?: true
-        case .gmail?, .icloud?, nil: false
+        case .gmail?, .icloud?, .imported?, nil: false
         }
     }
 }

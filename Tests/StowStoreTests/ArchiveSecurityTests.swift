@@ -180,7 +180,7 @@ import Testing
         let sql = try test.archive.database.read { db in
             try String.fetchAll(db, sql: "SELECT sql FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'messages_fts%' AND name NOT LIKE 'grdb_%' AND name NOT LIKE 'sqlite_%'")
         }
-        #expect(sql.count == 18)
+        #expect(sql.count == 20)
         for statement in sql { #expect(statement.hasSuffix("STRICT"), "\(statement.prefix(40))") }
     }
 }
@@ -232,6 +232,23 @@ enum SampleRows {
                         imported_at, sender_dmarc)
                     VALUES (?, randomblob(32), 0, 1, 'full', 1, 'ok', 1, 0, 'pass')
                     """, arguments: [account])
+                try SearchIndexWriter.index(db, messageID: db.lastInsertedRowID)
+            case "v5":
+                let account = UUID().uuidString.lowercased()
+                try db.execute(sql: "INSERT INTO accounts (id, provider, email, display_name, created_at) VALUES (?, 'import', ?, 'T', 0)",
+                               arguments: [account, "\(account)@example.com"])
+                try db.execute(sql: """
+                    INSERT INTO import_batches (account_id, kind, file_path, file_size, file_modified_at, head_sha256, variant,
+                        committed_offset, messages_read, imported, failed, started_at, updated_at)
+                    VALUES (?, 'mbox', '/tmp/sample.mbox', 100, 0, randomblob(32), 'mboxrd', 100, 2, 1, 1, 0, 0)
+                    """, arguments: [account])
+                let batch = db.lastInsertedRowID
+                try db.execute(sql: "INSERT INTO import_failures (batch_id, file_offset, reason) VALUES (?, 50, 'cut_short')", arguments: [batch])
+                try db.execute(sql: """
+                    INSERT INTO messages (account_id, raw_hash, internal_date, size, raw_state, raw_stored_size, parse_status, parser_version,
+                        imported_at, origin, import_batch_id)
+                    VALUES (?, randomblob(32), 0, 1, 'full', 1, 'ok', 1, 0, 'imported', ?)
+                    """, arguments: [account, batch])
                 try SearchIndexWriter.index(db, messageID: db.lastInsertedRowID)
             default:
                 Issue.record("Add sample rows for migration \(version)")

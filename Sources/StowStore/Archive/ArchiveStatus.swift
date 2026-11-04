@@ -20,11 +20,16 @@ public struct AccountStatus: Sendable, Equatable {
     public var folderErrors: [String] = []
     public var bytesLast24Hours: Int64 = 0
     public var coverageDate: Date?
+    /// Synced messages whose state changed at the provider; imported mail's came from its file (D-567).
     public var sourceStates: [SourceState: Int] = [:]
     public var removed = 0
     /// Attachments of this account's mail whose text waits for OCR (D-207, R10).
     /// `ArchiveStats.ocrPending` is the same count for the whole archive.
     public var ocrPending = 0
+    /// Messages stored from an import that no server copy has turned synced (D-562, D-567).
+    public var importedMessages = 0
+    /// Imports that have not reached the end of their file, oldest first (D-564).
+    public var unfinishedImports: [ImportBatch] = []
 
     /// Share of known messages already archived, 0 to 1.
     public var progress: Double {
@@ -123,11 +128,16 @@ public enum ArchiveStatus {
                     SELECT coalesce(sum(bytes), 0) FROM byte_budget WHERE account_id = ? AND at > ?
                     """, arguments: [id, Int(now.timeIntervalSince1970) - 86_400]) ?? 0
                 for row in try Row.fetchAll(db, sql: """
-                    SELECT source_state, count(*) AS n FROM messages WHERE account_id = ? AND source_state != 'present' GROUP BY source_state
+                    SELECT source_state, count(*) AS n FROM messages WHERE account_id = ? AND source_state != 'present' AND origin = 'synced'
+                    GROUP BY source_state
                     """, arguments: [id]) {
                     if let state = SourceState(rawValue: row["source_state"]) { status.sourceStates[state] = row["n"] }
                 }
                 status.removed = try Int.fetchOne(db, sql: "SELECT count(*) FROM tombstones WHERE account_id = ?", arguments: [id]) ?? 0
+                status.importedMessages = try Int.fetchOne(db, sql: """
+                    SELECT count(*) FROM messages WHERE account_id = ? AND origin = 'imported'
+                    """, arguments: [id]) ?? 0
+                status.unfinishedImports = try MboxImporter.unfinished(db, account: record.account.id)
                 status.ocrPending = try Int.fetchOne(db, sql: """
                     SELECT count(DISTINCT t.id) FROM attachments t
                     JOIN message_attachments x ON x.attachment_id = t.id JOIN messages m ON m.id = x.message_id

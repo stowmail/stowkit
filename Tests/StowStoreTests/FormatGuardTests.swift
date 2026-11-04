@@ -75,9 +75,9 @@ import Testing
     func aNewerArchiveIsRefused(readOnly: Bool) throws {
         let test = try TestArchive()
         defer { test.remove() }
-        try Self.setLevel("2", in: test.archive)
+        try Self.setLevel(String(ArchiveSchema.readerLevel + 1), in: test.archive)
         try test.archive.database.close()
-        #expect(throws: ArchiveError.newerArchive(needs: 2, knows: ArchiveSchema.readerLevel)) {
+        #expect(throws: ArchiveError.newerArchive(needs: ArchiveSchema.readerLevel + 1, knows: ArchiveSchema.readerLevel)) {
             _ = try Archive.open(test.location, keys: test.keys, readOnly: readOnly)
         }
     }
@@ -93,13 +93,14 @@ import Testing
         try ArchiveSchema.migrator.migrate(db, upTo: "v3")
         try db.write { db in
             try db.execute(sql: "INSERT INTO grdb_migrations (identifier) VALUES ('v99')")
-            try db.execute(sql: "INSERT INTO archive_meta (key, value) VALUES ('min_reader_level', '2')")
+            try db.execute(sql: "INSERT INTO archive_meta (key, value) VALUES ('min_reader_level', ?)",
+                           arguments: [String(ArchiveSchema.readerLevel + 1)])
         }
         try db.close()
         try FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: location.databaseURL.path)
         let before = try Data(contentsOf: location.databaseURL)
 
-        #expect(throws: ArchiveError.newerArchive(needs: 2, knows: ArchiveSchema.readerLevel)) {
+        #expect(throws: ArchiveError.newerArchive(needs: ArchiveSchema.readerLevel + 1, knows: ArchiveSchema.readerLevel)) {
             _ = try Archive.open(location, keys: keys)
         }
 

@@ -16,7 +16,7 @@ import GRDB
 /// defaults that older code can leave alone.
 public enum ArchiveSchema {
     /// Every migration identifier, oldest first. Tests use this to step through versions.
-    public static let migrationIdentifiers = ["v1", "v2", "v3", "v4"]
+    public static let migrationIdentifiers = ["v1", "v2", "v3", "v4", "v5"]
 
     public static var migrator: DatabaseMigrator {
         var migrator = DatabaseMigrator()
@@ -24,6 +24,7 @@ public enum ArchiveSchema {
         migrator.registerMigration("v2", migrate: v2)
         migrator.registerMigration("v3", migrate: v3)
         migrator.registerMigration("v4", migrate: v4)
+        migrator.registerMigration("v5", migrate: v5)
         return migrator
     }
 
@@ -33,7 +34,11 @@ public enum ArchiveSchema {
     /// build would misread (a new file flag, a column that must not be ignored)
     /// raises it with `requireReaderLevel`, before anything in the new form is
     /// written, and this constant goes up in the same build.
-    public static let readerLevel = 1
+    public static let readerLevel = 2
+    /// The level an archive holding imported mail needs (D-563): an older build
+    /// does not know `messages.origin` and would count imported mail as being
+    /// on the server. Raised by the first import, not by `v5`.
+    public static let importedMailReaderLevel = 2
     static let readerLevelKey = "min_reader_level"
 
     /// Refuses an archive that needs a newer reader than this build. Reads only,
@@ -418,6 +423,60 @@ public enum ArchiveSchema {
     /// build skips it and keeps reading the column.
     static func v4(_ db: Database) throws {
         try db.execute(sql: "UPDATE messages SET sender_dmarc = NULL")
+    }
+
+    // MARK: - v5
+
+    /// Where each message came from, and the import batches (D-561, D-562).
+    ///
+    /// Columns with constant defaults and new tables only, so no table is rebuilt
+    /// and every existing message reads `synced` (D-501). The reader level is not
+    /// raised here: the first import raises it (D-563), so an archive with no
+    /// imported mail still opens in an older build.
+    static func v5(_ db: Database) throws {
+        try db.execute(sql: """
+            CREATE TABLE import_batches (
+                id INTEGER PRIMARY KEY,
+                account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+                kind TEXT NOT NULL CHECK (kind IN ('mbox')),
+                -- As given, standardised. Never logged above debug (D-040).
+                file_path TEXT NOT NULL,
+                file_size INTEGER NOT NULL,
+                file_modified_at INTEGER NOT NULL,
+                -- SHA-256 of the first 1 MiB (or the whole file if smaller).
+                head_sha256 BLOB NOT NULL,
+                variant TEXT NOT NULL CHECK (variant IN ('mboxrd', 'mboxo')),
+                -- End offset of the last message whose outcome is committed; resume starts here.
+                committed_offset INTEGER NOT NULL DEFAULT 0,
+                messages_read INTEGER NOT NULL DEFAULT 0,
+                imported INTEGER NOT NULL DEFAULT 0,
+                duplicates INTEGER NOT NULL DEFAULT 0,
+                failed INTEGER NOT NULL DEFAULT 0,
+                bytes_read INTEGER NOT NULL DEFAULT 0,
+                started_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL,
+                -- NULL while unfinished.
+                finished_at INTEGER
+            ) STRICT;
+            CREATE UNIQUE INDEX import_batches_unfinished ON import_batches(account_id, head_sha256, file_size)
+                WHERE finished_at IS NULL;
+
+            -- Offsets and reasons only, never content.
+            CREATE TABLE import_failures (
+                batch_id INTEGER NOT NULL REFERENCES import_batches(id) ON DELETE CASCADE,
+                file_offset INTEGER NOT NULL,
+                reason TEXT NOT NULL CHECK (reason IN ('cut_short', 'too_large', 'empty', 'not_stored')),
+                PRIMARY KEY (batch_id, file_offset)
+            ) STRICT;
+
+            -- `imported` for a message first stored from an import; sync's first server copy makes it `synced` (D-562).
+            ALTER TABLE messages ADD COLUMN origin TEXT NOT NULL DEFAULT 'synced'
+                CHECK (origin IN ('synced', 'imported'));
+            -- The batch that stored it: set exactly when it is imported.
+            ALTER TABLE messages ADD COLUMN import_batch_id INTEGER REFERENCES import_batches(id)
+                CHECK ((import_batch_id IS NULL) = (origin = 'synced'));
+            CREATE INDEX messages_imported ON messages(account_id, import_batch_id) WHERE origin = 'imported';
+            """)
     }
 
     /// "Name address", or just the address when there is no display name.

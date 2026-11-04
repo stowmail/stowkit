@@ -68,7 +68,8 @@ enum CLI {
     }
 
     static func describe(_ record: AccountRecord) -> String {
-        let flag = !record.isConnected ? "  DISCONNECTED (mail kept)" : record.needsSignIn ? "  NEEDS SIGN-IN" : ""
+        let flag = !record.isConnected ? "  DISCONNECTED (mail kept)" : !record.account.provider.syncs ? "  IMPORT ONLY"
+            : record.needsSignIn ? "  NEEDS SIGN-IN" : ""
         return "\(record.account.id)  \(record.account.provider.rawValue)  \(record.account.email)  \"\(record.account.displayName)\"\(flag)"
     }
 

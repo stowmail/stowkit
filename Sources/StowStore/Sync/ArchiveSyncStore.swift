@@ -439,9 +439,10 @@ public final class ArchiveSyncStore: RawMessageSink, SyncStateStore, Sendable {
     public func unclassifiedVanished(_ account: AccountID) async throws -> [VanishedMessage] {
         try await database.read { db in
             // Still `present`, yet no copy on the server outside a Trash folder or inside one.
+            // Imported mail never had a server copy, so it is not looked for (D-567).
             try Row.fetchAll(db, sql: """
                 SELECT m.id, m.gmail_msgid, m.rfc822_message_id FROM messages m
-                WHERE m.account_id = ? AND m.source_state = 'present' AND NOT EXISTS (
+                WHERE m.account_id = ? AND m.source_state = 'present' AND m.origin = 'synced' AND NOT EXISTS (
                     SELECT 1 FROM message_folders mf JOIN folders f ON f.id = mf.folder_id
                     WHERE mf.message_id = m.id AND f.kind = 'folder' AND mf.removed_from_server_at IS NULL)
                 ORDER BY m.id

@@ -353,8 +353,9 @@ public final class Importer: Sendable {
         var senderDMARC: SenderDMARC
     }
 
-    private func prepareMessage(_ raw: RawMessage, hash: Data, ownAddress: String, provider: Provider?) throws -> Prepared {
-        let parsed = parse(raw.bytes)
+    func prepareMessage(_ raw: RawMessage, hash: Data, ownAddress: String, provider: Provider?,
+                        parsed alreadyParsed: ParsedMessage? = nil) throws -> Prepared {
+        let parsed = alreadyParsed ?? parse(raw.bytes)
         let attachments = try parsed.attachments.map(prepare)
         let skeleton = RawCompaction.skeleton(raw.bytes, parsed: parsed, hashOf: archive.attachmentFiles.hash(of:))
         let stored = try storeRawFile(raw, hash: hash, skeleton: skeleton?.skeleton,
@@ -392,7 +393,7 @@ public final class Importer: Sendable {
         provider.map { ProviderAuthentication.dmarc(headers, provider: $0) } ?? .none
     }
 
-    private func existingMessage(account: AccountID, rawHash: Data) throws -> StoredMessageID? {
+    func existingMessage(account: AccountID, rawHash: Data) throws -> StoredMessageID? {
         try archive.database.writeWithoutTransaction { db in try Self.messageID(db, account: account, rawHash: rawHash) }
     }
 
@@ -418,7 +419,7 @@ public final class Importer: Sendable {
     /// damaged it is replaced (A-05) in the form those rows record: whole when
     /// they say `full`, which these bytes always allow; a skeleton only when
     /// this import made one too, else the damage is reported, not papered over.
-    private func storeRawFile(_ raw: RawMessage, hash: Data, skeleton: Data?, keptInline: Int) throws -> StoredRaw {
+    func storeRawFile(_ raw: RawMessage, hash: Data, skeleton: Data?, keptInline: Int) throws -> StoredRaw {
         let recorded = try archive.database.writeWithoutTransaction { db in
             try String.fetchOne(db, sql: "SELECT raw_state FROM messages WHERE raw_hash = ? LIMIT 1", arguments: [hash])
         }
@@ -440,7 +441,7 @@ public final class Importer: Sendable {
 
     // MARK: - Tombstones (D-033)
 
-    private func tombstoneID(account: AccountID, rawHash: Data) throws -> Int64? {
+    func tombstoneID(account: AccountID, rawHash: Data) throws -> Int64? {
         try archive.database.writeWithoutTransaction { db in
             try Int64.fetchOne(db, sql: "SELECT id FROM tombstones WHERE account_id = ? AND raw_hash = ?",
                                arguments: [account.rawValue, rawHash])
@@ -514,7 +515,10 @@ public final class Importer: Sendable {
 
     // MARK: - Rows
 
-    private func insertMessage(_ db: Database, raw: RawMessage, rawHash: Data, prepared: Prepared) throws -> StoredMessageID {
+    /// `imported` names the batch for a message from a file (D-562), stored with
+    /// the source state its Takeout labels give (D-566); nil for a server copy.
+    func insertMessage(_ db: Database, raw: RawMessage, rawHash: Data, prepared: Prepared,
+                       imported: (batch: Int64, state: SourceState)? = nil) throws -> StoredMessageID {
         let (parsed, stored, rules) = (prepared.parsed, prepared.stored, prepared.rules)
         let hasAttachments = prepared.attachments.contains { $0.parsed.disposition == .attachment }
         let headers = parsed.headers
@@ -527,8 +531,9 @@ public final class Importer: Sendable {
                 account_id, raw_hash, rfc822_message_id, gmail_msgid, gmail_thrid, thread_key,
                 internal_date, sent_date, date_raw, subject, from_address_id, size, has_attachments,
                 raw_state, raw_stored_size, raw_inline_attachments, parse_status, parse_warnings, parser_version,
-                rule_suggestion, rule_score, rule_signals, sender_dmarc, imported_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                rule_suggestion, rule_score, rule_signals, sender_dmarc, imported_at,
+                origin, import_batch_id, source_state, source_state_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, arguments: [
                 raw.key.accountID.rawValue, rawHash, headers.messageID,
                 raw.gmailMessageID.map { Int64(bitPattern: $0) }, raw.gmailThreadID.map { Int64(bitPattern: $0) },
@@ -539,6 +544,8 @@ public final class Importer: Sendable {
 
                 rules?.suggestion.rawValue, rules?.score, rules.map { $0.signals.joined(separator: ",") },
                 prepared.senderDMARC.rawValue, now,
+                imported == nil ? "synced" : "imported", imported?.batch, (imported?.state ?? .present).rawValue,
+                imported.flatMap { $0.state == .present ? nil : now },
             ])
         let id = db.lastInsertedRowID
         if parsed.textPlain != nil || parsed.textFromHTML != nil {
@@ -589,6 +596,9 @@ public final class Importer: Sendable {
     /// or back from the Trash) has its copy moved there and is present again.
     static func link(_ db: Database, messageID: StoredMessageID, raw: RawMessage) throws {
         let now = Int(Date().timeIntervalSince1970)
+        // The server has it now: an imported message counts as synced from here on (D-562).
+        try db.execute(sql: "UPDATE messages SET origin = 'synced', import_batch_id = NULL WHERE id = ? AND origin = 'imported'",
+                       arguments: [messageID])
         let account = raw.key.accountID.rawValue
         let folderID = try folderID(db, account: account, name: raw.key.folder, kind: "folder")
         try db.execute(sql: """

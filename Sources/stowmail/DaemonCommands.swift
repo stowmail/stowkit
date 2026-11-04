@@ -94,12 +94,22 @@ struct Status: AsyncParsableCommand {
         for status in statuses {
             let record = status.account
             print("\(record.account.email) (\(record.account.provider.rawValue), \(record.account.id.rawValue.prefix(8)))")
+            for batch in status.unfinishedImports { print("  " + CLI.unfinishedImport(batch)) }
+            guard record.account.provider.syncs else {
+                print("  Import only: mail from files, never synced, no sign-in.")
+                print("  Archived: \(status.archivedMessages) messages, \(CLI.megabytes(status.archivedBytes))")
+                if status.removed > 0 { print("  Removed from the archive: \(status.removed) (`stowmail removed`).") }
+                continue
+            }
             if !record.isConnected { print("  Disconnected: no longer syncs. Its \(status.archivedMessages) archived messages are kept.") }
             if record.needsSignIn { print("  Needs sign-in: run `stowmail account signin \(record.account.id.rawValue.prefix(8))`.") }
             print("  Signs in with: \(record.account.provider.credentialKind.label), kept in the Keychain")
             print("  Last sync: \(status.lastSyncAt.map(CLI.time) ?? "never")\(status.lastError == nil ? "" : " (failed)")")
             if let error = status.lastError { print("  Last error: \(error)") }
             print("  Archived: \(status.archivedMessages) messages, \(CLI.megabytes(status.archivedBytes))")
+            if status.importedMessages > 0 {
+                print("  Imported from files: \(status.importedMessages), not counted as stowed from the mailbox.")
+            }
             if status.queue.queued > 0 {
                 print(String(format: "  Downloading: %d to go (%@), %.0f%% done%@", status.queue.queued, CLI.megabytes(status.queue.queuedBytes),
                              status.progress * 100, status.firstSyncComplete ? "" : ", first sync in progress"))
@@ -109,7 +119,7 @@ struct Status: AsyncParsableCommand {
             if status.queue.unfetchable > 0 {
                 print("  Could not download: \(status.queue.unfetchable) message(s) the server lists but never returns (recorded after 3 runs).")
             }
-            let profile = ProviderProfile.forProvider(record.account.provider)
+            let profile = try ProviderProfile.forProvider(record.account.provider)
             print("  Downloaded in the last 24 hours: \(CLI.megabytes(status.bytesLast24Hours))\(profile.dailyByteLimit.map { " of \(CLI.megabytes($0)) allowed" } ?? "")")
             if let coverage = status.coverageDate { print("  Everything before \(CLI.day(coverage)) is archived and verified.") }
             if !status.sourceStates.isEmpty {
