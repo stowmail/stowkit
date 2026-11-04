@@ -143,6 +143,17 @@ struct Doctor: AsyncParsableCommand {
                     ? (try? CLI.passwordStore().hasPassword(for: id)) == true
                     : ((try? CLI.tokenStore().tokens(for: id)) ?? nil) != nil
                 print("  \(id.rawValue.prefix(8)) \(record.account.provider.rawValue): \(record.account.provider.credentialKind.label) \(present ? "in the Keychain" : "MISSING (run `stowmail account signin \(id.rawValue.prefix(8))`)")")
+                if record.account.provider == .imap {
+                    // Host, port, security and capabilities; never the password (brief step 5).
+                    if let stored = try? ArchiveServers(archive: archive).server(for: id) {
+                        print("    \(IMAPSignIn.describe(stored))")
+                        if let capabilities = stored.capabilities, let at = stored.capabilitiesAt {
+                            print("    capabilities at sign-in on \(CLI.day(at)): \(capabilities.joined(separator: " "))")
+                        }
+                    } else {
+                        print("    server details MISSING from the archive; it cannot sync")
+                    }
+                }
             }
         }
 

@@ -119,7 +119,7 @@ struct Status: AsyncParsableCommand {
             if status.queue.unfetchable > 0 {
                 print("  Could not download: \(status.queue.unfetchable) message(s) the server lists but never returns (recorded after 3 runs).")
             }
-            let profile = try ProviderProfile.forProvider(record.account.provider)
+            let profile = try ProviderProfile.forAccount(record.account, in: archive)
             print("  Downloaded in the last 24 hours: \(CLI.megabytes(status.bytesLast24Hours))\(profile.dailyByteLimit.map { " of \(CLI.megabytes($0)) allowed" } ?? "")")
             if let coverage = status.coverageDate { print("  Everything before \(CLI.day(coverage)) is archived and verified.") }
             if !status.sourceStates.isEmpty {

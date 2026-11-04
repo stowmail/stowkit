@@ -1,12 +1,17 @@
 import Foundation
 import StowCore
 
-/// An iCloud app-specific password (D-467).
+/// The name iCloud code and the app already use (D-467). Since D-570 the same
+/// type holds any IMAP password; only `init(typed:)` checks Apple's shape.
+public typealias AppSpecificPassword = MailPassword
+
+/// A password Stow signs in to a mail server with: an iCloud app-specific
+/// password (D-467) or another IMAP server's password (D-570).
 ///
 /// Held as bytes, never as a `String` property, and it describes itself as
 /// redacted everywhere: printing, logging, `dump` or string interpolation of
 /// this type, or of anything holding it, shows no part of it and not its length.
-public struct AppSpecificPassword: Sendable, CustomStringConvertible, CustomDebugStringConvertible, CustomReflectable {
+public struct MailPassword: Sendable, CustomStringConvertible, CustomDebugStringConvertible, CustomReflectable {
     private let bytes: [UInt8]
 
     /// Why a typed password was refused before anything was sent.
@@ -41,22 +46,49 @@ public struct AppSpecificPassword: Sendable, CustomStringConvertible, CustomDebu
         bytes = canonical
     }
 
+    /// Why a typed server password was refused before anything was sent (D-570).
+    public enum ServerPasswordError: Error, Equatable, CustomStringConvertible {
+        case empty
+        /// A line break or NUL cannot be sent: SASL PLAIN separates its parts
+        /// with NUL, and IMAP commands end at a line break.
+        case unsendable
+
+        public var description: String {
+            switch self {
+            case .empty:
+                "No password was entered. Nothing was saved."
+            case .unsendable:
+                "That password contains a line break or a NUL character, which IMAP cannot send. Check it was pasted whole, on one line. Nothing was saved."
+            }
+        }
+    }
+
+    /// Any other IMAP server's password (D-570), kept exactly as typed: no
+    /// trimming, since a space can be part of a password. The caller removes
+    /// the line ending of what it read.
+    public init(serverPassword typed: String) throws {
+        let utf8 = Array(typed.utf8)
+        guard !utf8.isEmpty else { throw ServerPasswordError.empty }
+        guard !utf8.contains(where: { $0 == 0 || $0 == 10 || $0 == 13 }) else { throw ServerPasswordError.unsendable }
+        bytes = utf8
+    }
+
     /// Bytes read back from the Keychain, which only ever holds a checked password.
     init(storedBytes: [UInt8]) {
         bytes = storedBytes
     }
 
-    /// The password's UTF-8 bytes, for the SASL PLAIN response only.
+    /// The password's UTF-8 bytes, for the SASL PLAIN response or `LOGIN` only.
     public func withBytes<T>(_ body: ([UInt8]) throws -> T) rethrows -> T {
         try body(bytes)
     }
 
-    public var description: String { "AppSpecificPassword([redacted])" }
+    public var description: String { "MailPassword([redacted])" }
     public var debugDescription: String { description }
     public var customMirror: Mirror { Mirror(self, children: [], displayStyle: .struct) }
 }
 
-/// Per-account app-specific passwords, kept in the Keychain and nowhere else
+/// Per-account passwords (iCloud app-specific passwords and other IMAP servers'), kept in the Keychain and nowhere else
 /// (D-467 item 3), through the same `KeychainStore`, so with the same
 /// attributes as OAuth tokens (D-007): this device only, after first unlock,
 /// never synchronised; under `STOW_KEYCHAIN=file` the FileVault check applies (D-012).

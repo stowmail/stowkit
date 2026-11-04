@@ -16,7 +16,7 @@ enum UIDSelection: Sendable, Equatable {
 }
 
 /// The complete list of IMAP commands Stow can send (D-109; GETQUOTAROOT added by D-404,
-/// AUTHENTICATE PLAIN by D-467).
+/// AUTHENTICATE PLAIN by D-467, LOGIN by D-570).
 ///
 /// This is the only way `IMAPSession` builds a command, and the connection
 /// only accepts values of this type, so a command that changes the mailbox
@@ -33,7 +33,13 @@ enum ReadOnlyCommand: Sendable {
     /// server's `+` instead. `IMAPConnection` refuses to send either unless
     /// the connection is implicit TLS (`IMAPEndpoint.allowsPassword`).
     /// Signing in changes nothing in the mailbox.
-    case authenticatePlain(user: String, password: AppSpecificPassword, initialResponse: Bool)
+    case authenticatePlain(user: String, password: MailPassword, initialResponse: Bool)
+    /// `LOGIN <user> <password>` (RFC 9051), for a server that does not offer
+    /// `AUTH=PLAIN` and does not advertise `LOGINDISABLED` (D-570 item 3).
+    /// Never sent to iCloud. swift-nio-imap's encoder quotes the arguments, or
+    /// sends them as literals when quoting cannot hold them. Same TLS guard as
+    /// PLAIN. Signing in changes nothing in the mailbox.
+    case login(user: String, password: MailPassword)
     /// `LIST "" "*"`: every mailbox.
     case listAll
     /// `EXAMINE <mailbox> [(CONDSTORE)]`: read-only; CONDSTORE asks for HIGHESTMODSEQ (D-038).
@@ -62,10 +68,12 @@ enum ReadOnlyCommand: Sendable {
     case getQuotaRoot(rawName: [UInt8])
     case logout
 
-    /// Whether this command carries a password, so may only be sent over implicit TLS (D-467).
+    /// Whether this command carries a password, so may only be sent over implicit TLS (D-467, D-570).
     var carriesPassword: Bool {
-        if case .authenticatePlain = self { return true }
-        return false
+        switch self {
+        case .authenticatePlain, .login: true
+        default: false
+        }
     }
 
     /// The command verb, for logs. Never includes arguments, which may hold a
@@ -75,6 +83,7 @@ enum ReadOnlyCommand: Sendable {
         case .capability: "CAPABILITY"
         case .authenticateXOAUTH2: "AUTHENTICATE XOAUTH2"
         case .authenticatePlain: "AUTHENTICATE PLAIN"
+        case .login: "LOGIN"
         case .listAll: "LIST"
         case .examine: "EXAMINE"
         case .fetchSummaries, .fetchSummariesOf, .fetchHeaderFields, .fetchMessages, .fetchStates, .fetchGmailIDs: "UID FETCH"
@@ -98,6 +107,10 @@ enum ReadOnlyCommand: Sendable {
                 mechanism: .plain,
                 initialResponse: initialResponse ? InitialResponse(ByteBuffer(bytes: SASLPlain.response(user: user, password: password))) : nil
             )
+        case .login(let user, let password):
+            // swift-nio-imap takes the password as a String; it lives only as
+            // long as this command value.
+            return .login(username: user, password: password.withBytes { String(decoding: $0, as: UTF8.self) })
         case .listAll:
             return .list(nil, reference: MailboxName(Array("".utf8)), .mailbox(ByteBuffer(string: "*")), [])
         case .examine(let rawName, let condstore):
@@ -164,7 +177,7 @@ enum XOAUTH2 {
 /// the mechanism's name but has no encoder for it. swift-nio-imap base64-encodes
 /// the result. Contains the password: never log it.
 enum SASLPlain {
-    static func response(user: String, password: AppSpecificPassword) -> [UInt8] {
+    static func response(user: String, password: MailPassword) -> [UInt8] {
         password.withBytes { [0] + Array(user.utf8) + [0] + $0 }
     }
 }

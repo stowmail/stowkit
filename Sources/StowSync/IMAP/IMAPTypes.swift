@@ -32,11 +32,12 @@ public struct IMAPEndpoint: Sendable, Equatable {
     /// Set only by the debug-build test endpoint below.
     let passwordsOverLoopbackForTests: Bool
 
-    /// Whether a password may be sent here: only on implicit TLS to port 993
-    /// (D-467). No STARTTLS, no port 143, no plain text. `IMAPConnection`
-    /// checks this before it writes `AUTHENTICATE PLAIN`.
+    /// Whether a password may be sent here: only on implicit TLS, on any port
+    /// (D-570 item 1, widening D-467's port 993). The port number was never the
+    /// protection; TLS from the first byte is. No STARTTLS, no plain text.
+    /// `IMAPConnection` checks this before it writes `AUTHENTICATE PLAIN` or `LOGIN`.
     var allowsPassword: Bool {
-        (useTLS && port == 993) || passwordsOverLoopbackForTests
+        useTLS || passwordsOverLoopbackForTests
     }
 
     #if DEBUG

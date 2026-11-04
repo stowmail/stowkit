@@ -61,10 +61,12 @@ extension MailboxSize {
 extension MailboxSize {
     /// Whether a provider's RFC822.SIZE values are estimates: Exchange's are
     /// (D-120). iCloud's are exact: measured on 1,500 messages, none differed (D-475).
+    /// Other IMAP servers are taken at their word, as the standard says sizes
+    /// are exact; the fetch limits allow for a server that is wrong (D-120).
     static func sizesAreEstimates(_ provider: String?) -> Bool {
         switch provider.flatMap(Provider.init(rawValue:)) {
         case .microsoft?: true
-        case .gmail?, .icloud?, .imported?, nil: false
+        case .gmail?, .icloud?, .imap?, .imported?, nil: false
         }
     }
 }

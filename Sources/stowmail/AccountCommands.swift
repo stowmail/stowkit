@@ -14,11 +14,15 @@ struct AccountCommand: AsyncParsableCommand {
 
     struct Add: AsyncParsableCommand {
         static let configuration = CommandConfiguration(
-            abstract: "Sign in to a Gmail or Microsoft account in the browser, or an iCloud account with an app-specific password, and add it.",
-            discussion: "For icloud, --email is required and the app-specific password is asked for at a prompt that does not show it, or read as one line from standard input when that is not a terminal. There is no flag or environment variable for it."
+            abstract: "Sign in to a Gmail or Microsoft account in the browser, or an iCloud or other IMAP account with a password, and add it.",
+            discussion: """
+                For icloud and imap, --email is required and the password is asked for at a prompt that does not show it, or read as one line from standard input when that is not a terminal. There is no flag or environment variable for it.
+
+                For imap, also give --preset for a known provider, or --host (and --port if not 993) for another server. Stow connects with TLS from the first byte only; STARTTLS and port 143 are not supported. The username defaults to the address. Presets: \(IMAPSignIn.presetList).
+                """
         )
 
-        @Argument(help: "gmail, microsoft or icloud")
+        @Argument(help: "gmail, microsoft, icloud or imap")
         var provider: ProviderArgument
 
         @Option(name: .long, help: "A friendly name, for example \"Personal\".")
@@ -27,8 +31,26 @@ struct AccountCommand: AsyncParsableCommand {
         @Option(name: .long, help: "The address, if the provider does not report it. Also pre-fills the sign-in page.")
         var email: String?
 
+        @Option(name: .long, help: "imap only: a known provider's server, for example fastmail or gmx.")
+        var preset: String?
+
+        @Option(name: .long, help: "imap only: the IMAP server's name, for example imap.example.com.")
+        var host: String?
+
+        @Option(name: .long, help: "imap only, with --host: the port for IMAP over TLS (default 993).")
+        var port: Int?
+
+        @Option(name: .long, help: "imap only: the IMAP username, if it is not the address.")
+        var username: String?
+
         func run() async throws {
             CLI.bootstrapLogging()
+            if provider == .imap {
+                return try await IMAPSignIn.add(email: email, preset: preset, host: host, port: port, username: username, name: name)
+            }
+            guard preset == nil, host == nil, port == nil, username == nil else {
+                throw ValidationError("--preset, --host, --port and --username are for imap accounts only.")
+            }
             guard let oauthProvider = provider.provider.oauth else {
                 return try await ICloudSignIn.add(email: email, name: name)
             }
@@ -68,12 +90,17 @@ struct AccountCommand: AsyncParsableCommand {
 
         func run() async throws {
             CLI.bootstrapLogging()
-            let records = try CLIArchive.accounts(try CLIArchive.open(readOnly: true)).all()
+            let archive = try CLIArchive.open(readOnly: true)
+            let records = try CLIArchive.accounts(archive).all()
             if records.isEmpty {
-                print("No accounts. Add one with `stowmail account add gmail`, `stowmail account add microsoft` or `stowmail account add icloud --email <address>`.")
+                print("No accounts. Add one with `stowmail account add gmail`, `stowmail account add microsoft`, `stowmail account add icloud --email <address>` or `stowmail account add imap --email <address> --preset <id>`.")
             }
+            let servers = ArchiveServers(archive: archive)
             for record in records {
                 print(CLI.describe(record))
+                if record.account.provider == .imap, let stored = try servers.server(for: record.account.id) {
+                    print("    \(IMAPSignIn.describe(stored))")
+                }
             }
         }
     }
@@ -92,6 +119,9 @@ struct AccountCommand: AsyncParsableCommand {
             let accounts = CLIArchive.accounts(try CLIArchive.open())
             let record = try accounts.find(account)
             guard record.account.provider.syncs else { throw SyncError.importOnly }
+            if record.account.provider == .imap {
+                return try await IMAPSignIn.signInAgain(record, accounts: accounts)
+            }
             guard let oauthProvider = record.account.provider.oauth else {
                 return try await ICloudSignIn.signInAgain(record, accounts: accounts)
             }
@@ -115,7 +145,7 @@ struct AccountCommand: AsyncParsableCommand {
 
     struct Remove: AsyncParsableCommand {
         static let configuration = CommandConfiguration(
-            abstract: "Disconnect an account: stop syncing it and delete its tokens or app-specific password. Its archived mail is kept."
+            abstract: "Disconnect an account: stop syncing it and delete its tokens or password. Its archived mail is kept."
         )
 
         @Argument(help: "Account ID, ID prefix, address or name.")
@@ -136,7 +166,9 @@ struct AccountCommand: AsyncParsableCommand {
             }
             print("Disconnected account \(record.account.id). It no longer syncs and its \(record.account.provider.credentialKind.label) \(record.account.provider.oauth == nil ? "is" : "are") deleted from this Mac.")
             print("Its archived mail is kept and still searchable. Adding the same address again reconnects it.")
-            if record.account.provider.oauth == nil {
+            if record.account.provider == .imap {
+                print(IMAPSignIn.revokeSteps)
+            } else if record.account.provider.oauth == nil {
                 // D-467 item 6: the password still works until revoked at Apple.
                 print(ICloudSignIn.revokeSteps)
             } else {

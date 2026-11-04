@@ -37,7 +37,8 @@ public struct AccountID: Hashable, Sendable, Codable, CustomStringConvertible, C
 }
 
 /// Which mail provider an account belongs to. All are reached over IMAP:
-/// Google and Microsoft with OAuth (D-004), iCloud with an app-specific password (D-467).
+/// Google and Microsoft with OAuth (D-004), iCloud with an app-specific password (D-467),
+/// and any other IMAP server with a password (D-555, D-570).
 /// An import-only account is reached by nothing: its mail came from files (D-568).
 public enum Provider: String, Sendable, Codable, CaseIterable {
     /// Gmail and Google Workspace.
@@ -46,19 +47,23 @@ public enum Provider: String, Sendable, Codable, CaseIterable {
     case microsoft
     /// iCloud Mail: @icloud.com, @me.com and @mac.com, and custom domains on iCloud+ (D-466).
     case icloud
+    /// Any other IMAP server, from a preset (Fastmail, Yahoo, GMX...) or typed
+    /// by the user. Its server details live with the account (`ServerProfile`).
+    case imap
+
     /// An import-only account (D-556, D-568): mail from mbox files, no
     /// credential, never synced. Stored as `import`; an older build does not
     /// know it and leaves the account out (D-025).
     case imported = "import"
 
-    /// The OAuth provider behind this one, or nil for iCloud, which signs in
-    /// with an app-specific password, and for an import-only account. Code that
-    /// needs OAuth takes an `OAuthProvider`, so it cannot be called for either.
+    /// The OAuth provider behind this one, or nil for iCloud and other IMAP
+    /// servers, which sign in with a password, and for an import-only account.
+    /// Code that needs OAuth takes an `OAuthProvider`, so it cannot be called for any of them.
     public var oauth: OAuthProvider? {
         switch self {
         case .gmail: .gmail
         case .microsoft: .microsoft
-        case .icloud, .imported: nil
+        case .icloud, .imap, .imported: nil
         }
     }
 
@@ -67,6 +72,7 @@ public enum Provider: String, Sendable, Codable, CaseIterable {
         switch self {
         case .gmail, .microsoft: .oauthTokens
         case .icloud: .appSpecificPassword
+        case .imap: .password
         case .imported: .none
         }
     }
@@ -93,14 +99,19 @@ public enum OAuthProvider: String, Sendable, Codable, CaseIterable {
 public enum CredentialKind: String, Sendable, Codable {
     case oauthTokens
     case appSpecificPassword
+    /// A password for another IMAP server (D-570): the account's own password
+    /// or an app password the provider issued.
+    case password
+
     /// An import-only account keeps nothing in the Keychain (D-568).
     case none
 
-    /// For output: "sign-in tokens", "app-specific password" or "no sign-in".
+    /// For output: "sign-in tokens", "app-specific password", "password" or "no sign-in".
     public var label: String {
         switch self {
         case .oauthTokens: "sign-in tokens"
         case .appSpecificPassword: "app-specific password"
+        case .password: "password"
         case .none: "no sign-in"
         }
     }

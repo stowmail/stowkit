@@ -176,8 +176,10 @@ func icloudServer(_ fixtures: [(name: String, bytes: Data)] = [], flags: Bool = 
     }
 
     /// A TLS handshake that fails is its own error, never retried as a network
-    /// fault and never skipped. The plain-text fake server cannot complete one.
-    @Test func failedTLSHandshakeIsCertificateRejected() async throws {
+    /// fault and never skipped. The plain-text fake server cannot complete one;
+    /// since D-570 that reads as "this port does not speak TLS", not as a
+    /// certificate refusal, which `GenericIMAPConnectTests` covers.
+    @Test func failedTLSHandshakeIsItsOwnError() async throws {
         let server = icloudServer()
         server.acceptedPasswords = ["sam@icloud.example abcd-efgh-ijkl-mnop"]
         let port = try await server.start()
@@ -186,12 +188,12 @@ func icloudServer(_ fixtures: [(name: String, bytes: Data)] = [], flags: Bool = 
             _ = try await IMAPSession.connect(to: IMAPEndpoint(host: "127.0.0.1", port: Int(port)))
             Issue.record("expected the TLS handshake to fail")
         } catch let error as SyncError {
-            guard case .certificateRejected = error else {
-                Issue.record("expected certificateRejected, got \(error)")
+            guard case .tlsHandshakeFailed = error else {
+                Issue.record("expected tlsHandshakeFailed, got \(error)")
                 return
             }
             #expect(!error.isRetryable)
-            #expect(error.description.contains("never skips this check"))
+            #expect(error.description.contains("Port 143 with STARTTLS is not supported"))
         }
         #expect(server.plainUsers.isEmpty)
     }

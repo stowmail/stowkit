@@ -19,7 +19,8 @@ public enum SenderDMARC: String, Sendable, Codable, CaseIterable {
 /// - Gmail: authserv-id `mx.google.com`.
 /// - Microsoft (Outlook.com and Exchange Online): authserv-id `mx.microsoft.com`.
 ///   A field with no authserv-id is not Microsoft's: anyone can write one.
-/// - iCloud and anything else: never a result.
+/// - iCloud, other IMAP servers and anything else: never a result. A stranger's
+///   server can write any authserv-id it likes.
 /// The authserv-id may be followed by a version number (`mx.microsoft.com 1`).
 /// The DMARC entry must say `pass` and its `header.from` must be the From
 /// address's domain (lowercased) or a parent of it (D-523).
@@ -35,7 +36,7 @@ public enum ProviderAuthentication {
             guard isAuthservID(first, "mx.google.com") else { return .none }
         case .microsoft:
             guard isAuthservID(first, "mx.microsoft.com") else { return .none }
-        case .icloud, .imported:
+        case .icloud, .imap, .imported:
             // An import-only account has no provider to trust (D-568).
             return .none
         }

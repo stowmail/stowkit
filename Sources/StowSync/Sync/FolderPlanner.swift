@@ -25,13 +25,44 @@ public enum FolderPlanner {
     ///   found by SPECIAL-USE flag, by name only when no folder has the flag.
     ///   iCloud erases Deleted Messages after 30 days, as Gmail does Bin, so
     ///   it is skipped for the same reason (D-104, D-469).
+    /// - Other IMAP servers: every selectable folder except Junk, found by
+    ///   SPECIAL-USE flag, by common names only when no folder has the flag.
+    ///   Trash is kept: Stow cannot know whether an unknown server empties it,
+    ///   and keeping mail someone treats as stored beats losing it (D-571).
     public static func plan(provider: Provider, folders: [IMAPFolder], capabilities: Set<String>) throws -> FolderPlan {
         switch provider {
         case .gmail: try planGmail(folders: folders, capabilities: capabilities)
         case .microsoft: planMicrosoft(folders: folders)
         case .icloud: planICloud(folders: folders)
+        case .imap: planGeneric(folders: folders)
         case .imported: throw SyncError.importOnly
         }
+    }
+
+    /// Names servers give their junk folder, compared without case, used only
+    /// when no folder carries `\Junk` (D-571). GMX's German folder is
+    /// Spamverdacht.
+    static let genericJunkNames: Set<String> = ["junk", "spam", "junk e-mail", "junk email", "bulk mail", "spamverdacht"]
+
+    static func planGeneric(folders: [IMAPFolder]) -> FolderPlan {
+        let flagsJunk = folders.contains { $0.has("\\Junk") }
+        func isJunk(_ folder: IMAPFolder) -> Bool {
+            if flagsJunk { return folder.has("\\Junk") }
+            // The last part of the name, so "INBOX.Spam" on a server that nests under INBOX counts.
+            let leaf = folder.separator.flatMap { folder.name.split(separator: $0).last.map(String.init) } ?? folder.name
+            return genericJunkNames.contains(leaf.lowercased())
+        }
+        var plan = FolderPlan(toSync: [], skipped: [])
+        for folder in folders {
+            if !folder.isSelectable {
+                plan.skipped.append(.init(folder: folder, reason: "cannot be opened (\\Noselect)"))
+            } else if isJunk(folder) {
+                plan.skipped.append(.init(folder: folder, reason: "Junk: not archived (D-104)"))
+            } else {
+                plan.toSync.append(folder)
+            }
+        }
+        return plan
     }
 
     static func planGmail(folders: [IMAPFolder], capabilities: Set<String>) throws -> FolderPlan {

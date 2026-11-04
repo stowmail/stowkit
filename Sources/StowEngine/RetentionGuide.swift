@@ -13,6 +13,10 @@ public enum RetentionGuide {
         case outlookCom
         /// iCloud Mail, on any of its domains or a custom domain (D-466).
         case icloud
+        /// Any other IMAP server (D-555): the same Mail on the Mac steps as
+        /// iCloud, which work for every IMAP account, worded for any provider
+        /// (brief step 7, D-572).
+        case otherIMAP
     }
 
     static let consumerGoogle: Set<String> = ["gmail.com", "googlemail.com"]
@@ -27,6 +31,7 @@ public enum RetentionGuide {
         case .gmail: return consumerGoogle.contains(domain) ? .gmail : .googleWorkspace
         case .microsoft: return consumerMicrosoft.contains(domain) ? .outlookCom : .microsoft365
         case .icloud: return .icloud
+        case .imap: return .otherIMAP
         case .imported: return nil
         }
     }
@@ -55,7 +60,7 @@ public enum RetentionGuide {
         switch kind {
         case .gmail, .googleWorkspace: return "before:\(day.replacingOccurrences(of: "-", with: "/"))"
         case .microsoft365, .outlookCom: return "received:<\(day)"
-        case .icloud: return longDay(before)
+        case .icloud, .otherIMAP: return longDay(before)
         }
     }
 
@@ -103,6 +108,16 @@ public enum RetentionGuide {
                 Step("In the same window, tick \"Include messages from Sent\", so your sent mail goes too, then click OK."),
                 Step("Open the smart mailbox, select all the messages in it and delete them. They move to this account's Trash."),
                 Step("Open this account's Trash, select all the messages and click Delete, to get the space back. With thousands of messages this can take half an hour or more."),
+            ]
+        case .otherIMAP:
+            // Mail on the Mac reaches any IMAP account and can select by date;
+            // providers' web mail differs too much to describe here (D-572).
+            return [
+                Step("Open Mail on your Mac with this account added to it (Mail, Settings, Accounts). Your provider's web mail may not be able to find mail by date."),
+                Step("Choose Mailbox, New Smart Mailbox. Set \"Account\" to this account, add \"Date received\", \"is before the date\":", search: search),
+                Step("In the same window, tick \"Include messages from Sent\", so your sent mail goes too, then click OK."),
+                Step("Open the smart mailbox, select all the messages in it and delete them. They move to this account's Trash."),
+                Step("Open this account's Trash, select all the messages and click Delete, to get the space back. If your provider keeps deleted mail for a while longer, its web mail says how to empty that too."),
             ]
         }
     }

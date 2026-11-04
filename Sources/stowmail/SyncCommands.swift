@@ -16,10 +16,10 @@ struct Folders: AsyncParsableCommand {
 
     func run() async throws {
         CLI.bootstrapLogging()
-        let accounts = CLIArchive.accounts(try CLIArchive.open())
+        let archive = try CLIArchive.open()
+        let accounts = CLIArchive.accounts(archive)
         let record = try accounts.find(account)
-        let profile = try ProviderProfile.forProvider(record.account.provider)
-        let session = try await SessionFactory(account: record.account, endpoint: profile.endpoint,
+        let session = try await SessionFactory(account: record.account, in: archive,
                                                tokens: try CLI.tokenProvider(accounts: accounts)).open()
         do {
             let capabilities = try await session.capabilities()
@@ -247,8 +247,8 @@ struct Verify: AsyncParsableCommand {
         let accounts = CLIArchive.accounts(archive)
         let record = try accounts.find(query)
         if record.needsSignIn { throw SyncError.needsSignIn(record.account.id) }
-        let profile = try ProviderProfile.forProvider(record.account.provider)
-        let factory = SessionFactory(account: record.account, endpoint: profile.endpoint, tokens: try CLI.tokenProvider(accounts: accounts))
+        let profile = try ProviderProfile.forAccount(record.account, in: archive)
+        let factory = try SessionFactory(account: record.account, in: archive, tokens: try CLI.tokenProvider(accounts: accounts))
         let source: RawMessageSource
         if let out {
             source = try FileRawMessageStore(root: CLI.storeRoot(out))

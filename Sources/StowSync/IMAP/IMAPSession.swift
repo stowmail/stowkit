@@ -24,8 +24,14 @@ public actor IMAPSession {
     /// iCloud answers EXAMINE with `[READ-WRITE]` (measured 28 Oct 2026, D-474).
     /// Only `SessionFactory` turns this on, only for iCloud accounts.
     private var acceptsReadWriteExamineLabel = false
+    #if DEBUG
+    /// Debug builds only: treat `AUTH=PLAIN` as not offered, so tests can send
+    /// `LOGIN` to a real Dovecot, whose LOGIN command needs PLAIN enabled.
+    private var ignoresAuthPlainForTests = false
+    func ignoreAuthPlainForTests() { ignoresAuthPlainForTests = true }
+    #endif
     /// Held only while `AUTHENTICATE PLAIN` without SASL-IR waits for the server's `+`.
-    private var plainCredentials: (user: String, password: AppSpecificPassword)?
+    private var plainCredentials: (user: String, password: MailPassword)?
     private let logger = Logger(label: "ee.getstow.sync.imap")
     private let timeouts: IMAPTimeouts
     /// The tag of a command whose deadline passed; its connection is closed.
@@ -75,7 +81,7 @@ public actor IMAPSession {
         do {
             let text = try await run(.authenticateXOAUTH2(user: user, accessToken: accessToken)) { _ in }
             if case .capability(let list)? = text.code {
-                knownCapabilities = Set(list.map { $0.name.uppercased() })
+                knownCapabilities = Self.capabilityNames(list)
             } else {
                 knownCapabilities = nil // They change after sign-in; ask again when needed.
             }
@@ -84,20 +90,39 @@ public actor IMAPSession {
         }
     }
 
-    /// Signs in with SASL PLAIN and an iCloud app-specific password (D-467),
-    /// only over implicit TLS (the connection checks). Sends the credentials
-    /// as an initial response when the server offers SASL-IR, otherwise in
-    /// answer to its `+`. Throws `SyncError.authenticationFailed` if refused.
-    public func authenticate(user: String, password: AppSpecificPassword) async throws {
+    /// Signs in with a password, only over TLS (checked here and again by the
+    /// connection). Throws `SyncError.authenticationFailed` if refused.
+    ///
+    /// - iCloud (`allowLogin` false): SASL PLAIN, always (D-467).
+    /// - Other IMAP servers (`allowLogin` true, D-570 item 3): SASL PLAIN when
+    ///   the server offers `AUTH=PLAIN`; otherwise `LOGIN`, unless the server
+    ///   advertises `LOGINDISABLED`; otherwise `SyncError.noSupportedSignIn`
+    ///   before anything is sent.
+    ///
+    /// PLAIN sends the credentials as an initial response when the server
+    /// offers SASL-IR, otherwise in answer to its `+`.
+    public func authenticate(user: String, password: MailPassword, allowLogin: Bool = false) async throws {
         // Checked here before anything is sent, and again by the connection before it writes.
         guard connection.endpoint.allowsPassword else { throw SyncError.insecureConnection }
-        let initialResponse = try await capabilities().contains("SASL-IR")
-        plainCredentials = initialResponse ? nil : (user, password)
+        var offered = try await capabilities()
+        #if DEBUG
+        if ignoresAuthPlainForTests { offered.remove("AUTH=PLAIN") }
+        #endif
+        let command: ReadOnlyCommand
+        if !allowLogin || offered.contains("AUTH=PLAIN") {
+            let initialResponse = offered.contains("SASL-IR")
+            plainCredentials = initialResponse ? nil : (user, password)
+            command = .authenticatePlain(user: user, password: password, initialResponse: initialResponse)
+        } else if !offered.contains("LOGINDISABLED") {
+            command = .login(user: user, password: password)
+        } else {
+            throw SyncError.noSupportedSignIn
+        }
         defer { plainCredentials = nil }
         do {
-            let text = try await run(.authenticatePlain(user: user, password: password, initialResponse: initialResponse)) { _ in }
+            let text = try await run(command) { _ in }
             if case .capability(let list)? = text.code {
-                knownCapabilities = Set(list.map { $0.name.uppercased() })
+                knownCapabilities = Self.capabilityNames(list)
             } else {
                 knownCapabilities = nil
             }
@@ -107,18 +132,30 @@ public actor IMAPSession {
     }
 
     /// Exchange says "User is authenticated but not connected." when the token
-    /// is fine but there is no mailbox it can open (D-116).
+    /// is fine but there is no mailbox it can open (D-116). Dovecot says
+    /// "Unsupported authentication mechanism." when it advertises no PLAIN and
+    /// its LOGIN command, which uses PLAIN inside, cannot work: no password is
+    /// wrong there (measured 3 Nov 2026, D-575).
     static func classifyAuthenticationFailure(_ text: String) -> SyncError {
-        text.lowercased().contains("authenticated but not connected") ? .mailboxUnavailable(text) : .authenticationFailed(text)
+        let lowered = text.lowercased()
+        if lowered.contains("authenticated but not connected") { return .mailboxUnavailable(text) }
+        if lowered.contains("unsupported authentication mechanism") { return .noSupportedSignIn }
+        return .authenticationFailed(text)
     }
 
-    /// Capability names, uppercased, for example `IMAP4REV1`, `X-GM-EXT-1`.
+    /// Each capability whole, uppercased: `AUTH=PLAIN`, not swift-nio-imap's
+    /// `name` alone (`AUTH`), which lost the mechanism until D-570 needed it.
+    static func capabilityNames(_ list: [Capability]) -> Set<String> {
+        Set(list.map { capability in (capability.name + (capability.value.map { "=" + $0 } ?? "")).uppercased() })
+    }
+
+    /// Capability names, uppercased, for example `IMAP4REV1`, `X-GM-EXT-1`, `AUTH=PLAIN`.
     public func capabilities() async throws -> Set<String> {
         if let knownCapabilities { return knownCapabilities }
         var found: Set<String> = []
         _ = try await run(.capability) { response in
             if case .untagged(.capabilityData(let list)) = response {
-                found.formUnion(list.map { $0.name.uppercased() })
+                found.formUnion(Self.capabilityNames(list))
             }
         }
         knownCapabilities = found
@@ -389,7 +426,7 @@ public actor IMAPSession {
         switch response {
         case .untagged(.conditionalState(.ok(let text))), .untagged(.conditionalState(.preauth(let text))):
             if case .capability(let list)? = text.code {
-                knownCapabilities = Set(list.map { $0.name.uppercased() })
+                knownCapabilities = Self.capabilityNames(list)
             }
         case .untagged(.conditionalState(.bye(let text))), .fatal(let text):
             throw Self.classifyBye(Redact.scrub(text.text))

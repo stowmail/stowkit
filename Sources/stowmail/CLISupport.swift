@@ -175,12 +175,14 @@ enum ProviderArgument: String, ExpressibleByArgument, CaseIterable {
     case gmail
     case microsoft
     case icloud
+    case imap
 
     var provider: Provider {
         switch self {
         case .gmail: .gmail
         case .microsoft: .microsoft
         case .icloud: .icloud
+        case .imap: .imap
         }
     }
 }

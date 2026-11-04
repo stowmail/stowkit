@@ -1,5 +1,6 @@
 import Foundation
 import Network
+import Security
 import NIOCore
 import NIOIMAP
 import NIOIMAPCore
@@ -64,17 +65,49 @@ final class IMAPConnection: Sendable {
             channel = try await bootstrap.connect(host: endpoint.host, port: endpoint.port).get()
         } catch {
             continuation.finish(throwing: error)
-            if let network = error as? NWError, case .tls = network {
-                throw SyncError.certificateRejected(Redact.scrub(String(describing: error)))
-            }
-            throw SyncError.connectionFailed(Redact.scrub(String(describing: error)))
+            throw classifyConnectFailure(error)
         }
         continuation.onTermination = { _ in channel.close(promise: nil) }
         return IMAPConnection(channel: channel, responses: stream, endpoint: endpoint)
     }
 
+    /// Each way connecting can fail gets its own error and message (D-082,
+    /// brief step 6). A TLS failure is a certificate problem unless its status
+    /// is one of the handshake errors a server that does not speak TLS causes
+    /// (port 143 typed with implicit TLS), so an unknown TLS status still reads
+    /// as a certificate refusal, as before.
+    static func classifyConnectFailure(_ error: Error) -> SyncError {
+        let text = Redact.scrub(String(describing: error))
+        if let network = error as? NWError {
+            switch network {
+            case .tls(let status):
+                return handshakeStatuses.contains(status) ? .tlsHandshakeFailed(text) : .certificateRejected(text)
+            case .dns:
+                return .hostNotFound(text)
+            case .posix(let code) where code == .ECONNREFUSED:
+                return .connectionRefused(text)
+            case .posix(let code) where code == .ETIMEDOUT:
+                return .timedOut
+            default:
+                break
+            }
+        }
+        if let channel = error as? ChannelError, case .connectTimeout = channel { return .timedOut }
+        return .connectionFailed(text)
+    }
+
+    /// TLS statuses that mean the other end did not speak TLS, not that its
+    /// certificate was refused. A plain-text IMAP greeting read as a TLS
+    /// record gives `errSSLPeerProtocolVersion` (-9836, measured against the
+    /// fake server, 3 Nov 2026); untrusted, expired and wrong-name
+    /// certificates give -9808 and -9814, which stay certificate refusals.
+    static let handshakeStatuses: Set<OSStatus> = [
+        errSSLPeerProtocolVersion, errSSLProtocol, errSSLRecordOverflow, errSSLClosedAbort, errSSLClosedNoNotify,
+        errSSLDecodeError, errSSLUnexpectedMessage, errSSLUnexpectedRecord, errSSLBadRecordMac,
+    ]
+
     /// Refuses, before writing a byte, to send a password anywhere but an
-    /// implicit-TLS connection to port 993 (D-467). Network.framework reports
+    /// implicit-TLS connection (D-467, D-570 item 1). Network.framework reports
     /// the channel active only once the TLS handshake and certificate check
     /// have passed, so on a TLS endpoint TLS is up by the time this runs.
     func send(tag: String, _ command: ReadOnlyCommand) async throws {
@@ -92,7 +125,7 @@ final class IMAPConnection: Sendable {
 
     /// Answers the server's `+` to `AUTHENTICATE PLAIN` sent without an
     /// initial response (no SASL-IR). Same TLS rule as `send` (D-467).
-    func sendPlainResponse(user: String, password: AppSpecificPassword) async throws {
+    func sendPlainResponse(user: String, password: MailPassword) async throws {
         guard endpoint.allowsPassword else { throw SyncError.insecureConnection }
         try await write(.continuationResponse(ByteBuffer(bytes: SASLPlain.response(user: user, password: password))))
     }

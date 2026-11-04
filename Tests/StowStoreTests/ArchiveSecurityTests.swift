@@ -180,7 +180,7 @@ import Testing
         let sql = try test.archive.database.read { db in
             try String.fetchAll(db, sql: "SELECT sql FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'messages_fts%' AND name NOT LIKE 'grdb_%' AND name NOT LIKE 'sqlite_%'")
         }
-        #expect(sql.count == 20)
+        #expect(sql.count == 21)
         for statement in sql { #expect(statement.hasSuffix("STRICT"), "\(statement.prefix(40))") }
     }
 }
@@ -250,6 +250,14 @@ enum SampleRows {
                     VALUES (?, randomblob(32), 0, 1, 'full', 1, 'ok', 1, 0, 'imported', ?)
                     """, arguments: [account, batch])
                 try SearchIndexWriter.index(db, messageID: db.lastInsertedRowID)
+            case "v6":
+                let account = UUID().uuidString.lowercased()
+                try db.execute(sql: "INSERT INTO accounts (id, provider, email, display_name, created_at) VALUES (?, 'imap', ?, 'T', 0)",
+                               arguments: [account, "\(account)@example.com"])
+                try db.execute(sql: """
+                    INSERT INTO account_servers (account_id, host, port, security, username, preset, capabilities, capabilities_at)
+                    VALUES (?, 'imap.example.com', 993, 'tls', ?, NULL, 'IMAP4REV1 AUTH=PLAIN', 0)
+                    """, arguments: [account, "\(account)@example.com"])
             default:
                 Issue.record("Add sample rows for migration \(version)")
             }

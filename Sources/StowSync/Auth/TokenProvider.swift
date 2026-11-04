@@ -6,8 +6,9 @@ import StowSecrets
 /// What an account signs in with, as `SessionFactory` needs it.
 public enum SignInCredential: Sendable {
     case accessToken(String)
-    /// An iCloud app-specific password (D-467). Describes itself as redacted.
-    case password(AppSpecificPassword)
+    /// An iCloud app-specific password (D-467) or another IMAP server's
+    /// password (D-570). Describes itself as redacted.
+    case password(MailPassword)
 }
 
 /// Hands out a working credential for an account: an access token, refreshed
@@ -68,7 +69,7 @@ public actor TokenProvider {
     /// The server refused the account's app-specific password: mark the
     /// account so nothing tries again until the user enters a new one.
     public func passwordRefused(_ accountID: AccountID) throws {
-        logger.warning("App-specific password refused; account needs sign-in", metadata: ["account": "\(accountID)"])
+        logger.warning("Password refused; account needs sign-in", metadata: ["account": "\(accountID)"])
         try registry.setNeedsSignIn(accountID, true)
     }
 

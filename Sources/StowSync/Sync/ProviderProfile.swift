@@ -31,12 +31,25 @@ public struct ProviderProfile: Sendable, Equatable {
     /// Stow keeps to two, as for Microsoft, and sets no daily cap (D-475).
     public static let icloud = ProviderProfile(provider: .icloud, endpoint: .icloud, maxConnections: 2, dailyByteLimit: nil)
 
-    /// Throws `SyncError.importOnly` for an import-only account, which has no server (D-568).
-    public static func forProvider(_ provider: Provider) throws -> ProviderProfile {
+    /// Any other IMAP server (D-570, brief step 4): one connection and no daily
+    /// cap unless its preset says otherwise from measurement. Sync backs off on
+    /// `NO`, `BAD` and dropped connections as for every provider (D-107).
+    public static func forServer(_ server: ServerProfile) -> ProviderProfile {
+        ProviderProfile(provider: .imap, endpoint: server.endpoint,
+                        maxConnections: server.preset?.maxConnections ?? 1, dailyByteLimit: nil)
+    }
+
+    /// The profile for an account's provider. An `imap` account needs its
+    /// server details; without them it throws `serverDetailsMissing`. Throws
+    /// `SyncError.importOnly` for an import-only account, which has no server (D-568).
+    public static func forProvider(_ provider: Provider, server: ServerProfile? = nil) throws -> ProviderProfile {
         switch provider {
-        case .gmail: gmail
-        case .microsoft: microsoft
-        case .icloud: icloud
+        case .gmail: return gmail
+        case .microsoft: return microsoft
+        case .icloud: return icloud
+        case .imap:
+            guard let server else { throw SyncError.serverDetailsMissing }
+            return forServer(server)
         case .imported: throw SyncError.importOnly
         }
     }

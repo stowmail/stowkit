@@ -133,9 +133,12 @@ import Testing
         #expect(ProviderProfile.icloud.endpoint.useTLS && ProviderProfile.icloud.endpoint.allowsPassword)
         #expect(ProviderProfile.icloud.maxConnections == 2) // D-475
         #expect(ProviderProfile.icloud.dailyByteLimit == nil)
-        // A password goes only over implicit TLS on 993 (D-467).
-        #expect(!IMAPEndpoint(host: "imap.mail.me.com", port: 143).allowsPassword)
+        // A password goes only over implicit TLS, on any port (D-467, widened by D-570
+        // item 1): the endpoint type has no STARTTLS, so 143 here is still TLS from the
+        // first byte. Plain text never gets one, even on 993.
+        #expect(IMAPEndpoint(host: "imap.example.net", port: 10993).allowsPassword)
         #expect(!IMAPEndpoint.plaintextLoopback(port: 993).allowsPassword)
+        #expect(!IMAPEndpoint.plaintextLoopback(port: 143).allowsPassword)
     }
 }
 
@@ -155,6 +158,7 @@ import Testing
             .capability, .authenticateXOAUTH2(user: "u@example.com", accessToken: "t"),
             .authenticatePlain(user: "u@example.com", password: try! AppSpecificPassword(typed: "abcd-efgh-ijkl-mnop"), initialResponse: true),
             .authenticatePlain(user: "u@example.com", password: try! AppSpecificPassword(typed: "abcd-efgh-ijkl-mnop"), initialResponse: false),
+            .login(user: "u@example.com", password: try! MailPassword(serverPassword: "a server password")),
             .listAll,
             .examine(rawName: Array("INBOX".utf8), condstore: false), .examine(rawName: Array("INBOX".utf8), condstore: true),
             .fetchSummaries(1...10, gmail: false), .fetchSummaries(1...10, gmail: true), .fetchSummariesOf(uids: [4, 9]),
@@ -163,13 +167,13 @@ import Testing
             .fetchStates(1...10, gmail: false, changedSince: 42), .fetchGmailIDs(1...10),
             .getQuotaRoot(rawName: Array("INBOX".utf8)), .logout,
         ]
-        // GETQUOTAROOT (D-404) and AUTHENTICATE PLAIN (D-467) are the only commands added since D-109; nothing else may appear.
-        #expect(Set(all.map(\.verb)) == ["CAPABILITY", "AUTHENTICATE XOAUTH2", "AUTHENTICATE PLAIN", "LIST", "EXAMINE", "UID FETCH", "GETQUOTAROOT", "LOGOUT"])
-        #expect(all.filter(\.carriesPassword).map(\.verb) == ["AUTHENTICATE PLAIN", "AUTHENTICATE PLAIN"])
+        // GETQUOTAROOT (D-404), AUTHENTICATE PLAIN (D-467) and LOGIN (D-570) are the only commands added since D-109; nothing else may appear.
+        #expect(Set(all.map(\.verb)) == ["CAPABILITY", "AUTHENTICATE XOAUTH2", "AUTHENTICATE PLAIN", "LOGIN", "LIST", "EXAMINE", "UID FETCH", "GETQUOTAROOT", "LOGOUT"])
+        #expect(all.filter(\.carriesPassword).map(\.verb) == ["AUTHENTICATE PLAIN", "AUTHENTICATE PLAIN", "LOGIN"])
         for command in all {
             #expect(!mailboxWriteVerbs.contains(command.verb), "\(command.verb)")
             switch command.command {
-            case .capability, .authenticate, .list, .logout:
+            case .capability, .authenticate, .login, .list, .logout:
                 break
             case .getQuotaRoot:
                 // Reads a quota. SETQUOTA, which changes one, has no case.

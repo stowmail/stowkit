@@ -16,7 +16,8 @@ import GRDB
 /// defaults that older code can leave alone.
 public enum ArchiveSchema {
     /// Every migration identifier, oldest first. Tests use this to step through versions.
-    public static let migrationIdentifiers = ["v1", "v2", "v3", "v4", "v5"]
+    /// `v5` is the mbox import track's (D-561, D-562); `v6` the generic IMAP track's (D-577).
+    public static let migrationIdentifiers = ["v1", "v2", "v3", "v4", "v5", "v6"]
 
     public static var migrator: DatabaseMigrator {
         var migrator = DatabaseMigrator()
@@ -25,6 +26,7 @@ public enum ArchiveSchema {
         migrator.registerMigration("v3", migrate: v3)
         migrator.registerMigration("v4", migrate: v4)
         migrator.registerMigration("v5", migrate: v5)
+        migrator.registerMigration("v6", migrate: v6)
         return migrator
     }
 
@@ -87,7 +89,9 @@ public enum ArchiveSchema {
         guard let current = known.last(where: applied.contains) else {
             return "Schema: none yet (made the first time this build writes to it). This build knows up to \(newest)."
         }
-        if current == newest { return "Schema: \(current). This build knows up to \(newest)." }
+        // A gap counts as outstanding too: an archive from a branch build can
+        // hold `v6` without `v5`, which the next write applies (D-577).
+        if current == newest, known.allSatisfy(applied.contains) { return "Schema: \(current). This build knows up to \(newest)." }
         return "Schema: \(current) (upgrades the next time this build writes to it). This build knows up to \(newest)."
     }
 
@@ -476,6 +480,29 @@ public enum ArchiveSchema {
             ALTER TABLE messages ADD COLUMN import_batch_id INTEGER REFERENCES import_batches(id)
                 CHECK ((import_batch_id IS NULL) = (origin = 'synced'));
             CREATE INDEX messages_imported ON messages(account_id, import_batch_id) WHERE origin = 'imported';
+            """)
+    }
+
+    // MARK: - v6
+
+    /// Server details for `imap` accounts (R-IMAP-1, D-577): a leaf table, so
+    /// no other account carries columns it never uses. Not secret: the
+    /// password is in the Keychain. `security` allows only implicit TLS
+    /// (D-570); STARTTLS would rebuild this table alone, which nothing
+    /// references. An older build never reads it, and already leaves an
+    /// `imap` account out of its list (D-025), so the reader level stays 1.
+    static func v6(_ db: Database) throws {
+        try db.execute(sql: """
+            CREATE TABLE account_servers (
+                account_id TEXT PRIMARY KEY NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+                host TEXT NOT NULL,
+                port INTEGER NOT NULL CHECK (port BETWEEN 1 AND 65535),
+                security TEXT NOT NULL CHECK (security IN ('tls')),
+                username TEXT NOT NULL,
+                preset TEXT,
+                capabilities TEXT,
+                capabilities_at INTEGER
+            ) STRICT;
             """)
     }
 

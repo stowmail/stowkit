@@ -63,6 +63,10 @@ public final class FakeIMAPServer: @unchecked Sendable {
     public var acceptedPasswords: Set<String> { get { sync { _acceptedPasswords } } set { sync { _acceptedPasswords = newValue } } }
     /// The usernames AUTHENTICATE PLAIN was sent, in order (never the passwords).
     public var plainUsers: [String] { sync { _plainUsers } }
+    /// The usernames LOGIN was sent, in order (never the passwords, D-570).
+    public var loginUsers: [String] { sync { _loginUsers } }
+    /// How many LOGIN arguments arrived as synchronising literals.
+    public var loginLiterals: Int { sync { _loginLiterals } }
     /// How many AUTHENTICATE PLAIN responses arrived as a continuation (no SASL-IR).
     public var plainContinuations: Int { sync { _plainContinuations } }
     /// Every byte received, for checking that nothing at all arrived.
@@ -120,6 +124,8 @@ public final class FakeIMAPServer: @unchecked Sendable {
     private var _acceptedTokens: Set<String> = ["good-token"]
     private var _acceptedPasswords: Set<String> = []
     private var _plainUsers: [String] = []
+    private var _loginUsers: [String] = []
+    private var _loginLiterals = 0
     private var _plainContinuations = 0
     private var _bytesReceived = 0
     private var _dropOn: Int?
@@ -186,6 +192,11 @@ public final class FakeIMAPServer: @unchecked Sendable {
         var pendingAuthTag: String?
         /// AUTHENTICATE PLAIN without an initial response, waiting for the credentials.
         var pendingPlainTag: String?
+        /// A command cut by a literal (`{n}` or `{n+}`): the text so far, the
+        /// literals read and how many bytes the current one still needs.
+        var partial = ""
+        var literals: [String] = []
+        var literalNeeded: Int?
         var closed = false
         init(_ connection: NWConnection) { self.connection = connection }
     }
@@ -205,10 +216,29 @@ public final class FakeIMAPServer: @unchecked Sendable {
                 client.buffer.append(data)
                 self._bytesReceived += data.count
             }
-            while let range = client.buffer.range(of: Data("\r\n".utf8)) {
+            while true {
+                if let needed = client.literalNeeded {
+                    guard client.buffer.count >= needed else { break }
+                    let bytes = client.buffer.prefix(needed)
+                    client.buffer.removeFirst(needed)
+                    client.partial += "{LIT\(client.literals.count)}"
+                    client.literals.append(String(decoding: bytes, as: UTF8.self))
+                    client.literalNeeded = nil
+                    continue
+                }
+                guard let range = client.buffer.range(of: Data("\r\n".utf8)) else { break }
                 let line = String(decoding: client.buffer[client.buffer.startIndex..<range.lowerBound], as: UTF8.self)
                 client.buffer.removeSubrange(client.buffer.startIndex..<range.upperBound)
-                self.handle(line, client)
+                if client.pendingPlainTag == nil, client.pendingAuthTag == nil, let (cut, count, synchronising) = Self.literalSuffix(line) {
+                    client.partial += cut
+                    client.literalNeeded = count
+                    if synchronising { self.send("+ Ready for literal\r\n", to: client) }
+                    continue
+                }
+                let full = client.partial + line
+                client.partial = ""
+                self.handle(full, client)
+                client.literals = []
                 if client.closed { return }
             }
             if isComplete || error != nil {
@@ -270,13 +300,19 @@ public final class FakeIMAPServer: @unchecked Sendable {
             verb = "UID " + rest[..<space].uppercased()
             rest = String(rest[rest.index(after: space)...])
         }
-        _log.append(verb == "AUTHENTICATE" ? "\(tag) AUTHENTICATE \(rest.split(separator: " ").first ?? "") [redacted]" : line)
+        switch verb {
+        case "AUTHENTICATE": _log.append("\(tag) AUTHENTICATE \(rest.split(separator: " ").first ?? "") [redacted]")
+        case "LOGIN": _log.append("\(tag) LOGIN [redacted]")
+        default: _log.append(line)
+        }
 
         switch verb {
         case "CAPABILITY":
             send("* CAPABILITY \(_capabilities.joined(separator: " "))\r\n\(tag) OK CAPABILITY completed\r\n", to: client)
         case "AUTHENTICATE":
             authenticate(tag: tag, rest: rest, client)
+        case "LOGIN":
+            login(tag: tag, rest: rest, client)
         case "LIST":
             var out = ""
             for mailbox in _mailboxes {
@@ -353,6 +389,76 @@ public final class FakeIMAPServer: @unchecked Sendable {
             let challenge = Data(#"{"status":"400","schemes":"Bearer","scope":"https://mail.google.com/"}"#.utf8).base64EncodedString()
             send("+ \(challenge)\r\n", to: client)
         }
+    }
+
+    /// LOGIN (RFC 9051) with two arguments, each an atom, a quoted string or a
+    /// literal (D-570). Refused at once if LOGINDISABLED is advertised.
+    private func login(tag: String, rest: String, _ client: Client) {
+        if _capabilities.contains(where: { $0.uppercased() == "LOGINDISABLED" }) {
+            send("\(tag) NO [PRIVACYREQUIRED] LOGIN is disabled\r\n", to: client)
+            return
+        }
+        _loginLiterals += client.literals.count
+        let arguments = Self.loginArguments(rest, literals: client.literals)
+        guard arguments.count == 2 else {
+            send("\(tag) BAD Malformed LOGIN\r\n", to: client)
+            return
+        }
+        _loginUsers.append(arguments[0])
+        if let failure = _authFailure {
+            send("\(tag) NO \(failure)\r\n", to: client)
+        } else if _acceptedPasswords.contains("\(arguments[0]) \(arguments[1])") {
+            send("\(tag) OK [CAPABILITY \(_capabilities.filter { !$0.uppercased().hasPrefix("AUTH=") }.joined(separator: " "))] Logged in\r\n", to: client)
+        } else {
+            send("\(tag) NO [AUTHENTICATIONFAILED] Authentication failed.\r\n", to: client) // Dovecot's wording
+        }
+    }
+
+    /// Splits LOGIN's arguments: quoted strings (with `\\` escapes), literals
+    /// (the `{LITn}` markers the reader left) and atoms.
+    static func loginArguments(_ text: String, literals: [String]) -> [String] {
+        var result: [String] = []
+        var index = text.startIndex
+        while index < text.endIndex {
+            let character = text[index]
+            if character == " " {
+                index = text.index(after: index)
+            } else if character == "\"" {
+                var value = ""
+                var escaping = false
+                index = text.index(after: index)
+                while index < text.endIndex {
+                    let next = text[index]
+                    index = text.index(after: index)
+                    if escaping { value.append(next); escaping = false }
+                    else if next == "\\" { escaping = true }
+                    else if next == "\"" { break }
+                    else { value.append(next) }
+                }
+                result.append(value)
+            } else {
+                let end = text[index...].firstIndex(of: " ") ?? text.endIndex
+                let word = String(text[index..<end])
+                if word.hasPrefix("{LIT"), word.hasSuffix("}"), let number = Int(word.dropFirst(4).dropLast()), number < literals.count {
+                    result.append(literals[number])
+                } else {
+                    result.append(word)
+                }
+                index = end
+            }
+        }
+        return result
+    }
+
+    /// `{n}` (synchronising) or `{n+}` (LITERAL+) at the end of a line: the
+    /// line without it, the byte count and whether the client waits for `+`.
+    static func literalSuffix(_ line: String) -> (String, Int, Bool)? {
+        guard line.hasSuffix("}"), let open = line.lastIndex(of: "{") else { return nil }
+        var inside = line[line.index(after: open)..<line.index(before: line.endIndex)]
+        let synchronising = !inside.hasSuffix("+")
+        if !synchronising { inside = inside.dropLast() }
+        guard let count = Int(inside) else { return nil }
+        return (String(line[..<open]), count, synchronising)
     }
 
     /// RFC 4616: `authzid NUL user NUL password`, base64.
