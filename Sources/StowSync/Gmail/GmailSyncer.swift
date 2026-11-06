@@ -34,7 +34,15 @@ extension AccountSyncer: MailSyncer {}
 ///    leaves the queue; one that keeps failing is recorded as unfetchable after
 ///    `unfetchableThreshold` runs (D-113, D-115).
 ///
-/// Changes after the listing (`history.list`, D-038, D-039) are step 5.
+/// Once the first listing has finished, each run reads `history.list` from the
+/// stored history ID instead: new messages are queued, label and read-state
+/// changes applied, and messages moved to Spam or Bin or deleted are classified
+/// (D-039). A history ID Gmail no longer knows (404) falls back to a full
+/// listing and check. With `checkChanges: .full` (every six hours, D-038) the
+/// run also lists every ID again and classifies what is missing.
+///
+/// Labels are read at the start of each run and stored by their stable ID, with
+/// the names Gmail sync always stored (D-595).
 public struct GmailSyncer: MailSyncer {
     public let account: Account
     let client: GmailClient
@@ -125,13 +133,31 @@ public struct GmailSyncer: MailSyncer {
         onEvent(.connected(attempt: attempt))
         let allMail = try await state.gmailAllMail(account.id)
         onEvent(.folderPlanned(toSync: 1, skipped: 0))
+        let labels = try await readLabels()
 
-        // 1. List, until a full listing has finished once.
-        var listingDone = try await state.gmailState(account.id)?.fullListingCompletedAt != nil
+        // 1. List, until a full listing has finished once; then read what changed.
+        let saved = try await state.gmailState(account.id)
+        var listingDone = saved?.fullListingCompletedAt != nil
         if !listingDone {
             try await state.beginGmailSync(account.id)
-            let finished = try await list(historyID: profile.historyID, options: options, report: &report)
-            listingDone = finished
+            listingDone = try await list(historyID: profile.historyID, options: options, report: &report)
+            onEvent(.folderListed(index: 0, of: 1, newMessages: report.queued))
+        } else if !options.listOnly {
+            var needsFullCheck = options.checkChanges == .full
+            if let start = saved?.historyID {
+                do {
+                    try await readHistory(from: start, labels: labels, report: &report)
+                } catch is GmailNotFound {
+                    // Gmail no longer has history that far back (D-597): list everything again.
+                    logger.notice("History ID too old; checking the whole mailbox", metadata: ["account": "\(account.id)"])
+                    needsFullCheck = true
+                }
+            } else {
+                needsFullCheck = true
+            }
+            if needsFullCheck {
+                try await fullCheck(historyID: profile.historyID, options: options, report: &report, onEvent: onEvent)
+            }
             onEvent(.folderListed(index: 0, of: 1, newMessages: report.queued))
         }
         report.foldersSynced = 1
@@ -140,7 +166,7 @@ public struct GmailSyncer: MailSyncer {
         // 2. Download from the queue, best priority first.
         let totals = try await state.queueTotals(account.id)
         if totals.queued > 0 { onEvent(.downloading(queued: totals.queued, bytes: totals.queuedBytes)) }
-        report.outcome = try await download(allMail: allMail, options: options, runID: runID, report: &report, onEvent: onEvent)
+        report.outcome = try await download(allMail: allMail, labels: labels, options: options, runID: runID, report: &report, onEvent: onEvent)
         if listingDone { try await state.gmailQueueChecked(account.id, at: now()) }
     }
 
@@ -148,10 +174,11 @@ public struct GmailSyncer: MailSyncer {
 
     /// Pages through All Mail without Spam and Bin. Returns whether the listing
     /// reached its last page; a deadline stops it between pages.
-    private func list(historyID: UInt64, options: SyncOptions, report: inout SyncReport) async throws -> Bool {
+    private func list(historyID: UInt64, options: SyncOptions, report: inout SyncReport, seen: ((Set<UInt64>) -> Void)? = nil) async throws -> Bool {
         var pageToken: String?
         repeat {
             let page = try await client.messages(GmailMessageListQuery(includeSpamTrash: false, pageToken: pageToken))
+            seen?(Set(page.messages.map(\.id.number)))
             let sort = try await state.sortGmailListing(account.id, ids: page.messages.map(\.id.number), at: now())
             if sort.adopted > 0 {
                 logger.info("Adopted messages archived before", metadata: ["account": "\(account.id)", "count": "\(sort.adopted)"])
@@ -192,7 +219,7 @@ public struct GmailSyncer: MailSyncer {
 
     // MARK: - 2. Downloading
 
-    private func download(allMail: String, options: SyncOptions, runID: String, report: inout SyncReport,
+    private func download(allMail: String, labels: [String: String], options: SyncOptions, runID: String, report: inout SyncReport,
                           onEvent: @Sendable (SyncEvent) -> Void) async throws -> SyncOutcome {
         var batches = 0
         while true {
@@ -228,6 +255,7 @@ public struct GmailSyncer: MailSyncer {
                 guard let raw = message.raw else { failed.append(queued.gmailID); continue }
                 try await sink.write(RawMessage(
                     key: .gmailAPI(accountID: account.id, allMail: allMail),
+                    labels: Self.labelNames(message.labelIDs, labels),
                     gmailMessageID: queued.gmailID,
                     gmailThreadID: message.threadID.number,
                     internalDate: message.internalDate ?? queued.internalDate ?? now(),
@@ -262,8 +290,7 @@ public struct GmailSyncer: MailSyncer {
 
     /// Gmail's read and starred state as the IMAP flags Gmail sync always
     /// stored, so a message looks the same whichever way it arrived:
-    /// no `UNREAD` label is `\Seen`, `STARRED` is `\Flagged`. Labels themselves
-    /// are step 4.
+    /// no `UNREAD` label is `\Seen`, `STARRED` is `\Flagged`.
     static func flags(_ labels: [GmailLabelID]) -> [String] {
         let names = Set(labels.map(\.rawValue))
         var flags: [String] = []
@@ -271,4 +298,156 @@ public struct GmailSyncer: MailSyncer {
         if !names.contains("UNREAD") { flags.append("\\Seen") }
         return flags
     }
+
+    // MARK: - Labels (D-595)
+
+    /// Gmail's system labels by the names Gmail sync stores from `X-GM-LABELS`
+    /// (and Takeout import uses, D-566). Other system labels (`UNREAD`, `SPAM`,
+    /// `TRASH`, `CATEGORY_*`, `CHAT`) are not labels in the archive: read state is
+    /// a flag, Spam and Bin a source state, tabs are dropped.
+    static let systemLabelNames = ["INBOX": "\\Inbox", "SENT": "\\Sent", "IMPORTANT": "\\Important",
+                                   "STARRED": "\\Starred", "DRAFT": "\\Draft"]
+
+    /// Reads `labels.list` and stores the labels by ID; returns ID to stored name.
+    private func readLabels() async throws -> [String: String] {
+        var names: [String: String] = [:]
+        for label in try await client.labels() {
+            if label.type == .user {
+                names[label.id.rawValue] = label.name
+            } else if let name = Self.systemLabelNames[label.id.rawValue] {
+                names[label.id.rawValue] = name
+            }
+        }
+        // System labels are always there, whether or not labels.list named them.
+        for (id, name) in Self.systemLabelNames where names[id] == nil { names[id] = name }
+        try await state.recordGmailLabels(account.id, names.map { GmailLabelName(id: $0.key, name: $0.value) }.sorted { $0.id < $1.id })
+        return names
+    }
+
+    static func labelNames(_ ids: [GmailLabelID], _ names: [String: String]) -> [String] {
+        ids.compactMap { names[$0.rawValue] }
+    }
+
+    // MARK: - Changes at Gmail (brief step 5)
+
+    /// Reads every page of `history.list` from `start` and applies it. New
+    /// messages (and ones taken back out of Spam or Bin that the archive does not
+    /// have) are queued; label and read-state changes go to archived copies;
+    /// messages moved to Spam or Bin, or deleted, are classified (D-039).
+    private func readHistory(from start: UInt64, labels: [String: String], report: inout SyncReport) async throws {
+        var pageToken: String?
+        var newest = start
+        repeat {
+            let page = try await client.history(GmailHistoryQuery(startHistoryID: start, pageToken: pageToken))
+            newest = max(newest, page.historyID)
+            var added: [UInt64: UInt64] = [:]
+            var changes: [GmailCopyChange] = []
+            var states: [SourceState: [UInt64]] = [:]
+            for record in page.history {
+                for change in record.messagesAdded {
+                    let ids = Set(change.message.labelIDs)
+                    if ids.contains(.spam) || ids.contains(.trash) { continue }
+                    added[change.message.id.number] = change.message.threadID.number
+                }
+                for change in record.messagesDeleted {
+                    states[.gone, default: []].append(change.message.id.number)
+                }
+                for change in record.labelsAdded {
+                    let id = change.message.id.number
+                    if change.labelIDs.contains(.spam) {
+                        states[.spam, default: []].append(id)
+                    } else if change.labelIDs.contains(.trash) {
+                        states[.trashed, default: []].append(id)
+                    }
+                    changes.append(Self.copyChange(id, added: change.labelIDs, removed: [], labels: labels))
+                }
+                for change in record.labelsRemoved {
+                    let id = change.message.id.number
+                    let current = Set(change.message.labelIDs)
+                    let leftSpamOrBin = change.labelIDs.contains(.spam) || change.labelIDs.contains(.trash)
+                    if leftSpamOrBin, !current.contains(.spam), !current.contains(.trash) {
+                        // Back in All Mail: present again if archived, queued if not.
+                        states[.present, default: []].append(id)
+                        added[id] = change.message.threadID.number
+                    }
+                    changes.append(Self.copyChange(id, added: [], removed: change.labelIDs, labels: labels))
+                }
+            }
+            report.flagsUpdated += try await state.applyGmailChanges(account.id, changes, at: now())
+            for sourceState in [SourceState.present, .spam, .trashed, .gone] {
+                guard let ids = states[sourceState], !ids.isEmpty else { continue }
+                let changed = try await state.setGmailSourceStates(account.id, ids: ids, sourceState, at: now())
+                if sourceState != .present, changed > 0 { report.sourceChanges[sourceState, default: 0] += changed }
+            }
+            if !added.isEmpty {
+                let sort = try await state.sortGmailListing(account.id, ids: added.keys.sorted(), at: now())
+                var queued: [GmailQueuedMessage] = []
+                for id in sort.new {
+                    if let message = try await describe(id, thread: added[id]) { queued.append(message) }
+                }
+                report.queued += try await state.enqueueGmail(account.id, queued)
+            }
+            pageToken = page.nextPageToken
+        } while pageToken != nil
+        try await state.gmailHistoryRead(account.id, historyID: newest, at: now())
+    }
+
+    /// Labels and flags a history label change means for an archived copy.
+    static func copyChange(_ id: UInt64, added: [GmailLabelID], removed: [GmailLabelID], labels: [String: String]) -> GmailCopyChange {
+        func has(_ ids: [GmailLabelID], _ name: String) -> Bool { ids.contains { $0.rawValue == name } }
+        return GmailCopyChange(
+            gmailID: id,
+            addLabels: labelNames(added, labels),
+            removeLabels: labelNames(removed, labels),
+            addFlags: (has(removed, "UNREAD") ? ["\\Seen"] : []) + (has(added, "STARRED") ? ["\\Flagged"] : []),
+            removeFlags: (has(added, "UNREAD") ? ["\\Seen"] : []) + (has(removed, "STARRED") ? ["\\Flagged"] : [])
+        )
+    }
+
+    /// The full check (D-038, D-039): lists every ID in All Mail again (queuing
+    /// anything missed and putting back anything that returned), then classifies
+    /// archived messages Gmail no longer lists there by looking up the IDs in
+    /// Spam and Bin. IDs only, never content.
+    private func fullCheck(historyID: UInt64, options: SyncOptions, report: inout SyncReport,
+                           onEvent: @Sendable (SyncEvent) -> Void) async throws {
+        let archived = try await state.gmailArchivedIDs(account.id)
+        let listed = ListedIDs()
+        let finished = try await list(historyID: historyID, options: SyncOptions(), report: &report) { listed.add($0) }
+        guard finished else { return }
+        let missing = archived.subtracting(listed.ids)
+        var removed = 0
+        if !missing.isEmpty {
+            let spam = try await ids(labeled: .spam)
+            let trash = try await ids(labeled: .trash)
+            var byState: [SourceState: [UInt64]] = [:]
+            for id in missing {
+                byState[spam.contains(id) ? .spam : trash.contains(id) ? .trashed : .gone, default: []].append(id)
+            }
+            for (sourceState, ids) in byState {
+                let changed = try await state.setGmailSourceStates(account.id, ids: ids.sorted(), sourceState, at: now())
+                if changed > 0 { report.sourceChanges[sourceState, default: 0] += changed }
+                removed += changed
+            }
+        }
+        try await state.gmailFullChecked(account.id, at: now())
+        onEvent(.changesChecked(flagsUpdated: report.flagsUpdated, removedAtSource: removed))
+    }
+
+    /// Every message ID carrying a label, Spam and Bin included in the search.
+    private func ids(labeled label: GmailLabelID) async throws -> Set<UInt64> {
+        var found = Set<UInt64>()
+        var pageToken: String?
+        repeat {
+            let page = try await client.messages(GmailMessageListQuery(labelIDs: [label], includeSpamTrash: true, pageToken: pageToken))
+            found.formUnion(page.messages.map(\.id.number))
+            pageToken = page.nextPageToken
+        } while pageToken != nil
+        return found
+    }
+}
+
+/// IDs a listing saw, collected page by page.
+private final class ListedIDs {
+    private(set) var ids = Set<UInt64>()
+    func add(_ more: Set<UInt64>) { ids.formUnion(more) }
 }

@@ -8,7 +8,8 @@ import StowTestSupport
 import Testing
 
 /// Plays the Gmail API for the same fixtures and Gmail IDs that `gmailServer`
-/// serves over IMAP, so an account synced by IMAP can move to the API.
+/// serves over IMAP, so an account synced by IMAP can move to the API. It keeps
+/// a history of the changes the tests make, as Gmail does.
 actor FakeGmailAPI: GmailTransport {
     struct Message {
         var id: UInt64
@@ -16,9 +17,19 @@ actor FakeGmailAPI: GmailTransport {
         var labels: [String]
     }
 
+    enum Change {
+        case added(UInt64), deleted(UInt64), labelsAdded(UInt64, [String]), labelsRemoved(UInt64, [String])
+    }
+
     var messages: [Message]
+    /// Deleted for good: gone from every listing, still named in history.
+    var deleted: [UInt64: Message] = [:]
+    var userLabels: [(id: String, name: String)] = []
+    var history: [(id: UInt64, change: Change)] = []
+    var historyID: UInt64
+    /// Gmail keeps no history before this; an older start ID gets a 404.
+    var historyFloor: UInt64 = 0
     let pageSize: Int
-    let historyID: UInt64
     /// IDs whose `raw` fetch answers with a reply Stow cannot read.
     var unreadable: Set<UInt64> = []
     private(set) var paths: [String] = []
@@ -31,16 +42,53 @@ actor FakeGmailAPI: GmailTransport {
         self.historyID = historyID
     }
 
+    private func record(_ change: Change) {
+        historyID += 1
+        history.append((historyID, change))
+    }
+
     func remove(_ id: UInt64) { messages.removeAll { $0.id == id } }
     func setUnreadable(_ ids: Set<UInt64>) { unreadable = ids }
+    func addUserLabel(_ id: String, _ name: String) { userLabels.append((id, name)) }
+    func renameUserLabel(_ id: String, to name: String) {
+        userLabels = userLabels.map { $0.id == id ? (id, name) : $0 }
+    }
+    func expireHistory() { historyFloor = historyID + 1 }
+
+    func deliver(_ bytes: Data, id: UInt64, labels: [String] = ["INBOX", "UNREAD"]) {
+        messages.append(Message(id: id, bytes: bytes, labels: labels))
+        record(.added(id))
+    }
+
+    func label(_ id: UInt64, add: [String] = [], remove: [String] = [], quietly: Bool = false) {
+        guard let index = messages.firstIndex(where: { $0.id == id }) else { return }
+        let added = add.filter { !messages[index].labels.contains($0) }
+        let removed = remove.filter { messages[index].labels.contains($0) }
+        messages[index].labels = messages[index].labels.filter { !removed.contains($0) } + added
+        if quietly { return }
+        if !added.isEmpty { record(.labelsAdded(id, added)) }
+        if !removed.isEmpty { record(.labelsRemoved(id, removed)) }
+    }
+
+    func delete(_ id: UInt64) {
+        guard let index = messages.firstIndex(where: { $0.id == id }) else { return }
+        deleted[id] = messages.remove(at: index)
+        record(.deleted(id))
+    }
 
     var rawFetches: Int { paths.filter { $0.contains("format=raw") }.count }
+
+    private func ref(_ id: UInt64) -> String {
+        let hex = String(id, radix: 16)
+        let labels = (messages.first { $0.id == id } ?? deleted[id])?.labels ?? []
+        return #"{"id":"\#(hex)","threadId":"\#(hex)","labelIds":[\#(labels.map { "\"\($0)\"" }.joined(separator: ","))]}"#
+    }
 
     func send(_ request: GmailGet, accessToken: String) async throws -> GmailHTTPResponse {
         let url = request.url
         paths.append(url.path + "?" + (url.query ?? ""))
-        let query = Dictionary((URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []).map { ($0.name, $0.value ?? "") },
-                               uniquingKeysWith: { first, _ in first })
+        let items = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []
+        let query = Dictionary(items.map { ($0.name, $0.value ?? "") }, uniquingKeysWith: { first, _ in first })
         let rest = url.path.replacingOccurrences(of: "/gmail/v1/users/me/", with: "")
         func json(_ text: String, status: Int = 200) -> GmailHTTPResponse {
             GmailHTTPResponse(status: status, body: Data(text.utf8))
@@ -48,12 +96,38 @@ actor FakeGmailAPI: GmailTransport {
         switch rest {
         case "profile":
             return json(#"{"emailAddress":"sam@example.com","messagesTotal":\#(messages.count),"historyId":"\#(historyID)"}"#)
+        case "labels":
+            let system = ["INBOX", "SENT", "IMPORTANT", "STARRED", "UNREAD", "SPAM", "TRASH", "DRAFT", "CATEGORY_UPDATES", "CHAT"]
+                .map { #"{"id":"\#($0)","name":"\#($0)","type":"system"}"# }
+            let user = userLabels.map { #"{"id":"\#($0.id)","name":"\#($0.name)","type":"user"}"# }
+            return json(#"{"labels":[\#((system + user).joined(separator: ","))]}"#)
+        case "history":
+            let start = UInt64(query["startHistoryId"] ?? "0") ?? 0
+            guard start >= historyFloor else { return json(#"{"error":{"code":404,"errors":[{"reason":"notFound"}]}}"#, status: 404) }
+            var records: [String] = []
+            for (id, change) in history where id > start {
+                switch change {
+                case .added(let m): records.append(#"{"id":"\#(id)","messagesAdded":[{"message":\#(ref(m))}]}"#)
+                case .deleted(let m): records.append(#"{"id":"\#(id)","messagesDeleted":[{"message":\#(ref(m))}]}"#)
+                case .labelsAdded(let m, let l):
+                    records.append(#"{"id":"\#(id)","labelsAdded":[{"message":\#(ref(m)),"labelIds":[\#(l.map { "\"\($0)\"" }.joined(separator: ","))]}]}"#)
+                case .labelsRemoved(let m, let l):
+                    records.append(#"{"id":"\#(id)","labelsRemoved":[{"message":\#(ref(m)),"labelIds":[\#(l.map { "\"\($0)\"" }.joined(separator: ","))]}]}"#)
+                }
+            }
+            return json(#"{"history":[\#(records.joined(separator: ","))],"historyId":"\#(historyID)"}"#)
         case "messages":
+            let wanted = items.filter { $0.name == "labelIds" }.compactMap(\.value)
+            let withSpamTrash = query["includeSpamTrash"] == "true"
+            let matching = messages.filter { message in
+                (withSpamTrash || !(message.labels.contains("SPAM") || message.labels.contains("TRASH")))
+                    && wanted.allSatisfy(message.labels.contains)
+            }
             let start = Int(query["pageToken"] ?? "0") ?? 0
-            let page = messages.dropFirst(start).prefix(pageSize)
+            let page = matching.dropFirst(start).prefix(pageSize)
             let refs = page.map { #"{"id":"\#(String($0.id, radix: 16))","threadId":"\#(String($0.id, radix: 16))"}"# }.joined(separator: ",")
-            let next = start + pageSize < messages.count ? #","nextPageToken":"\#(start + pageSize)""# : ""
-            return json(#"{"messages":[\#(refs)]\#(next),"resultSizeEstimate":\#(messages.count)}"#)
+            let next = start + pageSize < matching.count ? #","nextPageToken":"\#(start + pageSize)""# : ""
+            return json(#"{"messages":[\#(refs)]\#(next),"resultSizeEstimate":\#(matching.count)}"#)
         default:
             let hex = String(rest.dropFirst("messages/".count))
             guard let id = UInt64(hex, radix: 16), let message = messages.first(where: { $0.id == id }) else {
@@ -249,4 +323,180 @@ final class CrashingSink: RawMessageSink, @unchecked Sendable {
     }
 
     func flush() async throws {}
+}
+
+/// Brief steps 4 and 5 (D-595 to D-597): labels, threads, and changes at Gmail.
+@Suite(.serialized) struct GmailAPIChangesTests {
+    let base: UInt64 = 1_900_000_000_000
+
+    func syncer(_ harness: EngineHarness, _ api: FakeGmailAPI) -> GmailSyncer {
+        let store = ArchiveSyncStore(archive: harness.archive)
+        let client = GmailClient(account: harness.account.id, transport: api, markNeedsSignIn: {}) { _ in "token" }
+        return GmailSyncer(account: harness.account, client: client, sink: store, state: store,
+                           budget: ByteBudget(limit: nil, fileURL: nil), sleep: { _ in })
+    }
+
+    /// Per Gmail ID: the label names present, the All Mail flags, the thread key and the source state.
+    func places(_ harness: EngineHarness) async throws -> [UInt64: String] {
+        try await harness.archive.database.read { db in
+            var result: [UInt64: String] = [:]
+            for row in try Row.fetchAll(db, sql: """
+                SELECT m.gmail_msgid AS id, m.thread_key, m.source_state,
+                    (SELECT group_concat(name, ',') FROM (SELECT f.name FROM message_folders mf JOIN folders f ON f.id = mf.folder_id
+                        WHERE mf.message_id = m.id AND f.kind = 'label' AND mf.removed_from_server_at IS NULL ORDER BY f.name)) AS labels,
+                    (SELECT mf.flags FROM message_folders mf JOIN folders f ON f.id = mf.folder_id
+                        WHERE mf.message_id = m.id AND f.special_use = '\\all') AS flags
+                FROM messages m
+                """) {
+                let labels: String? = row["labels"]
+                let flags: String? = row["flags"]
+                let thread: String = row["thread_key"]
+                let state: String = row["source_state"]
+                result[UInt64(bitPattern: row["id"])] = "\(labels ?? "") | \(flags ?? "") | \(thread) | \(state)"
+            }
+            return result
+        }
+    }
+
+    /// QA: a message looks the same whichever way it arrived: label names, read
+    /// state and thread as IMAP sync stored them (D-595).
+    @Test func labelsFlagsAndThreadsMatchIMAP() async throws {
+        let fixtures = try TestFixtures.small()
+        let imap = try await EngineHarness(server: gmailServer(fixtures))
+        defer { imap.cleanUp() }
+        _ = try await imap.run()
+        let api = try await EngineHarness(server: gmailServer(fixtures))
+        defer { api.cleanUp() }
+        _ = try await syncer(api, FakeGmailAPI(fixtures)).run()
+        let viaIMAP = try await places(imap)
+        let viaAPI = try await places(api)
+        #expect(viaAPI.count == fixtures.count)
+        #expect(viaAPI == viaIMAP)
+        #expect(viaAPI[base]?.hasPrefix("\\Inbox | \\Seen | g:") == true)
+        // Tabs, Spam, Bin and read state are not labels in the archive.
+        #expect(try api.count("folders", "kind = 'label' AND (name LIKE 'CATEGORY%' OR name IN ('UNREAD', 'SPAM', 'TRASH', 'CHAT'))") == 0)
+    }
+
+    /// A label renamed in Gmail is renamed in the archive, found by its ID; a
+    /// label of the new name already there becomes the same label (D-595).
+    @Test func aRenamedLabelKeepsItsMessages() async throws {
+        let fixtures = try TestFixtures.small()
+        let harness = try await EngineHarness(server: gmailServer(fixtures))
+        defer { harness.cleanUp() }
+        let gmail = FakeGmailAPI(fixtures)
+        await gmail.addUserLabel("Label_7", "Receipts")
+        await gmail.label(base + 1, add: ["Label_7"], quietly: true)
+        _ = try await syncer(harness, gmail).run()
+        #expect(try await places(harness)[base + 1]?.hasPrefix("Receipts,\\Inbox |") == true)
+
+        // An IMAP-era label "Bills" with another message on it, then the rename.
+        let message2 = try await harness.archive.database.read { db in
+            try Int64.fetchOne(db, sql: "SELECT id FROM messages WHERE gmail_msgid = ?", arguments: [Int64(self.base + 2)])!
+        }
+        try await harness.archive.database.write { db in
+            try db.execute(sql: "INSERT INTO folders (account_id, name, kind) VALUES (?, 'Bills', 'label')", arguments: [harness.account.id.rawValue])
+            try db.execute(sql: "INSERT INTO message_folders (message_id, folder_id, last_seen_at) VALUES (?, ?, 0)",
+                           arguments: [message2, db.lastInsertedRowID])
+        }
+        await gmail.renameUserLabel("Label_7", to: "Bills")
+        _ = try await syncer(harness, gmail).run()
+        let after = try await places(harness)
+        #expect(after[base + 1]?.hasPrefix("Bills,\\Inbox |") == true)
+        #expect(after[base + 2]?.hasPrefix("Bills,\\Inbox |") == true)
+        #expect(try harness.count("folders", "kind = 'label' AND name IN ('Receipts', 'Bills')") == 1)
+        #expect(try harness.count("folders", "kind = 'label' AND name = 'Bills' AND provider_id = 'Label_7'") == 1)
+    }
+
+    /// QA: history picks up new mail, label changes and deletions; Spam and Bin
+    /// are classified, and nothing is ever deleted from the archive (D-596).
+    @Test func historyBringsNewMailLabelChangesAndRemovals() async throws {
+        let fixtures = try TestFixtures.small()
+        #expect(fixtures.count >= 6)
+        let harness = try await EngineHarness(server: gmailServer(fixtures))
+        defer { harness.cleanUp() }
+        let gmail = FakeGmailAPI(Array(fixtures.prefix(5)))
+        await gmail.addUserLabel("Label_1", "Travel")
+        _ = try await syncer(harness, gmail).run()
+        #expect(try harness.count("messages") == 5)
+
+        await gmail.deliver(fixtures[5].bytes, id: base + 5)       // new mail
+        await gmail.label(base, add: ["STARRED", "Label_1"])        // starred and labelled
+        await gmail.label(base + 1, remove: ["UNREAD"])             // read on the web
+        await gmail.label(base + 2, add: ["TRASH"])                 // binned
+        await gmail.label(base + 3, add: ["SPAM"])                  // marked spam
+        await gmail.delete(base + 4)                                // deleted for good
+        let report = try await syncer(harness, gmail).run()
+        #expect(report.messagesWritten == 1 && report.queued == 1)
+        #expect(report.sourceChanges == [.trashed: 1, .spam: 1, .gone: 1])
+
+        let now = try await places(harness)
+        #expect(now.count == 6)
+        #expect(now[base]?.hasPrefix("Travel,\\Inbox,\\Starred | \\Flagged \\Seen |") == true)
+        #expect(now[base + 1]?.hasPrefix("\\Inbox | \\Seen |") == true)
+        #expect(now[base + 2]?.hasSuffix("| trashed") == true)
+        #expect(now[base + 3]?.hasSuffix("| spam") == true)
+        #expect(now[base + 4]?.hasSuffix("| gone") == true)
+        #expect(now[base + 5]?.hasPrefix("\\Inbox |  |") == true)
+
+        // Taken back out of the Bin: present again, nothing downloaded twice.
+        await gmail.label(base + 2, remove: ["TRASH"])
+        let back = try await syncer(harness, gmail).run()
+        #expect(back.messagesWritten == 0)
+        #expect(try await places(harness)[base + 2]?.hasSuffix("| present") == true)
+        #expect(try harness.count("messages") == 6)
+        let state = try #require(try await ArchiveSyncStore(archive: harness.archive).gmailState(harness.account.id))
+        #expect(state.historyID == (await gmail.historyID))
+    }
+
+    /// Spam that arrives is not archived (D-104); moved out of Spam, it is.
+    @Test func mailDeliveredToSpamIsQueuedOnlyWhenTakenOut() async throws {
+        let fixtures = try TestFixtures.small()
+        let harness = try await EngineHarness(server: gmailServer(fixtures))
+        defer { harness.cleanUp() }
+        let gmail = FakeGmailAPI(Array(fixtures.prefix(2)))
+        _ = try await syncer(harness, gmail).run()
+        await gmail.deliver(fixtures[2].bytes, id: base + 2, labels: ["SPAM", "UNREAD"])
+        #expect(try await syncer(harness, gmail).run().queued == 0)
+        await gmail.label(base + 2, remove: ["SPAM"])
+        await gmail.label(base + 2, add: ["INBOX"])
+        let report = try await syncer(harness, gmail).run()
+        #expect(report.queued == 1 && report.messagesWritten == 1)
+    }
+
+    /// A history ID Gmail no longer keeps (404) falls back to a full listing and
+    /// check, which finds what history would have said (D-597).
+    @Test func anExpiredHistoryIDFallsBackToAFullCheck() async throws {
+        let fixtures = try TestFixtures.small()
+        let harness = try await EngineHarness(server: gmailServer(fixtures))
+        defer { harness.cleanUp() }
+        let gmail = FakeGmailAPI(Array(fixtures.prefix(5)))
+        _ = try await syncer(harness, gmail).run()
+        await gmail.label(base + 1, add: ["TRASH"])
+        await gmail.delete(base + 2)
+        await gmail.deliver(fixtures[5].bytes, id: base + 5)
+        await gmail.expireHistory()
+        let report = try await syncer(harness, gmail).run()
+        #expect(report.sourceChanges == [.trashed: 1, .gone: 1])
+        #expect(report.messagesWritten == 1)
+        let state = try #require(try await ArchiveSyncStore(archive: harness.archive).gmailState(harness.account.id))
+        #expect(state.historyID == (await gmail.historyID))
+        #expect(state.lastFullCheckAt != nil)
+        // The Spam and Bin lookups ask for IDs only.
+        let lookups = await gmail.paths.filter { $0.contains("labelIds=") }
+        #expect(lookups.count == 2 && lookups.allSatisfy { $0.contains("includeSpamTrash=true") && !$0.contains("format=") })
+    }
+
+    /// The six-hourly full check catches a change history never reported.
+    @Test func theFullCheckFindsWhatHistoryMissed() async throws {
+        let fixtures = try TestFixtures.small()
+        let harness = try await EngineHarness(server: gmailServer(fixtures))
+        defer { harness.cleanUp() }
+        let gmail = FakeGmailAPI(Array(fixtures.prefix(4)))
+        _ = try await syncer(harness, gmail).run()
+        await gmail.label(base + 3, add: ["SPAM"], quietly: true)
+        #expect(try await syncer(harness, gmail).run(SyncOptions(checkChanges: .quick)).sourceChanges.isEmpty)
+        let full = try await syncer(harness, gmail).run(SyncOptions(checkChanges: .full))
+        #expect(full.sourceChanges == [.spam: 1])
+        #expect(try await places(harness)[base + 3]?.hasSuffix("| spam") == true)
+    }
 }

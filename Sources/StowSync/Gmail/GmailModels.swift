@@ -49,14 +49,29 @@ struct GmailLabelList: Decodable, Sendable {
     enum CodingKeys: String, CodingKey { case labels }
 }
 
-/// A message as `users.messages.list` names it.
+/// A message as `users.messages.list` and `users.history.list` name it.
+/// History also sends its labels; a listing does not.
 struct GmailMessageRef: Decodable, Sendable, Equatable {
     var id: GmailMessageID
     var threadID: GmailMessageID
+    var labelIDs: [GmailLabelID] = []
 
     enum CodingKeys: String, CodingKey {
-        case id
+        case id, labelIds
         case threadID = "threadId"
+    }
+
+    init(id: GmailMessageID, threadID: GmailMessageID, labelIDs: [GmailLabelID] = []) {
+        self.id = id
+        self.threadID = threadID
+        self.labelIDs = labelIDs
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(GmailMessageID.self, forKey: .id)
+        threadID = try container.decode(GmailMessageID.self, forKey: .threadID)
+        labelIDs = try container.decodeIfPresent([GmailLabelID].self, forKey: .labelIds) ?? []
     }
 }
 

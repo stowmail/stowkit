@@ -197,6 +197,148 @@ extension ArchiveSyncStore: GmailSyncStateStore {
         }
     }
 
+    // MARK: - Labels and changes (brief steps 4 and 5)
+
+    public func recordGmailLabels(_ account: AccountID, _ labels: [GmailLabelName]) async throws {
+        try await database.write { db in
+            for label in labels {
+                let byID = try Row.fetchOne(db, sql: """
+                    SELECT id, name FROM folders WHERE account_id = ? AND kind = 'label' AND provider_id = ?
+                    """, arguments: [account.rawValue, label.id])
+                let byName = try Int64.fetchOne(db, sql: """
+                    SELECT id FROM folders WHERE account_id = ? AND kind = 'label' AND name = ?
+                    """, arguments: [account.rawValue, label.name])
+                if let byID {
+                    let folder: Int64 = byID["id"]
+                    guard (byID["name"] as String) != label.name else { continue }
+                    // Renamed in Gmail (D-595). A row already holding the new name (IMAP's,
+                    // or an earlier label) is merged into this one first.
+                    if let other = byName, other != folder {
+                        try db.execute(sql: """
+                            INSERT INTO message_folders (message_id, folder_id, last_seen_at, removed_from_server_at)
+                            SELECT message_id, ?, last_seen_at, removed_from_server_at FROM message_folders WHERE folder_id = ?
+                            ON CONFLICT (message_id, folder_id) DO NOTHING
+                            """, arguments: [folder, other])
+                        try db.execute(sql: "DELETE FROM folders WHERE id = ?", arguments: [other])
+                    }
+                    try db.execute(sql: "UPDATE folders SET name = ? WHERE id = ?", arguments: [label.name, folder])
+                } else if let byName {
+                    // A label IMAP sync recorded by name: from now on it is known by its ID.
+                    try db.execute(sql: "UPDATE folders SET provider_id = ? WHERE id = ?", arguments: [label.id, byName])
+                } else {
+                    try db.execute(sql: "INSERT INTO folders (account_id, name, kind, provider_id) VALUES (?, ?, 'label', ?)",
+                                   arguments: [account.rawValue, label.name, label.id])
+                }
+            }
+        }
+    }
+
+    @discardableResult
+    public func applyGmailChanges(_ account: AccountID, _ changes: [GmailCopyChange], at: Date) async throws -> Int {
+        let now = Int(at.timeIntervalSince1970)
+        return try await database.write { db in
+            let allMail = try Self.allMail(db, account: account).id
+            var changed = 0
+            for change in changes where !change.isEmpty {
+                guard let message = try Self.message(db, account: account, gmailID: change.gmailID) else { continue }
+                var touched = false
+                for name in change.addLabels {
+                    let label = try Importer.folderID(db, account: account.rawValue, name: name, kind: "label")
+                    try db.execute(sql: """
+                        INSERT INTO message_folders (message_id, folder_id, last_seen_at) VALUES (?, ?, ?)
+                        ON CONFLICT (message_id, folder_id) DO UPDATE SET removed_from_server_at = NULL, last_seen_at = excluded.last_seen_at
+                        WHERE message_folders.removed_from_server_at IS NOT NULL
+                        """, arguments: [message, label, now])
+                    touched = touched || db.changesCount > 0
+                }
+                for name in change.removeLabels {
+                    try db.execute(sql: """
+                        UPDATE message_folders SET removed_from_server_at = ?
+                        WHERE message_id = ? AND removed_from_server_at IS NULL
+                            AND folder_id = (SELECT id FROM folders WHERE account_id = ? AND kind = 'label' AND name = ?)
+                        """, arguments: [now, message, account.rawValue, name])
+                    touched = touched || db.changesCount > 0
+                }
+                if !change.addFlags.isEmpty || !change.removeFlags.isEmpty,
+                   let current = try String.fetchOne(db, sql: "SELECT flags FROM message_folders WHERE message_id = ? AND folder_id = ?",
+                                                     arguments: [message, allMail]) {
+                    var flags = Set(current.split(separator: " ").map(String.init))
+                    flags.formUnion(change.addFlags)
+                    flags.subtract(change.removeFlags)
+                    let text = Importer.flagText(Array(flags))
+                    if text != current {
+                        try db.execute(sql: "UPDATE message_folders SET flags = ? WHERE message_id = ? AND folder_id = ?",
+                                       arguments: [text, message, allMail])
+                        touched = true
+                    }
+                }
+                if touched { changed += 1 }
+            }
+            return changed
+        }
+    }
+
+    public func gmailArchivedIDs(_ account: AccountID) async throws -> Set<UInt64> {
+        try await database.read { db in
+            Set(try Int64.fetchAll(db, sql: """
+                SELECT DISTINCT m.gmail_msgid FROM messages m
+                JOIN message_folders mf ON mf.message_id = m.id JOIN folders f ON f.id = mf.folder_id
+                WHERE m.account_id = ? AND m.gmail_msgid IS NOT NULL AND f.account_id = m.account_id
+                  AND f.special_use = '\\all' AND mf.removed_from_server_at IS NULL
+                """, arguments: [account.rawValue]).map { UInt64(bitPattern: $0) })
+        }
+    }
+
+    @discardableResult
+    public func setGmailSourceStates(_ account: AccountID, ids: [UInt64], _ state: SourceState, at: Date) async throws -> Int {
+        let now = Int(at.timeIntervalSince1970)
+        return try await database.write { db in
+            let allMail = try Self.allMail(db, account: account).id
+            var changed = 0
+            for id in ids {
+                guard let message = try Self.message(db, account: account, gmailID: id) else { continue }
+                if state == .present {
+                    try db.execute(sql: """
+                        INSERT INTO message_folders (message_id, folder_id, last_seen_at) VALUES (?, ?, ?)
+                        ON CONFLICT (message_id, folder_id) DO UPDATE SET uid_validity = NULL, uid = NULL,
+                            removed_from_server_at = NULL, last_seen_at = excluded.last_seen_at
+                        """, arguments: [message, allMail, now])
+                    if try SourceStates.reclassify(db, messageID: message, at: now) != nil { changed += 1 }
+                } else {
+                    try db.execute(sql: """
+                        UPDATE message_folders SET removed_from_server_at = ? WHERE message_id = ? AND folder_id = ? AND removed_from_server_at IS NULL
+                        """, arguments: [now, message, allMail])
+                    let before = try String.fetchOne(db, sql: "SELECT source_state FROM messages WHERE id = ?", arguments: [message])
+                    if before != state.rawValue {
+                        try SourceStates.set(db, messageID: message, state, at: now)
+                        changed += 1
+                    }
+                }
+            }
+            return changed
+        }
+    }
+
+    public func gmailHistoryRead(_ account: AccountID, historyID: UInt64, at: Date) async throws {
+        try await database.write { db in
+            try db.execute(sql: "UPDATE gmail_sync_state SET history_id = ?, last_listed_at = ? WHERE account_id = ?",
+                           arguments: [Int64(bitPattern: historyID), Int(at.timeIntervalSince1970), account.rawValue])
+        }
+    }
+
+    public func gmailFullChecked(_ account: AccountID, at: Date) async throws {
+        try await database.write { db in
+            try db.execute(sql: "UPDATE gmail_sync_state SET last_full_check_at = ?, last_listed_at = ? WHERE account_id = ?",
+                           arguments: [Int(at.timeIntervalSince1970), Int(at.timeIntervalSince1970), account.rawValue])
+        }
+    }
+
+    /// The archived message with this Gmail ID, synced or imported.
+    static func message(_ db: Database, account: AccountID, gmailID: UInt64) throws -> Int64? {
+        try Int64.fetchOne(db, sql: "SELECT id FROM messages WHERE account_id = ? AND gmail_msgid = ? ORDER BY id LIMIT 1",
+                           arguments: [account.rawValue, Int64(bitPattern: gmailID)])
+    }
+
     /// The account's Gmail API state row, if it syncs through the API. Status,
     /// coverage and the deletion check read it instead of IMAP's per-folder state.
     static func gmailStateRow(_ db: Database, account: AccountID) throws -> Row? {

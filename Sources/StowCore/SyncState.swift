@@ -343,5 +343,64 @@ public protocol GmailSyncStateStore: Sendable {
 
     /// Marks the first sync complete once nothing is left queued.
     func gmailQueueChecked(_ account: AccountID, at: Date) async throws
+
+    // MARK: Labels and changes (brief steps 4 and 5)
+
+    /// Records Gmail's labels by their stable ID (`folders.provider_id`), with the
+    /// names Gmail sync stores. A label renamed in Gmail is renamed in the archive;
+    /// if a label of the new name is already there, the two become one (D-595).
+    func recordGmailLabels(_ account: AccountID, _ labels: [GmailLabelName]) async throws
+
+    /// Brings labels and flags of archived messages up to date. Messages not in
+    /// the archive are left alone. Returns how many messages changed.
+    @discardableResult
+    func applyGmailChanges(_ account: AccountID, _ changes: [GmailCopyChange], at: Date) async throws -> Int
+
+    /// Gmail IDs of the archived messages whose All Mail copy is at Gmail as far as Stow knows.
+    func gmailArchivedIDs(_ account: AccountID) async throws -> Set<UInt64>
+
+    /// Where archived messages now are at Gmail: `present` puts their All Mail
+    /// copy back; `spam`, `trashed` or `gone` marks it removed (D-039). Nothing is
+    /// ever deleted from the archive. Returns how many messages changed.
+    @discardableResult
+    func setGmailSourceStates(_ account: AccountID, ids: [UInt64], _ state: SourceState, at: Date) async throws -> Int
+
+    /// After every page of `history.list` was read: the new history ID, and the
+    /// time Stow last knew it had seen every change (for the coverage date).
+    func gmailHistoryRead(_ account: AccountID, historyID: UInt64, at: Date) async throws
+
+    /// After a full comparison with Gmail (D-038).
+    func gmailFullChecked(_ account: AccountID, at: Date) async throws
+}
+
+/// A Gmail label as the archive names it: its ID, and the name Gmail sync
+/// stores (`\Inbox` for `INBOX`, the label's own name for a user label).
+public struct GmailLabelName: Sendable, Equatable {
+    public var id: String
+    public var name: String
+
+    public init(id: String, name: String) {
+        self.id = id
+        self.name = name
+    }
+}
+
+/// A change to one archived message's labels and flags, by label name.
+public struct GmailCopyChange: Sendable, Equatable {
+    public var gmailID: UInt64
+    public var addLabels: [String]
+    public var removeLabels: [String]
+    public var addFlags: [String]
+    public var removeFlags: [String]
+
+    public init(gmailID: UInt64, addLabels: [String] = [], removeLabels: [String] = [], addFlags: [String] = [], removeFlags: [String] = []) {
+        self.gmailID = gmailID
+        self.addLabels = addLabels
+        self.removeLabels = removeLabels
+        self.addFlags = addFlags
+        self.removeFlags = removeFlags
+    }
+
+    public var isEmpty: Bool { addLabels.isEmpty && removeLabels.isEmpty && addFlags.isEmpty && removeFlags.isEmpty }
 }
 
