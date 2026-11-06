@@ -38,22 +38,32 @@ public final class ArchiveSyncStore: RawMessageSink, SyncStateStore, Sendable {
     /// `write`, synchronously: tests run it on a thread they can leave stuck.
     func store(_ message: RawMessage) throws {
         let key = message.key
-        let queueRow = """
-            WHERE uid_validity = ? AND uid = ?
-                AND folder_id = (SELECT id FROM folders WHERE account_id = ? AND kind = 'folder' AND name = ?)
-            """
-        let rowArguments: StatementArguments = [Int64(key.uidValidity), Int64(key.uid), key.accountID.rawValue, key.folder]
+        // A Gmail API message is queued by Gmail ID, an IMAP one by its place (D-591).
+        let queueRow: String
+        let rowArguments: StatementArguments
+        if key.hasNoServerUID {
+            guard let gmailID = message.gmailMessageID else { throw ImportError.missingGmailID(key) }
+            queueRow = "WHERE account_id = ? AND gmail_msgid = ?"
+            rowArguments = [key.accountID.rawValue, Int64(bitPattern: gmailID)]
+        } else {
+            queueRow = """
+                WHERE uid_validity = ? AND uid = ?
+                    AND folder_id = (SELECT id FROM folders WHERE account_id = ? AND kind = 'folder' AND name = ?)
+                """
+            rowArguments = [Int64(key.uidValidity), Int64(key.uid), key.accountID.rawValue, key.folder]
+        }
+        let queueTable = key.hasNoServerUID ? "gmail_queue" : "download_queue"
         // Recorded and committed before the message is read, so a crash, kill or hang while reading it still counts.
         let queued = try database.write { db -> (restoring: Bool, earlier: Int)? in
-            guard let row = try Row.fetchOne(db, sql: "SELECT restore, import_attempts FROM download_queue \(queueRow)", arguments: rowArguments) else {
+            guard let row = try Row.fetchOne(db, sql: "SELECT restore, import_attempts FROM \(queueTable) \(queueRow)", arguments: rowArguments) else {
                 return nil
             }
-            try db.execute(sql: "UPDATE download_queue SET import_attempts = import_attempts + 1, last_import_attempt_at = ? \(queueRow)",
+            try db.execute(sql: "UPDATE \(queueTable) SET import_attempts = import_attempts + 1, last_import_attempt_at = ? \(queueRow)",
                            arguments: [Self.now()] + rowArguments)
             return (row["restore"], row["import_attempts"])
         }
         let dequeue: (Database, ImportOutcome) throws -> Void = { db, _ in
-            try db.execute(sql: "DELETE FROM download_queue \(queueRow)", arguments: rowArguments)
+            try db.execute(sql: "DELETE FROM \(queueTable) \(queueRow)", arguments: rowArguments)
         }
         let restoring = queued?.restoring ?? false
         if let queued, queued.earlier >= Importer.maximumAttempts {
@@ -73,7 +83,7 @@ public final class ArchiveSyncStore: RawMessageSink, SyncStateStore, Sendable {
             // not an attempt that never finished.
             if queued != nil {
                 try? database.write { db in
-                    try db.execute(sql: "UPDATE download_queue SET import_attempts = max(import_attempts - 1, 0) \(queueRow)",
+                    try db.execute(sql: "UPDATE \(queueTable) SET import_attempts = max(import_attempts - 1, 0) \(queueRow)",
                                    arguments: rowArguments)
                 }
             }
@@ -300,8 +310,8 @@ public final class ArchiveSyncStore: RawMessageSink, SyncStateStore, Sendable {
                 SELECT coalesce(sum(q.state = 'queued'), 0) AS queued,
                        coalesce(sum(CASE WHEN q.state = 'queued' THEN q.size ELSE 0 END), 0) AS bytes,
                        coalesce(sum(q.state = 'unfetchable'), 0) AS unfetchable
-                FROM download_queue q JOIN folders f ON f.id = q.folder_id WHERE f.account_id = ?
-                """, arguments: [account.rawValue])!
+                FROM \(Self.bothQueues) q
+                """, arguments: ["account": account.rawValue])!
             return QueueTotals(queued: row["queued"], queuedBytes: row["bytes"], unfetchable: row["unfetchable"])
         }
     }

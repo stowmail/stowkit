@@ -248,20 +248,25 @@ struct Verify: AsyncParsableCommand {
         let record = try accounts.find(query)
         if record.needsSignIn { throw SyncError.needsSignIn(record.account.id) }
         let profile = try ProviderProfile.forAccount(record.account, in: archive)
-        let factory = try SessionFactory(account: record.account, in: archive, tokens: try CLI.tokenProvider(accounts: accounts))
-        let source: RawMessageSource
-        if let out {
-            source = try FileRawMessageStore(root: CLI.storeRoot(out))
+        let tokens = try CLI.tokenProvider(accounts: accounts)
+        let budget = ByteBudget(limit: profile.dailyByteLimit, store: ArchiveSyncStore(archive: archive), account: record.account.id)
+        let report: VerifyReport
+        if record.account.provider == .gmail, out == nil {
+            // Gmail is read through the Gmail API and its messages named by Gmail ID (D-583, D-593).
+            let verifier = GmailStoreVerifier(account: record.account, tokens: tokens,
+                                              source: ArchiveGmailSource(archive: archive, account: record.account.id), budget: budget)
+            report = try await verifier.run(sample: all ? nil : sample)
         } else {
-            source = ArchiveRawSource(archive: archive, account: record.account.id)
+            let factory = try SessionFactory(account: record.account, in: archive, tokens: tokens)
+            let source: RawMessageSource
+            if let out {
+                source = try FileRawMessageStore(root: CLI.storeRoot(out))
+            } else {
+                source = ArchiveRawSource(archive: archive, account: record.account.id)
+            }
+            let verifier = StoreVerifier(account: record.account, openSession: { try await factory.open() }, source: source, budget: budget)
+            report = try await verifier.run(sample: all ? nil : sample)
         }
-        let verifier = StoreVerifier(
-            account: record.account,
-            openSession: { try await factory.open() },
-            source: source,
-            budget: ByteBudget(limit: profile.dailyByteLimit, store: ArchiveSyncStore(archive: archive), account: record.account.id)
-        )
-        let report = try await verifier.run(sample: all ? nil : sample)
         print("Archived messages for this account: \(report.storedMessages). Checked: \(report.sampled).")
         // D-567: imported mail has no copy on the server to compare with; `stowmail verify` checks it like the rest.
         let imported = try await archive.database.read { db in

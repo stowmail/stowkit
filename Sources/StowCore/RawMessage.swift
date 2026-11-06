@@ -26,9 +26,20 @@ public struct RawMessageKey: Hashable, Sendable, Codable, Comparable, CustomStri
             < (rhs.accountID.rawValue, rhs.folder, rhs.uidValidity, rhs.uid)
     }
 
+    /// A Gmail message read through the Gmail API has no IMAP place (D-583,
+    /// D-591). Its key names the All Mail folder with UIDVALIDITY and UID 0,
+    /// which IMAP never uses (both are nonzero, RFC 3501 2.3.1.1), and the
+    /// archive stores that copy with no UID; the message is known by its Gmail ID.
+    public static func gmailAPI(accountID: AccountID, allMail: String) -> RawMessageKey {
+        RawMessageKey(accountID: accountID, folder: allMail, uidValidity: 0, uid: 0)
+    }
+
+    /// Whether this key stands for a copy with no IMAP place (`gmailAPI`).
+    public var hasNoServerUID: Bool { uidValidity == 0 && uid == 0 }
+
     /// Account, validity and UID only. The folder name can be personal, so it is left out.
     public var description: String {
-        "\(accountID)/v\(uidValidity)/\(uid)"
+        hasNoServerUID ? "\(accountID)/gmail-api" : "\(accountID)/v\(uidValidity)/\(uid)"
     }
 }
 
@@ -113,4 +124,14 @@ public protocol RawMessageSource: Sendable {
     /// messages are never listed.
     func listKeys() async throws -> [RawMessageKey]
     func read(_ key: RawMessageKey) async throws -> RawMessage
+}
+
+/// Archived Gmail messages by Gmail's own ID, for comparing them with what the
+/// Gmail API holds (`stowmail verify --server`, D-593). Gmail messages are named
+/// by ID, not by folder and UID, once sync reads them through the API (D-583).
+public protocol GmailMessageSource: Sendable {
+    /// The Gmail ID (`X-GM-MSGID`) of every archived message still at Gmail, sorted.
+    func listGmailMessageIDs() async throws -> [UInt64]
+    /// The archived bytes of the message with this Gmail ID.
+    func readGmailMessage(_ id: UInt64) async throws -> Data
 }

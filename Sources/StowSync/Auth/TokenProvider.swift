@@ -75,6 +75,13 @@ public actor TokenProvider {
         try registry.setNeedsSignIn(accountID, true)
     }
 
+    /// Gmail refused a call because the token lacks the read permission: mark
+    /// the account so nothing tries again until the user signs in (D-592).
+    public func permissionMissing(_ accountID: AccountID) throws {
+        logger.warning("Gmail says the token lacks the read permission; account needs sign-in", metadata: ["account": "\(accountID)"])
+        try registry.setNeedsSignIn(accountID, true)
+    }
+
     /// A valid access token. `forceRefresh` asks for a new one even if the
     /// current one looks fresh, for when the server has just rejected it.
     public func accessToken(for accountID: AccountID, forceRefresh: Bool = false) async throws -> String {
@@ -115,6 +122,10 @@ public actor TokenProvider {
                 throw SyncError.accountRemoved(accountID)
             }
             return refreshed.accessToken
+        } catch OAuthError.tokenEndpoint(_, "admin_policy_enforced") {
+            // A Workspace admin blocked Stow. Signing in again cannot help, so
+            // the account is not marked (D-110, D-592).
+            throw SyncError.blockedByAdmin
         } catch OAuthError.invalidGrant, OAuthError.noRefreshToken {
             logger.warning("Refresh token rejected; account needs sign-in", metadata: ["account": "\(accountID)"])
             try registry.setNeedsSignIn(accountID, true)

@@ -258,7 +258,7 @@ import Testing
         defer { test.remove() }
         _ = try syncCopy(test, SyntheticTakeout.messages(count: 1)[0], uid: 1)
         #expect(try test.archive.meta("min_reader_level") == nil)
-        #expect(ArchiveSchema.readerLevel == 2)
+        #expect(ArchiveSchema.importedMailReaderLevel == 2)
     }
 
     // MARK: Step 5: Takeout's headers (D-566)

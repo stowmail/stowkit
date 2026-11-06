@@ -128,9 +128,8 @@ public enum Coverage {
             let warnUntil = cutoff.addingTimeInterval(TimeInterval(warningDays * 86_400))
             report.atRiskBefore = warnUntil
             report.atRisk = try Int.fetchOne(db, sql: """
-                SELECT count(*) FROM download_queue q JOIN folders f ON f.id = q.folder_id
-                WHERE f.account_id = ? AND q.internal_date < ?
-                """, arguments: [account.rawValue, Int(warnUntil.timeIntervalSince1970)]) ?? 0
+                SELECT count(*) FROM \(ArchiveSyncStore.bothQueues) q WHERE q.internal_date < :before
+                """, arguments: ["account": account.rawValue, "before": Int(warnUntil.timeIntervalSince1970)]) ?? 0
         }
         return report
     }
@@ -140,22 +139,27 @@ public enum Coverage {
     /// so it is never stale.
     public static func measure(_ db: Database, into report: inout CoverageReport) throws {
         let account = report.account
-        // Every synced folder must have been listed for any date to be claimed.
-        let folders = try Row.fetchAll(db, sql: """
-            SELECT s.last_sync_at FROM folders f LEFT JOIN sync_state s ON s.folder_id = f.id
-            WHERE f.account_id = ? AND f.kind = 'folder' AND f.skipped_reason IS NULL AND f.is_selectable = 1
-            """, arguments: [account.rawValue])
-        let listedAt = folders.map { $0["last_sync_at"] as Int64? }
+        // Every synced folder must have been listed for any date to be claimed. A Gmail
+        // account on the API has one listing, kept current by history reads (D-591).
+        let listedAt: [Int64?]
+        if let gmail = try ArchiveSyncStore.gmailStateRow(db, account: account) {
+            listedAt = [gmail["last_listed_at"] as Int64?]
+        } else {
+            listedAt = try Row.fetchAll(db, sql: """
+                SELECT s.last_sync_at FROM folders f LEFT JOIN sync_state s ON s.folder_id = f.id
+                WHERE f.account_id = ? AND f.kind = 'folder' AND f.skipped_reason IS NULL AND f.is_selectable = 1
+                """, arguments: [account.rawValue]).map { $0["last_sync_at"] as Int64? }
+        }
         let queue = try Row.fetchOne(db, sql: """
             SELECT coalesce(sum(q.state = 'queued'), 0) AS queued, coalesce(sum(q.state = 'unfetchable'), 0) AS unfetchable,
                    min(q.internal_date) AS oldest, coalesce(sum(q.internal_date IS NULL), 0) AS undated
-            FROM download_queue q JOIN folders f ON f.id = q.folder_id WHERE f.account_id = ?
-            """, arguments: [account.rawValue])!
+            FROM \(ArchiveSyncStore.bothQueues) q
+            """, arguments: ["account": account.rawValue])!
         report.queued = queue["queued"]
         report.unfetchable = queue["unfetchable"]
         report.oldestNotArchived = (queue["oldest"] as Int64?).map { Date(timeIntervalSince1970: TimeInterval($0)) }
 
-        if folders.isEmpty || listedAt.contains(where: { $0 == nil }) {
+        if listedAt.isEmpty || listedAt.contains(where: { $0 == nil }) {
             report.holdBack = .foldersNotListed
         } else if queue["undated"] as Int > 0 {
             report.holdBack = .undatedMessages
@@ -197,10 +201,15 @@ public enum Coverage {
     public static func deletionCheck(_ archive: Archive, account: AccountID, before: Date, since: Date) throws -> DeletionCheck {
         try archive.database.read { db in
             let (count, bytes) = try presentBefore(db, account: account, date: earliestStart(ofDayOf: before))
-            let checks = try Row.fetchAll(db, sql: """
-                SELECT s.last_full_sync_at FROM folders f LEFT JOIN sync_state s ON s.folder_id = f.id
-                WHERE f.account_id = ? AND f.kind = 'folder' AND f.skipped_reason IS NULL AND f.is_selectable = 1
-                """, arguments: [account.rawValue]).map { $0["last_full_sync_at"] as Int64? }
+            let checks: [Int64?]
+            if let gmail = try ArchiveSyncStore.gmailStateRow(db, account: account) {
+                checks = [gmail["last_full_check_at"] as Int64?]
+            } else {
+                checks = try Row.fetchAll(db, sql: """
+                    SELECT s.last_full_sync_at FROM folders f LEFT JOIN sync_state s ON s.folder_id = f.id
+                    WHERE f.account_id = ? AND f.kind = 'folder' AND f.skipped_reason IS NULL AND f.is_selectable = 1
+                    """, arguments: [account.rawValue]).map { $0["last_full_sync_at"] as Int64? }
+            }
             // Every folder must have had one; the oldest is the one that counts.
             let lastFullCheck = checks.isEmpty || checks.contains { $0 == nil }
                 ? nil : checks.compactMap { $0 }.min().map { Date(timeIntervalSince1970: TimeInterval($0)) }

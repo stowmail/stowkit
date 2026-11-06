@@ -9,7 +9,7 @@ import Testing
         let test = try TestArchive()
         defer { test.remove() }
         let line = try test.archive.database.read { try ArchiveSchema.versionSummary($0) }
-        #expect(line == "Schema: v6. This build knows up to v6.")
+        #expect(line == "Schema: v7. This build knows up to v7.")
     }
 
     @Test func aV1ArchiveOpenedReadOnly() throws {
@@ -22,11 +22,11 @@ import Testing
         try db.close()
         let archive = try Archive.open(location, keys: keys, readOnly: true)
         let line = try archive.database.read { try ArchiveSchema.versionSummary($0) }
-        #expect(line == "Schema: v1 (upgrades the next time this build writes to it). This build knows up to v6.")
+        #expect(line == "Schema: v1 (upgrades the next time this build writes to it). This build knows up to v7.")
     }
 
-    /// An archive with `v6` but not `v5` (a branch build's, D-577) is not up to
-    /// date, although its newest migration is this build's newest.
+    /// An archive missing `v5` (as a generic IMAP branch build left one, D-577) is
+    /// not up to date, although its newest migration is this build's newest.
     @Test func aGapIsOutstanding() throws {
         let test = try TestArchive()
         defer { test.remove() }
@@ -34,7 +34,7 @@ import Testing
             try db.execute(sql: "DELETE FROM grdb_migrations WHERE identifier = 'v5'")
         }
         let line = try test.archive.database.read { try ArchiveSchema.versionSummary($0) }
-        #expect(line == "Schema: v6 (upgrades the next time this build writes to it). This build knows up to v6.")
+        #expect(line == "Schema: v7 (upgrades the next time this build writes to it). This build knows up to v7.")
     }
 
     /// An archive a newer build has written is shown as such, not as an error.
@@ -42,9 +42,9 @@ import Testing
         let test = try TestArchive()
         defer { test.remove() }
         try test.archive.database.write { db in
-            try db.execute(sql: "INSERT INTO grdb_migrations (identifier) VALUES ('v7')")
+            try db.execute(sql: "INSERT INTO grdb_migrations (identifier) VALUES ('v8')")
         }
         let line = try test.archive.database.read { try ArchiveSchema.versionSummary($0) }
-        #expect(line == "Schema: v7, newer than this build, which knows up to v6 and reads what it knows.")
+        #expect(line == "Schema: v8, newer than this build, which knows up to v7 and reads what it knows.")
     }
 }

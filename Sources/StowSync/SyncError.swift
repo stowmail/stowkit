@@ -11,6 +11,16 @@ public enum SyncError: Error, Equatable, CustomStringConvertible {
     /// previous, wider permission. Signing in once more fixes it; nothing archived
     /// is lost (D-583).
     case oldPermission(AccountID)
+    /// Gmail says the account's token does not include the read permission,
+    /// for example because it was unticked on Google's consent screen. The
+    /// account is marked as needing sign-in (D-110, D-592).
+    case permissionMissing(AccountID)
+    /// A Google Workspace admin has blocked Stow or the Gmail API for this
+    /// account. Signing in again cannot help, so the account is not marked (D-592).
+    case blockedByAdmin
+    /// The Gmail API is not enabled for Stow's Google project: Stow's fault, not
+    /// the user's. Logged with the reason code only (D-592).
+    case gmailAPIUnavailable
     /// The account was removed (disconnected) from Stow. Nothing is refreshed
     /// or saved for it; adding the address again reconnects it (A-12, D-513).
     case accountRemoved(AccountID)
@@ -82,6 +92,12 @@ public enum SyncError: Error, Equatable, CustomStringConvertible {
             "Account \(id) needs to sign in again. Run `stowmail account signin \(id)`."
         case .oldPermission(let id):
             "Account \(id) was signed in under Google's previous permission. Stow now asks only to view your email, so sign in once more with `stowmail account signin \(id)`. Nothing archived is lost."
+        case .permissionMissing(let id):
+            "Google says Stow's access doesn't include permission to view your email, so Stow can't download a copy. Sign in again with `stowmail account signin \(id)` and leave that permission ticked. Nothing archived is lost."
+        case .blockedByAdmin:
+            "Your Google Workspace admin has blocked Stow from reading this account's mail. Ask your admin to allow Stow, or add a personal account instead."
+        case .gmailAPIUnavailable:
+            "Stow couldn't reach Gmail. This is our fault, not yours: the background sync tries again later, and an update will fix it."
         case .importOnly: "This is an import-only account: its mail came from files, and it never syncs."
         case .accountRemoved(let id):
             "Account \(id) was removed from Stow, so it no longer signs in or syncs. Add the address again with `stowmail account add` to reconnect it."

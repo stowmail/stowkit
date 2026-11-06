@@ -16,6 +16,9 @@ public enum ImportError: Error, Equatable, CustomStringConvertible {
     case retryTimedOut(StoredMessageID)
     /// Not started: reading earlier messages is still stuck in this process (D-502).
     case tooManyStuck
+    /// A message with no IMAP place came without its Gmail ID, so it cannot be
+    /// matched to its queue row or to the archive (D-591). Nothing was recorded.
+    case missingGmailID(RawMessageKey)
 
     public var description: String {
         switch self {
@@ -24,6 +27,7 @@ public enum ImportError: Error, Equatable, CustomStringConvertible {
         case .timedOut(let key): "Reading message \(key) did not finish in time; it was not recorded yet, and is kept whole after \(Importer.maximumAttempts) tries"
         case .retryTimedOut(let id): "Reading message \(id) again did not finish in time; it stays marked"
         case .tooManyStuck: "Reading earlier messages is still stuck in this process; restart it to carry on"
+        case .missingGmailID(let key): "Message \(key) came through the Gmail API without its Gmail ID; it was not recorded"
         }
     }
 }
@@ -449,6 +453,8 @@ public final class Importer: Sendable {
     }
 
     static func rememberTombstonedCopy(_ db: Database, tombstone: Int64, key: RawMessageKey) throws {
+        // A Gmail API copy has no place to remember; its tombstone matches by Gmail ID (D-591).
+        guard !key.hasNoServerUID else { return }
         let folderID = try folderID(db, account: key.accountID.rawValue, name: key.folder, kind: "folder")
         try db.execute(sql: """
             INSERT INTO tombstone_copies (tombstone_id, folder_id, uid_validity, uid) VALUES (?, ?, ?, ?) ON CONFLICT DO NOTHING
@@ -592,7 +598,7 @@ public final class Importer: Sendable {
     }
 
     /// Records where this copy lives: its folder, UID and flags, plus any Gmail
-    /// labels. A message seen again at a new place (after a UIDVALIDITY change,
+    /// labels. A copy read through the Gmail API has no UID (D-591). A message seen again at a new place (after a UIDVALIDITY change,
     /// or back from the Trash) has its copy moved there and is present again.
     static func link(_ db: Database, messageID: StoredMessageID, raw: RawMessage) throws {
         let now = Int(Date().timeIntervalSince1970)
@@ -608,7 +614,8 @@ public final class Importer: Sendable {
                 uid_validity = excluded.uid_validity, uid = excluded.uid, flags = excluded.flags,
                 last_seen_at = excluded.last_seen_at, removed_from_server_at = NULL
             WHERE message_folders.uid_validity IS NOT excluded.uid_validity OR message_folders.removed_from_server_at IS NOT NULL
-            """, arguments: [messageID, folderID, Int64(raw.key.uidValidity), Int64(raw.key.uid), flagText(raw.flags), now])
+            """, arguments: [messageID, folderID, raw.key.hasNoServerUID ? nil : Int64(raw.key.uidValidity),
+                             raw.key.hasNoServerUID ? nil : Int64(raw.key.uid), flagText(raw.flags), now])
         for label in raw.labels {
             let labelID = try Self.folderID(db, account: account, name: label, kind: "label")
             try db.execute(sql: """

@@ -6,16 +6,26 @@ import StowCore
 /// One stored message, named without anything personal: the folder by its
 /// index in the sorted list of the account's stored folders, then UIDVALIDITY
 /// and UID (which together are the file's path in the store).
+/// A Gmail message read through the API is named by its Gmail ID instead,
+/// in hex as Gmail shows it (D-593); the ID says nothing personal either.
 public struct VerifyItem: Sendable, Hashable, Comparable, CustomStringConvertible {
     public var folderIndex: Int
     public var uidValidity: UInt32
     public var uid: UInt32
+    public var gmailID: UInt64? = nil
 
     public static func < (a: VerifyItem, b: VerifyItem) -> Bool {
-        (a.folderIndex, a.uidValidity, a.uid) < (b.folderIndex, b.uidValidity, b.uid)
+        (a.gmailID ?? 0, a.folderIndex, a.uidValidity, a.uid) < (b.gmailID ?? 0, b.folderIndex, b.uidValidity, b.uid)
     }
 
-    public var description: String { "folder \(folderIndex + 1), UIDVALIDITY \(uidValidity), UID \(uid)" }
+    public static func gmail(_ id: UInt64) -> VerifyItem {
+        VerifyItem(folderIndex: 0, uidValidity: 0, uid: 0, gmailID: id)
+    }
+
+    public var description: String {
+        if let gmailID { return "Gmail message \(String(gmailID, radix: 16))" }
+        return "folder \(folderIndex + 1), UIDVALIDITY \(uidValidity), UID \(uid)"
+    }
 }
 
 /// What `stowmail verify` found. Numbers and `VerifyItem`s only.

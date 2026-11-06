@@ -504,6 +504,24 @@ import Testing
         #expect(try await provider.accessToken(for: account.id) == "fresh")
     }
 
+    /// A Workspace admin's block during a refresh is its own error and does not
+    /// mark the account: signing in again cannot help (D-592).
+    @Test func adminPolicyOnRefreshIsItsOwnErrorAndDoesNotMark() async throws {
+        defer { try? keychain.deleteAll() }
+        let (registry, tokens, account) = try setUp(expiresIn: -10)
+        let endpoint = FakeTokenEndpoint { _ in (400, #"{"error":"admin_policy_enforced","error_description":"blocked"}"#) }
+        let provider = TokenProvider(tokenStore: tokens, registry: registry) { _ in OAuthClient(config: .google(testAppConfig), http: endpoint) }
+        await #expect(throws: SyncError.blockedByAdmin) { _ = try await provider.accessToken(for: account.id) }
+        #expect(try registry.record(account.id)?.needsSignIn == false)
+    }
+
+    /// The browser reply's error code gets its own sentence for the two common ones.
+    @Test func signInRefusalsSayWhatHappened() {
+        #expect(LoopbackError.providerError("admin_policy_enforced").description.contains("admin has blocked Stow"))
+        #expect(LoopbackError.providerError("access_denied").description.contains("Nothing was saved"))
+        #expect(LoopbackError.providerError("other_code").description == "The provider refused sign-in (other_code).")
+    }
+
     /// Microsoft tokens are judged by nothing new.
     @Test func microsoftTokensAreNotCheckedForTheGmailScope() async throws {
         defer { try? keychain.deleteAll() }

@@ -64,7 +64,27 @@ public enum ArchiveStatus {
     /// Per-folder numbers for one account's synced folders, by name.
     public static func folders(_ archive: Archive, account: AccountID) throws -> [FolderReport] {
         try archive.database.read { db in
-            try Row.fetchAll(db, sql: """
+            // A Gmail account on the API has one place, All Mail, with copies that have no UID (D-591).
+            if let gmail = try ArchiveSyncStore.gmailStateRow(db, account: account) {
+                let allMail = try Row.fetchOne(db, sql: """
+                    SELECT f.name, (SELECT count(*) FROM message_folders mf WHERE mf.folder_id = f.id AND mf.uid IS NULL
+                        AND mf.removed_from_server_at IS NULL) AS archived
+                    FROM folders f WHERE f.account_id = ? AND f.kind = 'folder' AND f.special_use = '\\all' ORDER BY f.id LIMIT 1
+                    """, arguments: [account.rawValue])
+                let queue = try Row.fetchOne(db, sql: """
+                    SELECT coalesce(sum(state = 'queued'), 0) AS queued, coalesce(sum(state = 'unfetchable'), 0) AS unfetchable
+                    FROM gmail_queue WHERE account_id = ?
+                    """, arguments: [account.rawValue])!
+                var report = FolderReport(name: allMail?["name"] ?? ArchiveSyncStore.gmailAllMailName)
+                report.archived = allMail?["archived"] ?? 0
+                report.queued = queue["queued"]
+                report.unfetchable = queue["unfetchable"]
+                report.firstSyncComplete = (gmail["first_sync_completed_at"] as Int64?) != nil
+                report.lastSyncAt = ArchiveSyncStore.date(gmail["last_listed_at"])
+                report.lastError = gmail["last_error"]
+                return [report]
+            }
+            return try Row.fetchAll(db, sql: """
                 SELECT f.name, s.server_exists, s.first_sync_completed_at, s.last_sync_at, s.last_error,
                     (SELECT count(*) FROM message_folders mf WHERE mf.folder_id = f.id AND mf.uid_validity = s.uid_validity
                         AND mf.removed_from_server_at IS NULL) AS archived,
@@ -114,8 +134,8 @@ public enum ArchiveStatus {
                     SELECT coalesce(sum(q.state = 'queued'), 0) AS queued,
                            coalesce(sum(CASE WHEN q.state = 'queued' THEN q.size ELSE 0 END), 0) AS bytes,
                            coalesce(sum(q.state = 'unfetchable'), 0) AS unfetchable
-                    FROM download_queue q JOIN folders f ON f.id = q.folder_id WHERE f.account_id = ?
-                    """, arguments: [id])!
+                    FROM \(ArchiveSyncStore.bothQueues) q
+                    """, arguments: ["account": id])!
                 status.queue = QueueTotals(queued: queue["queued"], queuedBytes: queue["bytes"], unfetchable: queue["unfetchable"])
                 let folders = try Row.fetchAll(db, sql: """
                     SELECT s.first_sync_completed_at, s.status, s.last_error FROM folders f JOIN sync_state s ON s.folder_id = f.id
@@ -123,6 +143,12 @@ public enum ArchiveStatus {
                     """, arguments: [id])
                 status.foldersSynced = folders.count
                 status.firstSyncComplete = !folders.isEmpty && folders.allSatisfy { ($0["first_sync_completed_at"] as Int64?) != nil }
+                if let gmail = try ArchiveSyncStore.gmailStateRow(db, account: record.account.id) {
+                    // The API's one listing stands in for IMAP's folders (D-591).
+                    status.foldersSynced = 1
+                    status.firstSyncComplete = (gmail["first_sync_completed_at"] as Int64?) != nil
+                    status.folderErrors = gmail["status"] as String == "error" ? [gmail["last_error"] as String?].compactMap { $0 } : []
+                }
                 status.folderErrors = folders.compactMap { $0["status"] as String == "error" ? $0["last_error"] as String? : nil }
                 status.bytesLast24Hours = try Int64.fetchOne(db, sql: """
                     SELECT coalesce(sum(bytes), 0) FROM byte_budget WHERE account_id = ? AND at > ?
@@ -146,6 +172,40 @@ public enum ArchiveStatus {
                 return status
             }
         }
+    }
+}
+
+/// The archive's Gmail messages by Gmail ID, for comparing with the Gmail API
+/// (D-593). Lists synced messages whose All Mail copy is still at Gmail;
+/// imported mail has no server copy and is left out (D-567).
+public struct ArchiveGmailSource: GmailMessageSource {
+    public let archive: Archive
+    public let account: AccountID
+
+    public init(archive: Archive, account: AccountID) {
+        self.archive = archive
+        self.account = account
+    }
+
+    public func listGmailMessageIDs() async throws -> [UInt64] {
+        try await archive.database.read { [account] db in
+            try Int64.fetchAll(db, sql: """
+                SELECT DISTINCT m.gmail_msgid FROM messages m
+                JOIN message_folders mf ON mf.message_id = m.id JOIN folders f ON f.id = mf.folder_id
+                WHERE m.account_id = ? AND m.gmail_msgid IS NOT NULL AND m.origin = 'synced'
+                  AND f.account_id = m.account_id AND f.special_use = '\\all' AND mf.removed_from_server_at IS NULL
+                """, arguments: [account.rawValue]).map { UInt64(bitPattern: $0) }.sorted()
+        }
+    }
+
+    public func readGmailMessage(_ id: UInt64) async throws -> Data {
+        let found = try await archive.database.read { [account] db -> (hash: Data, state: String)? in
+            try Row.fetchOne(db, sql: """
+                SELECT raw_hash, raw_state FROM messages WHERE account_id = ? AND gmail_msgid = ? AND origin = 'synced' ORDER BY id LIMIT 1
+                """, arguments: [account.rawValue, Int64(bitPattern: id)]).map { ($0["raw_hash"], $0["raw_state"]) }
+        }
+        guard let found else { throw CocoaError(.fileNoSuchFile) }
+        return try archive.rawMessage(hash: found.hash, state: found.state)
     }
 }
 

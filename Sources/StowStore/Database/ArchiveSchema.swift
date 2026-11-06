@@ -16,8 +16,9 @@ import GRDB
 /// defaults that older code can leave alone.
 public enum ArchiveSchema {
     /// Every migration identifier, oldest first. Tests use this to step through versions.
-    /// `v5` is the mbox import track's (D-561, D-562); `v6` the generic IMAP track's (D-577).
-    public static let migrationIdentifiers = ["v1", "v2", "v3", "v4", "v5", "v6"]
+    /// `v5` is the mbox import track's (D-561, D-562); `v6` the generic IMAP track's (D-577);
+    /// `v7` the Gmail API track's (D-591).
+    public static let migrationIdentifiers = ["v1", "v2", "v3", "v4", "v5", "v6", "v7"]
 
     public static var migrator: DatabaseMigrator {
         var migrator = DatabaseMigrator()
@@ -27,6 +28,7 @@ public enum ArchiveSchema {
         migrator.registerMigration("v4", migrate: v4)
         migrator.registerMigration("v5", migrate: v5)
         migrator.registerMigration("v6", migrate: v6)
+        migrator.registerMigration("v7", migrate: v7)
         return migrator
     }
 
@@ -36,11 +38,15 @@ public enum ArchiveSchema {
     /// build would misread (a new file flag, a column that must not be ignored)
     /// raises it with `requireReaderLevel`, before anything in the new form is
     /// written, and this constant goes up in the same build.
-    public static let readerLevel = 2
+    public static let readerLevel = 3
     /// The level an archive holding imported mail needs (D-563): an older build
     /// does not know `messages.origin` and would count imported mail as being
     /// on the server. Raised by the first import, not by `v5`.
     public static let importedMailReaderLevel = 2
+    /// The level an archive needs once a Gmail account syncs through the Gmail
+    /// API (D-591): an older build would read its All Mail copies with no UID
+    /// as missing and run IMAP sync over them. Raised by the first API sync, not by `v7`.
+    public static let gmailAPIReaderLevel = 3
     static let readerLevelKey = "min_reader_level"
 
     /// Refuses an archive that needs a newer reader than this build. Reads only,
@@ -503,6 +509,53 @@ public enum ArchiveSchema {
                 capabilities TEXT,
                 capabilities_at INTEGER
             ) STRICT;
+            """)
+    }
+
+    /// D-591: the Gmail API's queue and cursor, and Gmail's label IDs. New
+    /// tables and one nullable column: nothing rebuilt, no row touched, and the
+    /// reader level is left alone (the first API sync raises it).
+    static func v7(_ db: Database) throws {
+        try db.execute(sql: """
+            -- Gmail messages listed through the API and not yet downloaded. Keyed by Gmail's ID,
+            -- which API messages have instead of a UID. Columns as download_queue's.
+            CREATE TABLE gmail_queue (
+                account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+                gmail_msgid INTEGER NOT NULL,
+                gmail_thrid INTEGER,
+                size INTEGER NOT NULL,
+                internal_date INTEGER,
+                priority INTEGER NOT NULL DEFAULT 0,
+                state TEXT NOT NULL DEFAULT 'queued' CHECK (state IN ('queued', 'unfetchable')),
+                restore INTEGER NOT NULL DEFAULT 0,
+                attempts INTEGER NOT NULL DEFAULT 0,
+                last_run_id TEXT,
+                first_failed_at INTEGER,
+                last_failed_at INTEGER,
+                recorded_at INTEGER,
+                import_attempts INTEGER NOT NULL DEFAULT 0,
+                last_import_attempt_at INTEGER,
+                queued_at INTEGER NOT NULL,
+                PRIMARY KEY (account_id, gmail_msgid)
+            ) STRICT;
+            CREATE INDEX gmail_queue_next ON gmail_queue(account_id, state, priority, internal_date);
+
+            -- One row per Gmail account that syncs through the API.
+            CREATE TABLE gmail_sync_state (
+                account_id TEXT PRIMARY KEY NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+                history_id INTEGER,
+                full_listing_completed_at INTEGER,
+                last_full_check_at INTEGER,
+                first_sync_completed_at INTEGER,
+                -- When Stow last knew it had seen every change at Gmail: the full listing,
+                -- then each complete history read. The coverage date counts from here (D-034).
+                last_listed_at INTEGER,
+                status TEXT NOT NULL DEFAULT 'idle' CHECK (status IN ('idle', 'syncing', 'error')),
+                last_error TEXT
+            ) STRICT;
+
+            -- Gmail's stable label ID (labels.list), so a renamed label is found by ID.
+            ALTER TABLE folders ADD COLUMN provider_id TEXT;
             """)
     }
 

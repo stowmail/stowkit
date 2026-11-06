@@ -12,31 +12,50 @@ public struct EngineSync: Sendable {
     let sessions: @Sendable (Account) -> (@Sendable () async throws -> IMAPSession)
     let settingsURL: URL
     let sleep: @Sendable (TimeInterval) async throws -> Void
+    /// Signs Gmail accounts in to the Gmail API (D-583). Without it (tests that
+    /// play Gmail over IMAP), Gmail still syncs over IMAP until that path is
+    /// removed (brief step 10).
+    let tokens: TokenProvider?
 
     public init(
         archive: Archive,
         settingsURL: URL = EngineRules.defaultSettingsURL,
         sleep: @escaping @Sendable (TimeInterval) async throws -> Void = { try await Task.sleep(nanoseconds: UInt64($0 * 1_000_000_000)) },
+        tokens: TokenProvider? = nil,
         sessions: @escaping @Sendable (Account) -> (@Sendable () async throws -> IMAPSession)
     ) {
         self.archive = archive
         self.settingsURL = settingsURL
         self.sleep = sleep
+        self.tokens = tokens
         self.sessions = sessions
     }
 
     /// Sessions signed in with the account's tokens, to the provider's server.
     public init(archive: Archive, tokens: TokenProvider, settingsURL: URL = EngineRules.defaultSettingsURL) {
-        self.init(archive: archive, settingsURL: settingsURL) { account in
+        self.init(archive: archive, settingsURL: settingsURL, tokens: tokens) { account in
             // An `imap` account's server is read from the archive at each connect (D-577).
             return { try await SessionFactory(account: account, in: archive, tokens: tokens).open() }
         }
     }
 
-    public func syncer(for account: Account) throws -> AccountSyncer {
+    /// Gmail through the Gmail API when signed in with tokens (D-583); every
+    /// other account, and Gmail in IMAP tests, over IMAP.
+    public func syncer(for account: Account) throws -> any MailSyncer {
         let rules = try EngineRules.ruleSet(settings: settingsURL, archive: archive, account: account.id)
         let store = ArchiveSyncStore(archive: archive, importer: Importer(archive: archive, classifier: EngineRules.classifier(rules)))
         let profile = try ProviderProfile.forAccount(account, in: archive)
+        if account.provider == .gmail, let tokens {
+            return GmailSyncer(
+                account: account,
+                tokens: tokens,
+                sink: store,
+                state: store,
+                budget: ByteBudget(limit: profile.dailyByteLimit, store: store, account: account.id),
+                prioritiser: EngineRules.prioritiser(rules, ownAddress: account.email),
+                sleep: sleep
+            )
+        }
         return AccountSyncer(
             account: account,
             openSession: sessions(account),

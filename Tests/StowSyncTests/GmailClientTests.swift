@@ -41,9 +41,19 @@ actor TokenCounter {
 }
 
 let gmailSentinelToken = "ya29.SENTINEL-gmail-token-7Qk2"
+let gmailTestAccount = AccountID(rawValue: "acct-gmail-test")
 
-func gmailClient(_ transport: FakeGmailTransport, tokens: TokenCounter = TokenCounter([gmailSentinelToken])) -> GmailClient {
-    GmailClient(transport: transport) { force in await tokens.next(force: force) }
+/// Counts how often the client asked for the account to be marked as needing sign-in.
+actor MarkCounter {
+    private(set) var count = 0
+    func mark() { count += 1 }
+}
+
+func gmailClient(_ transport: FakeGmailTransport, tokens: TokenCounter = TokenCounter([gmailSentinelToken]),
+                 marks: MarkCounter = MarkCounter()) -> GmailClient {
+    GmailClient(account: gmailTestAccount, transport: transport, markNeedsSignIn: { await marks.mark() }) { force in
+        await tokens.next(force: force)
+    }
 }
 
 /// Every request Stow can express, with awkward values.
@@ -174,13 +184,47 @@ let everyGmailRequest: [GmailReadOnlyRequest] = [
         let backend = await error(503, "backendError") as? SyncError
         #expect(backend == .providerUnavailable("Gmail (HTTP 503, backendError)"))
         #expect(backend?.isRetryable == true)
-        let other = await error(403, "domainPolicy") as? SyncError
-        #expect(other == .commandFailed(command: "users.getProfile", status: "HTTP 403", text: "domainPolicy"))
+        let other = await error(400, "badRequest") as? SyncError
+        #expect(other == .commandFailed(command: "users.getProfile", status: "HTTP 400", text: "badRequest"))
         #expect(other?.isRetryable == false)
         for case let failure? in [tooMany, other, backend] {
             #expect(!String(describing: failure).contains("sam@example.com"))
             #expect(!String(describing: failure).contains("Free text"))
         }
+    }
+
+    /// Step 7 (D-592): each refusal its own message; only a missing permission
+    /// marks the account, and only once per refusal, never in a loop.
+    @Test func refusalsHaveTheirOwnMessages() async throws {
+        func refuse(_ status: Int, _ json: String) async -> (Error?, Int, Int) {
+            let transport = FakeGmailTransport(status: status, json: json)
+            let marks = MarkCounter()
+            var caught: Error?
+            do { _ = try await gmailClient(transport, marks: marks).labels() } catch { caught = error }
+            return (caught, await marks.count, await transport.seen.count)
+        }
+        let scope = await refuse(403, #"{"error":{"code":403,"errors":[{"reason":"insufficientPermissions"}],"status":"PERMISSION_DENIED"}}"#)
+        #expect(scope.0 as? SyncError == .permissionMissing(gmailTestAccount))
+        #expect(scope.1 == 1 && scope.2 == 1)
+        let scope2 = await refuse(403, #"{"error":{"code":403,"status":"PERMISSION_DENIED","details":[{"reason":"ACCESS_TOKEN_SCOPE_INSUFFICIENT"}]}}"#)
+        #expect(scope2.0 as? SyncError == .permissionMissing(gmailTestAccount))
+
+        let admin = await refuse(403, #"{"error":{"code":403,"errors":[{"reason":"domainPolicy"}]}}"#)
+        #expect(admin.0 as? SyncError == .blockedByAdmin)
+        #expect(admin.1 == 0)
+        let disabled = await refuse(403, #"{"error":{"code":403,"errors":[{"reason":"accessNotConfigured"}]}}"#)
+        #expect(disabled.0 as? SyncError == .gmailAPIUnavailable)
+        #expect(disabled.1 == 0)
+        let disabled2 = await refuse(403, #"{"error":{"code":403,"status":"PERMISSION_DENIED","details":[{"reason":"SERVICE_DISABLED"}]}}"#)
+        #expect(disabled2.0 as? SyncError == .gmailAPIUnavailable)
+
+        for error: SyncError in [.permissionMissing(gmailTestAccount), .blockedByAdmin, .gmailAPIUnavailable] {
+            #expect(!error.isRetryable)
+        }
+        #expect(SyncError.permissionMissing(gmailTestAccount).description.contains("stowmail account signin acct-gmail-test"))
+        #expect(SyncError.blockedByAdmin.description.contains("Ask your admin"))
+        #expect(SyncError.gmailAPIUnavailable.description.contains("our fault, not yours"))
+        #expect(SyncError.throttled("Gmail (HTTP 429)").isRetryable)
     }
 
     @Test func rawMessagesAreDecodedByteForByte() async throws {
@@ -304,5 +348,76 @@ let everyGmailRequest: [GmailReadOnlyRequest] = [
             #expect(!text.contains("auth/gmail.modify") && !text.contains("auth/gmail.compose") && !text.contains("auth/gmail.send")
                 && !text.contains("auth/gmail.insert"), "\(file.lastPathComponent)")
         }
+    }
+}
+
+/// Archived Gmail mail in memory, by Gmail ID.
+struct MemoryGmailSource: GmailMessageSource {
+    var messages: [UInt64: Data]
+    func listGmailMessageIDs() async throws -> [UInt64] { messages.keys.sorted() }
+    func readGmailMessage(_ id: UInt64) async throws -> Data { messages[id]! }
+}
+
+/// Step 8 (D-593): `verify --server` for Gmail compares archived bytes with
+/// the API's `raw` message, with the same sampling and report as IMAP.
+@Suite struct GmailVerifyTests {
+    static let archived: [UInt64: Data] = [
+        0x11: Data("From: a\r\n\r\none\r\n".utf8),
+        0x22: Data("From: b\r\n\r\ntwo\r\n".utf8),
+        0x33: Data("From: c\r\n\r\nthree\r\n".utf8),
+        0x44: Data("From: d\r\n\r\nfour\r\n".utf8),
+    ]
+
+    /// Gmail as the fake holds it: 0x22 differs by one byte, 0x44 is gone.
+    static func gmail() -> FakeGmailTransport {
+        FakeGmailTransport { request, _ in
+            let id = request.url.path.components(separatedBy: "/").last ?? ""
+            guard let number = UInt64(id, radix: 16), number != 0x44, var bytes = archived[number] else {
+                return GmailHTTPResponse(status: 404, body: Data(#"{"error":{"code":404,"errors":[{"reason":"notFound"}]}}"#.utf8))
+            }
+            if number == 0x22 { bytes[bytes.count - 3] = UInt8(ascii: "O") }
+            let raw = bytes.base64EncodedString().replacingOccurrences(of: "+", with: "-").replacingOccurrences(of: "/", with: "_")
+            return GmailHTTPResponse(status: 200, body: Data(#"{"id":"\#(id)","threadId":"\#(id)","raw":"\#(raw)"}"#.utf8))
+        }
+    }
+
+    func verifier(_ transport: FakeGmailTransport) -> GmailStoreVerifier {
+        GmailStoreVerifier(account: Account(id: gmailTestAccount, provider: .gmail, email: "sam@example.com", displayName: "Sam"),
+                           client: gmailClient(transport), source: MemoryGmailSource(messages: Self.archived),
+                           budget: ByteBudget(limit: nil, fileURL: nil))
+    }
+
+    @Test func allComparesEveryMessageAndNamesProblemsByGmailID() async throws {
+        let transport = Self.gmail()
+        let report = try await verifier(transport).run(sample: nil)
+        #expect(report.storedMessages == 4 && report.sampled == 4)
+        #expect(report.compared == 3 && report.identical == 2)
+        #expect(report.mismatched == [.gmail(0x22)])
+        #expect(report.goneFromServer == [.gmail(0x44)])
+        #expect(!report.isClean)
+        #expect(report.mismatched[0].description == "Gmail message 22")
+        // Read-only: every request was a raw message get, and nothing else.
+        let seen = await transport.seen
+        #expect(seen.count == 4)
+        #expect(seen.allSatisfy { $0.url.path.hasPrefix("/gmail/v1/users/me/messages/") && $0.url.query == "format=raw" })
+    }
+
+    @Test func sampleChecksOnlyThatMany() async throws {
+        let transport = Self.gmail()
+        let report = try await verifier(transport).run(sample: 2)
+        #expect(report.storedMessages == 4 && report.sampled == 2)
+        #expect(report.compared + report.goneFromServer.count == 2)
+        #expect(await transport.seen.count == 2)
+    }
+
+    @Test func aCleanArchiveIsClean() async throws {
+        let clean = FakeGmailTransport { request, _ in
+            let id = request.url.path.components(separatedBy: "/").last ?? ""
+            let bytes = Self.archived[UInt64(id, radix: 16)!]!
+            let raw = bytes.base64EncodedString()
+            return GmailHTTPResponse(status: 200, body: Data(#"{"id":"\#(id)","threadId":"\#(id)","raw":"\#(raw)"}"#.utf8))
+        }
+        let report = try await verifier(clean).run(sample: nil)
+        #expect(report.isClean && report.identical == 4 && report.goneFromServer.isEmpty)
     }
 }

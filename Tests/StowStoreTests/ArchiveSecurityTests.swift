@@ -180,7 +180,7 @@ import Testing
         let sql = try test.archive.database.read { db in
             try String.fetchAll(db, sql: "SELECT sql FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'messages_fts%' AND name NOT LIKE 'grdb_%' AND name NOT LIKE 'sqlite_%'")
         }
-        #expect(sql.count == 21)
+        #expect(sql.count == 23) // v7 adds gmail_queue and gmail_sync_state (D-591)
         for statement in sql { #expect(statement.hasSuffix("STRICT"), "\(statement.prefix(40))") }
     }
 }
@@ -258,6 +258,19 @@ enum SampleRows {
                     INSERT INTO account_servers (account_id, host, port, security, username, preset, capabilities, capabilities_at)
                     VALUES (?, 'imap.example.com', 993, 'tls', ?, NULL, 'IMAP4REV1 AUTH=PLAIN', 0)
                     """, arguments: [account, "\(account)@example.com"])
+            case "v7":
+                let account = UUID().uuidString.lowercased()
+                try db.execute(sql: "INSERT INTO accounts (id, provider, email, display_name, created_at) VALUES (?, 'gmail', ?, 'T', 0)",
+                               arguments: [account, "\(account)@example.com"])
+                try db.execute(sql: "INSERT INTO folders (account_id, name, kind, provider_id) VALUES (?, 'Receipts', 'label', 'Label_7')",
+                               arguments: [account])
+                try db.execute(sql: """
+                    INSERT INTO gmail_queue (account_id, gmail_msgid, gmail_thrid, size, internal_date, priority, attempts, last_run_id, queued_at)
+                    VALUES (?, -9000000000000000000, 1, 10, 0, 2, 1, 'r', 0)
+                    """, arguments: [account])
+                try db.execute(sql: """
+                    INSERT INTO gmail_sync_state (account_id, history_id, full_listing_completed_at, last_full_check_at) VALUES (?, 4242, 0, 0)
+                    """, arguments: [account])
             default:
                 Issue.record("Add sample rows for migration \(version)")
             }

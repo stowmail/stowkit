@@ -15,7 +15,7 @@ import Testing
     @Test func v6IsTheNewestAndAddsOnlyTheLeafTable() throws {
         let test = try TestArchive()
         defer { test.remove() }
-        #expect(ArchiveSchema.migrationIdentifiers.last == "v6")
+        #expect(ArchiveSchema.migrationIdentifiers.firstIndex(of: "v6") == 5) // v7 follows it (D-591)
         // As an archive at v4, with rows, then migrated: nothing else changes.
         try test.archive.database.write { db in
             try db.execute(sql: "DROP TABLE account_servers")

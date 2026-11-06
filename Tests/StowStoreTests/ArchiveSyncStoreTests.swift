@@ -225,3 +225,38 @@ import Testing
         #expect(try await store.budgetFreesUp(account, bytes: 2_000, now: now) == nil)
     }
 }
+
+/// `stowmail verify --server` for Gmail reads archived mail by Gmail ID (D-593).
+@Suite(.serialized) struct ArchiveGmailSourceTests {
+    @Test func listsSyncedAllMailCopiesStillAtGmailByID() async throws {
+        let test = try TestArchive()
+        defer { test.remove() }
+        let store = ArchiveSyncStore(archive: test.archive)
+        let account = test.account.id
+        let allMail = "[Gmail]/All Mail"
+        try await store.recordFolders(account, [SyncFolder(name: allMail, specialUse: "\\all"), SyncFolder(name: "Sent")])
+        _ = try await store.beginFolder(account, folder: allMail, uidValidity: 1, exists: 3)
+        let files = try Fixtures.allFiles().prefix(3).map { try Data(contentsOf: Fixtures.directory.appendingPathComponent($0)) }
+        // The top bit set: stored by bit pattern, read back unchanged.
+        let ids: [UInt64] = [0x17c9_a3b2_f0e1_d4c5, 0x8000_0000_0000_0001, 0x11bd_fc5c_ae0c_8191]
+        for (index, bytes) in files.enumerated() {
+            var message = test.raw(bytes, folder: allMail, uid: UInt32(index + 1))
+            message.gmailMessageID = ids[index]
+            try await store.write(message)
+        }
+        // A message in another folder with no Gmail ID is not listed.
+        try await store.write(test.raw(try Fixtures.data("01-"), folder: "Sent", uid: 1))
+        // One deleted at Gmail since sync is not listed either.
+        try await test.archive.database.write { db in
+            try db.execute(sql: """
+                UPDATE message_folders SET removed_from_server_at = 1 WHERE message_id = (SELECT id FROM messages WHERE gmail_msgid = ?)
+                """, arguments: [Int64(bitPattern: ids[2])])
+        }
+
+        let source = ArchiveGmailSource(archive: test.archive, account: account)
+        #expect(try await source.listGmailMessageIDs() == [ids[1], ids[0]].sorted())
+        #expect(try await source.readGmailMessage(ids[1]) == files[1])
+        #expect(try await source.readGmailMessage(ids[0]) == files[0])
+        await #expect(throws: (any Error).self) { _ = try await source.readGmailMessage(42) }
+    }
+}

@@ -18,6 +18,10 @@ public enum LoopbackError: Error, Equatable, CustomStringConvertible {
         case .timedOut: "Sign-in timed out: no reply from the browser within five minutes."
         case .stateMismatch: "Sign-in rejected: the reply did not carry the expected state value, so it may not come from this sign-in."
         case .missingCode: "Sign-in failed: the reply had no authorisation code."
+        case .providerError("admin_policy_enforced"):
+            "Your organisation's admin has blocked Stow (admin_policy_enforced). Ask your admin to approve Stow, or add a personal account instead. Nothing was saved."
+        case .providerError("access_denied"):
+            "Sign-in was cancelled or access was not allowed (access_denied). Nothing was saved."
         case .providerError(let error): "The provider refused sign-in (\(error))."
         case .listenerFailed(let reason): "Could not listen for the sign-in reply: \(reason)"
         case .cancelled: "Sign-in cancelled."

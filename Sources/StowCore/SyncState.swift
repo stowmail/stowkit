@@ -247,3 +247,101 @@ public enum PriorityHeaderFields {
         "Precedence", "Auto-Submitted", "Message-ID",
     ]
 }
+
+// MARK: - Gmail API (D-583, D-591)
+
+/// A listed Gmail message waiting to be downloaded through the API.
+public struct GmailQueuedMessage: Sendable, Equatable {
+    public var gmailID: UInt64
+    public var threadID: UInt64?
+    /// Gmail's `sizeEstimate`, for batching and the budget.
+    public var size: Int
+    public var internalDate: Date?
+    /// 0 personal, 1 deprioritised, 2 bulk (D-028).
+    public var priority: Int
+
+    public init(gmailID: UInt64, threadID: UInt64? = nil, size: Int, internalDate: Date? = nil, priority: Int = 0) {
+        self.gmailID = gmailID
+        self.threadID = threadID
+        self.size = size
+        self.internalDate = internalDate
+        self.priority = priority
+    }
+}
+
+/// How far an account's Gmail API sync has got (`gmail_sync_state`).
+public struct GmailSyncState: Sendable, Equatable {
+    /// Gmail's history ID taken before the full listing began; changes after it
+    /// are read with `history.list` (step 5). Nil until a full listing finishes.
+    public var historyID: UInt64?
+    public var fullListingCompletedAt: Date?
+    public var lastFullCheckAt: Date?
+    public var firstSyncCompletedAt: Date?
+
+    public init(historyID: UInt64? = nil, fullListingCompletedAt: Date? = nil, lastFullCheckAt: Date? = nil, firstSyncCompletedAt: Date? = nil) {
+        self.historyID = historyID
+        self.fullListingCompletedAt = fullListingCompletedAt
+        self.lastFullCheckAt = lastFullCheckAt
+        self.firstSyncCompletedAt = firstSyncCompletedAt
+    }
+}
+
+/// What the archive made of one page of Gmail's listing.
+public struct GmailListingSort: Sendable, Equatable {
+    /// Archived before (by IMAP or an earlier listing) and now known to be at
+    /// Gmail: their All Mail copy has no UID from here on, and nothing is downloaded.
+    public var adopted = 0
+    /// Already queued, recorded as unfetchable, or removed from the archive by the user.
+    public var known = 0
+    /// Not in the archive: these need their size and priority, then the queue.
+    public var new: [UInt64] = []
+
+    public init(adopted: Int = 0, known: Int = 0, new: [UInt64] = []) {
+        self.adopted = adopted
+        self.known = known
+        self.new = new
+    }
+}
+
+/// The archive's side of Gmail API sync (D-591): a queue keyed by Gmail ID, a
+/// cursor per account, and copies with no UID on the All Mail folder row.
+/// Downloaded messages go through the `RawMessageSink` with a `gmailAPI` key.
+public protocol GmailSyncStateStore: Sendable {
+    /// The account's All Mail folder name, creating the folder row if IMAP never did.
+    func gmailAllMail(_ account: AccountID) async throws -> String
+
+    func gmailState(_ account: AccountID) async throws -> GmailSyncState?
+
+    /// Before the account's first API listing writes anything: creates its state
+    /// row and raises the archive's reader level (D-591 item 5), in a
+    /// transaction of its own.
+    func beginGmailSync(_ account: AccountID) async throws
+
+    /// Sorts one page of listed IDs: adopts archived ones, counts known ones,
+    /// returns the new ones. In one transaction.
+    func sortGmailListing(_ account: AccountID, ids: [UInt64], at: Date) async throws -> GmailListingSort
+
+    /// Adds listed messages to the queue. Returns how many were added.
+    @discardableResult
+    func enqueueGmail(_ account: AccountID, _ messages: [GmailQueuedMessage]) async throws -> Int
+
+    /// The next messages to download: best priority first, oldest first, at
+    /// most `maxMessages` and, where possible, `maxBytes`. Leaves out ones that
+    /// failed earlier in run `runID`.
+    func nextGmailDownloads(_ account: AccountID, runID: String, maxMessages: Int, maxBytes: Int) async throws -> [GmailQueuedMessage]
+
+    /// Queued messages Gmail deleted before they could be downloaded.
+    func gmailVanishedBeforeDownload(_ account: AccountID, ids: [UInt64]) async throws
+
+    /// Counts one failed attempt per run; returns those that have now failed on
+    /// `threshold` separate runs, which are recorded as unfetchable (D-115).
+    func recordGmailFailedAttempt(_ account: AccountID, runID: String, ids: [UInt64], threshold: Int) async throws -> Set<UInt64>
+
+    /// After the last page of a full listing: stores the history ID taken before
+    /// it, and marks the first sync complete once nothing is left queued.
+    func gmailListingCompleted(_ account: AccountID, historyID: UInt64, at: Date) async throws
+
+    /// Marks the first sync complete once nothing is left queued.
+    func gmailQueueChecked(_ account: AccountID, at: Date) async throws
+}
+

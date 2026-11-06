@@ -64,7 +64,7 @@ import Testing
         for kill in [2, 5, 3] {
             let syncer = AccountSyncer(
                 account: harness.account,
-                openSession: try harness.sync.syncer(for: harness.account).openSessionForTests,
+                openSession: try #require(try harness.sync.syncer(for: harness.account) as? AccountSyncer).openSessionForTests,
                 sink: KillingSink(store, killOnWrite: kill),
                 state: store,
                 budget: ByteBudget(limit: nil, fileURL: nil),

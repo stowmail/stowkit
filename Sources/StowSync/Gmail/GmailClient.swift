@@ -13,23 +13,31 @@ struct GmailClient: Sendable {
     /// Hands out an access token; `true` asks for a fresh one.
     typealias AccessToken = @Sendable (_ forceRefresh: Bool) async throws -> String
 
+    let account: AccountID
     let transport: any GmailTransport
     private let accessToken: AccessToken
+    private let markNeedsSignIn: @Sendable () async throws -> Void
     private let logger = Logger(label: "ee.getstow.sync.gmail")
 
-    init(transport: any GmailTransport = URLSessionGmailTransport(), accessToken: @escaping AccessToken) {
+    init(account: AccountID, transport: any GmailTransport = URLSessionGmailTransport(),
+         markNeedsSignIn: @escaping @Sendable () async throws -> Void, accessToken: @escaping AccessToken) {
+        self.account = account
         self.transport = transport
+        self.markNeedsSignIn = markNeedsSignIn
         self.accessToken = accessToken
     }
 
     init(account: AccountID, tokens: TokenProvider, transport: any GmailTransport = URLSessionGmailTransport()) {
-        self.init(transport: transport) { force in try await tokens.accessToken(for: account, forceRefresh: force) }
+        self.init(account: account, transport: transport, markNeedsSignIn: { try await tokens.permissionMissing(account) }) { force in
+            try await tokens.accessToken(for: account, forceRefresh: force)
+        }
     }
 
     /// Sends one request and returns the body of a 2xx reply. A 401 is tried
     /// once more with a refreshed token, and only once. Throws `GmailNotFound`
     /// on a 404, which callers read (a message gone, a history ID too old);
-    /// every other failure is a `SyncError` (D-082).
+    /// every other failure is a `SyncError` (D-082), each with its own message
+    /// (D-592). Only a missing read permission marks the account.
     func send(_ request: GmailReadOnlyRequest) async throws -> Data {
         let get = request.get
         var response = try await transport.send(get, accessToken: try await accessToken(false))
@@ -39,8 +47,15 @@ struct GmailClient: Sendable {
         }
         if (200..<300).contains(response.status) { return response.body }
         let reason = GmailErrorBody.reason(in: response.body)
-        logger.notice("Gmail call failed", metadata: ["call": "\(get.name)", "status": "\(response.status)", "reason": "\(reason ?? "none")"])
-        throw Self.failure(status: response.status, reason: reason, retryAfter: response.retryAfter, call: get.name)
+        let failure = Self.failure(status: response.status, reason: reason, retryAfter: response.retryAfter, call: get.name, account: account)
+        let metadata: Logger.Metadata = ["call": "\(get.name)", "status": "\(response.status)", "reason": "\(reason ?? "none")"]
+        if case SyncError.gmailAPIUnavailable = failure {
+            logger.error("Gmail API refused Stow's project", metadata: metadata)
+        } else {
+            logger.notice("Gmail call failed", metadata: metadata)
+        }
+        if case SyncError.permissionMissing = failure { try await markNeedsSignIn() }
+        throw failure
     }
 
     /// Sends a request and decodes its reply.
@@ -70,7 +85,7 @@ struct GmailClient: Sendable {
 
     /// A failed reply as the error Stow shows. Only the status and Google's
     /// short reason code are kept, never its free-text message.
-    static func failure(status: Int, reason: String?, retryAfter: TimeInterval?, call: String) -> Error {
+    static func failure(status: Int, reason: String?, retryAfter: TimeInterval?, call: String, account: AccountID) -> Error {
         let detail = "HTTP \(status)\(reason.map { ", \($0)" } ?? "")"
         let wait = retryAfter.map { ", retry after \(Int($0)) s" } ?? ""
         switch (status, reason) {
@@ -80,6 +95,12 @@ struct GmailClient: Sendable {
             return SyncError.throttled("Gmail (\(detail)\(wait))")
         case (403, "dailyLimitExceeded"), (403, "quotaExceeded"):
             return SyncError.quotaExceeded("Gmail (\(detail))")
+        case (403, "insufficientPermissions"), (403, "ACCESS_TOKEN_SCOPE_INSUFFICIENT"):
+            return SyncError.permissionMissing(account)
+        case (403, "domainPolicy"):
+            return SyncError.blockedByAdmin
+        case (403, "accessNotConfigured"), (403, "SERVICE_DISABLED"):
+            return SyncError.gmailAPIUnavailable
         case (401, _):
             return SyncError.authenticationFailed("Gmail refused the access token twice, \(detail)")
         case (500..<600, _):
