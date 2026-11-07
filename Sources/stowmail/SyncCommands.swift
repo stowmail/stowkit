@@ -271,11 +271,14 @@ struct Verify: AsyncParsableCommand {
         let tokens = try CLI.tokenProvider(accounts: accounts)
         let budget = ByteBudget(limit: profile.dailyByteLimit, store: ArchiveSyncStore(archive: archive), account: record.account.id)
         let report: VerifyReport
+        var rows: GmailArchiveRows?
         if record.account.provider == .gmail, out == nil {
             // Gmail is read through the Gmail API and its messages named by Gmail ID (D-583, D-593).
             let verifier = GmailStoreVerifier(account: record.account, tokens: tokens,
                                               source: ArchiveGmailSource(archive: archive, account: record.account.id), budget: budget)
             report = try await verifier.run(sample: all ? nil : sample)
+            // The archive's side of moving to the API (D-591, D-594): one row per Gmail ID, no UID left on All Mail.
+            rows = try GmailArchiveRows.count(archive, account: record.account.id)
         } else {
             let factory = try SessionFactory(account: record.account, in: archive, tokens: tokens)
             let source: RawMessageSource
@@ -296,11 +299,23 @@ struct Verify: AsyncParsableCommand {
         if imported > 0 { print("Imported from files, not compared (no server copy): \(imported). `stowmail verify` checks them in the archive.") }
         print("Compared with the server: \(report.compared). Identical: \(report.identical).")
         for item in report.mismatched { print("  MISMATCH: \(item)") }
+        if report.threadIDsCompared > 0 {
+            print("Thread IDs compared with Gmail's: \(report.threadIDsCompared). Same: \(report.threadIDsCompared - report.threadIDMismatched.count).")
+            for item in report.threadIDMismatched { print("  THREAD ID DIFFERS: \(item)") }
+        }
         if !report.goneFromServer.isEmpty { print("Deleted on the server since sync (not compared): \(report.goneFromServer.count)") }
         for item in report.notCompared { print("  not compared (still on the server but not returned): \(item)") }
         for (index, reason) in report.skippedFolders.sorted(by: { $0.key < $1.key }) { print("Folder \(index + 1) skipped: \(reason)") }
+        if let rows {
+            print("Gmail rows: \(rows.allMailAPIRows) All Mail copies held by Gmail ID, \(rows.allMailRowsWithUID) still with an IMAP UID; "
+                + "\(rows.duplicateGmailIDs) Gmail IDs archived twice; \(rows.tombstones) removed from the archive.")
+            if !rows.isClean {
+                FileHandle.standardError.write(Data("Verification failed: duplicate Gmail IDs or All Mail copies not carried across.\n".utf8))
+                throw ExitCode(1)
+            }
+        }
         guard report.isClean else {
-            FileHandle.standardError.write(Data("Verification failed: \(report.mismatched.count) archived message(s) differ from the server.\n".utf8))
+            FileHandle.standardError.write(Data("Verification failed: \(report.mismatched.count) archived message(s) differ from the server, \(report.threadIDMismatched.count) thread ID(s) differ.\n".utf8))
             throw ExitCode(1)
         }
         print(report.notCompared.isEmpty && report.skippedFolders.isEmpty ? "All checked messages match." : "No mismatches among the messages compared.")

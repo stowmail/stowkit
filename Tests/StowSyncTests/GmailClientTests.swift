@@ -354,8 +354,10 @@ let everyGmailRequest: [GmailReadOnlyRequest] = [
 /// Archived Gmail mail in memory, by Gmail ID.
 struct MemoryGmailSource: GmailMessageSource {
     var messages: [UInt64: Data]
+    var threads: [UInt64: UInt64] = [:]
     func listGmailMessageIDs() async throws -> [UInt64] { messages.keys.sorted() }
     func readGmailMessage(_ id: UInt64) async throws -> Data { messages[id]! }
+    func storedGmailThreadID(_ id: UInt64) async throws -> UInt64? { threads[id] }
 }
 
 /// Step 8 (D-593): `verify --server` for Gmail compares archived bytes with
@@ -419,5 +421,35 @@ struct MemoryGmailSource: GmailMessageSource {
         }
         let report = try await verifier(clean).run(sample: nil)
         #expect(report.isClean && report.identical == 4 && report.goneFromServer.isEmpty)
+        #expect(report.threadIDsCompared == 0)
+    }
+
+    @Test func anUnusableReplyIsNotComparedAndTheRunCarriesOn() async throws {
+        let flaky = FakeGmailTransport { request, _ in
+            let id = request.url.path.components(separatedBy: "/").last ?? ""
+            if id == "33" {
+                return GmailHTTPResponse(status: 400, body: Data(#"{"error":{"code":400,"errors":[{"reason":"failedPrecondition"}]}}"#.utf8))
+            }
+            let raw = Self.archived[UInt64(id, radix: 16)!]!.base64EncodedString()
+            return GmailHTTPResponse(status: 200, body: Data(#"{"id":"\#(id)","threadId":"\#(id)","raw":"\#(raw)"}"#.utf8))
+        }
+        let report = try await verifier(flaky).run(sample: nil)
+        #expect(report.identical == 3 && report.notCompared == [.gmail(0x33)] && report.isClean)
+    }
+
+    /// The fake answers each message's own ID as its thread ID.
+    @Test func storedThreadIDsAreComparedWithTheAPIs() async throws {
+        let clean = FakeGmailTransport { request, _ in
+            let id = request.url.path.components(separatedBy: "/").last ?? ""
+            let raw = Self.archived[UInt64(id, radix: 16)!]!.base64EncodedString()
+            return GmailHTTPResponse(status: 200, body: Data(#"{"id":"\#(id)","threadId":"\#(id)","raw":"\#(raw)"}"#.utf8))
+        }
+        let source = MemoryGmailSource(messages: Self.archived, threads: [0x11: 0x11, 0x22: 0x22, 0x33: 0x99])
+        let verifier = GmailStoreVerifier(account: Account(id: gmailTestAccount, provider: .gmail, email: "sam@example.com", displayName: "Sam"),
+                                          client: gmailClient(clean), source: source, budget: ByteBudget(limit: nil, fileURL: nil))
+        let report = try await verifier.run(sample: nil)
+        #expect(report.identical == 4 && report.threadIDsCompared == 3)
+        #expect(report.threadIDMismatched == [.gmail(0x33)])
+        #expect(!report.isClean)
     }
 }

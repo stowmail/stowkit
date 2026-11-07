@@ -43,8 +43,12 @@ public struct VerifyReport: Sendable, Equatable {
     public var notCompared: [VerifyItem] = []
     /// Folders not checked, with why (folder gone, or UIDVALIDITY changed).
     public var skippedFolders: [Int: String] = [:]
+    /// Gmail only: messages whose stored thread ID was compared with the API's `threadId`.
+    public var threadIDsCompared = 0
+    /// Gmail only: the stored thread ID differs from the API's (D-583's ID check).
+    public var threadIDMismatched: [VerifyItem] = []
 
-    public var isClean: Bool { mismatched.isEmpty }
+    public var isClean: Bool { mismatched.isEmpty && threadIDMismatched.isEmpty }
 }
 
 /// Re-fetches stored messages read-only and checks they are byte-for-byte what

@@ -62,6 +62,11 @@ public struct GmailStoreVerifier: Sendable {
             } catch is GmailNotFound {
                 report.goneFromServer.append(.gmail(id))
                 continue
+            } catch SyncError.commandFailed, SyncError.protocolViolation {
+                // One unusable reply (seen once on the test account: HTTP 400 failedPrecondition,
+                // gone on the next run) is reported as not compared, as over IMAP, not a failed run.
+                report.notCompared.append(.gmail(id))
+                continue
             }
             let bytes = message.raw ?? Data()
             try await budget.record(Int64(bytes.count))
@@ -71,8 +76,14 @@ public struct GmailStoreVerifier: Sendable {
             } else {
                 report.mismatched.append(.gmail(id))
             }
+            // The thread key `g:<id>` (D-205, D-566) depends on IMAP's X-GM-THRID being the API's threadId.
+            if let thread = try await source.storedGmailThreadID(id) {
+                report.threadIDsCompared += 1
+                if message.threadID.number != thread { report.threadIDMismatched.append(.gmail(id)) }
+            }
         }
         report.mismatched.sort()
+        report.threadIDMismatched.sort()
         report.goneFromServer.sort()
         logger.notice("Verify finished", metadata: [
             "account": "\(account.id)", "sampled": "\(report.sampled)", "compared": "\(report.compared)",

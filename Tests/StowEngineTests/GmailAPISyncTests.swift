@@ -371,6 +371,7 @@ actor FakeGmailAPI: GmailTransport {
         #expect(before == fixtures.count)
         #expect(try harness.count("message_folders", "uid IS NOT NULL") == fixtures.count)
         let firstIDs = try await harness.archive.database.read { db in try Int64.fetchAll(db, sql: "SELECT id FROM messages ORDER BY id") }
+        #expect(try GmailArchiveRows.count(harness.archive, account: harness.account.id).allMailRowsWithUID == fixtures.count)
 
         let api = FakeGmailAPI(fixtures)
         let report = try await syncer(harness, api).run()
@@ -384,6 +385,9 @@ actor FakeGmailAPI: GmailTransport {
         #expect(try harness.count("tombstones") == 0)
         #expect(try harness.count("messages", "source_state != 'present'") == 0)
         #expect(try readerLevel(harness) == "3")
+        // What `verify --server` checks after the move: one row per Gmail ID, every All Mail copy held by ID.
+        #expect(try GmailArchiveRows.count(harness.archive, account: harness.account.id)
+            == GmailArchiveRows(duplicateGmailIDs: 0, allMailRowsWithUID: 0, allMailAPIRows: fixtures.count, tombstones: 0))
     }
 
     /// D-113 and D-115 for the API: deleted before download leaves the queue; a

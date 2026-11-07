@@ -134,4 +134,10 @@ public protocol GmailMessageSource: Sendable {
     func listGmailMessageIDs() async throws -> [UInt64]
     /// The archived bytes of the message with this Gmail ID.
     func readGmailMessage(_ id: UInt64) async throws -> Data
+    /// The thread ID (`X-GM-THRID`) stored with the message, if any.
+    func storedGmailThreadID(_ id: UInt64) async throws -> UInt64?
+}
+
+extension GmailMessageSource {
+    public func storedGmailThreadID(_ id: UInt64) async throws -> UInt64? { nil }
 }

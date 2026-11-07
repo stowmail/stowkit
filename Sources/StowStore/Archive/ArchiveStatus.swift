@@ -198,6 +198,14 @@ public struct ArchiveGmailSource: GmailMessageSource {
         }
     }
 
+    public func storedGmailThreadID(_ id: UInt64) async throws -> UInt64? {
+        try await archive.database.read { [account] db in
+            try Int64.fetchOne(db, sql: """
+                SELECT gmail_thrid FROM messages WHERE account_id = ? AND gmail_msgid = ? AND origin = 'synced' ORDER BY id LIMIT 1
+                """, arguments: [account.rawValue, Int64(bitPattern: id)]).map { UInt64(bitPattern: $0) }
+        }
+    }
+
     public func readGmailMessage(_ id: UInt64) async throws -> Data {
         let found = try await archive.database.read { [account] db -> (hash: Data, state: String)? in
             try Row.fetchOne(db, sql: """
@@ -246,5 +254,46 @@ public struct ArchiveRawSource: RawMessageSource {
         guard let found else { throw CocoaError(.fileNoSuchFile) }
         let bytes = try archive.rawMessage(hash: found.hash, state: found.state)
         return RawMessage(key: key, internalDate: Date(timeIntervalSince1970: TimeInterval(found.date)), size: found.size, bytes: bytes)
+    }
+}
+
+/// What `verify --server` checks in the archive for a Gmail account that syncs
+/// through the API (D-591, D-594): counts only, never content.
+public struct GmailArchiveRows: Sendable, Equatable {
+    /// Gmail IDs held by more than one synced message: a download that should have been an adoption.
+    public var duplicateGmailIDs = 0
+    /// All Mail copies the server still has that keep an IMAP UID: not yet carried across to the API.
+    public var allMailRowsWithUID = 0
+    /// All Mail copies the server still has, held as API copies with no UID.
+    public var allMailAPIRows = 0
+    /// Messages removed from the archive (tombstones) for this account.
+    public var tombstones = 0
+
+    public init(duplicateGmailIDs: Int = 0, allMailRowsWithUID: Int = 0, allMailAPIRows: Int = 0, tombstones: Int = 0) {
+        self.duplicateGmailIDs = duplicateGmailIDs
+        self.allMailRowsWithUID = allMailRowsWithUID
+        self.allMailAPIRows = allMailAPIRows
+        self.tombstones = tombstones
+    }
+
+    public var isClean: Bool { duplicateGmailIDs == 0 && allMailRowsWithUID == 0 }
+
+    public static func count(_ archive: Archive, account: AccountID) throws -> GmailArchiveRows {
+        try archive.database.read { db in
+            let id = account.rawValue
+            var rows = GmailArchiveRows()
+            rows.duplicateGmailIDs = try Int.fetchOne(db, sql: """
+                SELECT count(*) FROM (SELECT gmail_msgid FROM messages WHERE account_id = ? AND gmail_msgid IS NOT NULL AND origin = 'synced'
+                GROUP BY gmail_msgid HAVING count(*) > 1)
+                """, arguments: [id]) ?? 0
+            let copies = """
+                FROM message_folders mf JOIN folders f ON f.id = mf.folder_id
+                WHERE f.account_id = ? AND f.special_use = '\\all' AND mf.removed_from_server_at IS NULL
+                """
+            rows.allMailRowsWithUID = try Int.fetchOne(db, sql: "SELECT count(*) \(copies) AND mf.uid IS NOT NULL", arguments: [id]) ?? 0
+            rows.allMailAPIRows = try Int.fetchOne(db, sql: "SELECT count(*) \(copies) AND mf.uid IS NULL", arguments: [id]) ?? 0
+            rows.tombstones = try Int.fetchOne(db, sql: "SELECT count(*) FROM tombstones WHERE account_id = ?", arguments: [id]) ?? 0
+            return rows
+        }
     }
 }
