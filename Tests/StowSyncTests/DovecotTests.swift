@@ -45,7 +45,7 @@ enum Dovecot {
         var result: [String: [UInt32: [String]]] = [:]
         for folder in try await session.listFolders() where Dovecot.folders.contains(folder.name) || folder.name == "Junk" {
             let status = try await session.examine(folder)
-            let states = status.exists == 0 ? [] : try await session.fetchStates(1...UInt32.max, gmail: false)
+            let states = status.exists == 0 ? [] : try await session.fetchStates(1...UInt32.max)
             result[folder.name] = Dictionary(uniqueKeysWithValues: states.map { ($0.uid, $0.flags.sorted()) })
         }
         await session.logout()

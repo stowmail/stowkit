@@ -15,21 +15,15 @@ public final class FakeIMAPServer: @unchecked Sendable {
     public struct Message {
         public var uid: UInt32
         public var bytes: Data
-        public var labels: [String]
-        public var gmailMessageID: UInt64
-        public var gmailThreadID: UInt64
         public var internalDate: String
         public var flags: [String]
-        /// CONDSTORE mod-sequence: raise it whenever flags or labels change.
+        /// CONDSTORE mod-sequence: raise it whenever flags change.
         public var modSeq: UInt64
 
-        public init(uid: UInt32, bytes: Data, labels: [String] = [], gmailMessageID: UInt64 = 0, gmailThreadID: UInt64 = 0,
+        public init(uid: UInt32, bytes: Data,
                     internalDate: String = "17-Jul-2024 02:44:25 -0700", flags: [String] = [], modSeq: UInt64 = 1) {
             self.uid = uid
             self.bytes = bytes
-            self.labels = labels
-            self.gmailMessageID = gmailMessageID
-            self.gmailThreadID = gmailThreadID
             self.internalDate = internalDate
             self.flags = flags
             self.modSeq = modSeq
@@ -120,7 +114,7 @@ public final class FakeIMAPServer: @unchecked Sendable {
     private let queue = DispatchQueue(label: "ee.getstow.tests.fake-imap")
     private var listener: NWListener?
     private var _mailboxes: [Mailbox] = []
-    private var _capabilities = ["IMAP4rev1", "X-GM-EXT-1", "AUTH=XOAUTH2", "SASL-IR", "UIDPLUS"]
+    private var _capabilities = ["IMAP4rev1", "AUTH=XOAUTH2", "SASL-IR", "UIDPLUS"]
     private var _acceptedTokens: Set<String> = ["good-token"]
     private var _acceptedPasswords: Set<String> = []
     private var _plainUsers: [String] = []
@@ -549,12 +543,6 @@ public final class FakeIMAPServer: @unchecked Sendable {
                 items.append("FLAGS (\(message.flags.joined(separator: " ")))")
             }
             if attributes.contains("INTERNALDATE") { items.append("INTERNALDATE \"\(message.internalDate)\"") }
-            if attributes.contains("X-GM-MSGID") { items.append("X-GM-MSGID \(message.gmailMessageID)") }
-            if attributes.contains("X-GM-THRID") { items.append("X-GM-THRID \(message.gmailThreadID)") }
-            if attributes.contains("X-GM-LABELS") {
-                let labels = message.labels.map { $0.hasPrefix("\\") ? $0 : Self.quote($0) }.joined(separator: " ")
-                items.append("X-GM-LABELS (\(labels))")
-            }
             if changedSince != nil { items.append("MODSEQ (\(message.modSeq))") }
             out.append(Data("* \(index + 1) FETCH (\(items.joined(separator: " "))".utf8))
             if let headerFields {

@@ -30,21 +30,11 @@ import Testing
         IMAPFolder(name: name, rawName: Array(name.utf8), separator: "/", attributes: Set(attributes))
     }
 
-    @Test func gmailUsesTheAllFolderWhateverItIsCalled() throws {
-        let folders = [folder("INBOX"), folder("[Gmail]", "\\Noselect"), folder("[Gmail]/Alle Nachrichten", "\\All"),
-                       folder("[Gmail]/Spam", "\\Junk"), folder("[Gmail]/Papierkorb", "\\Trash"), folder("Work")]
-        let plan = try FolderPlanner.plan(provider: .gmail, folders: folders, capabilities: ["X-GM-EXT-1"])
-        #expect(plan.toSync.map(\.name) == ["[Gmail]/Alle Nachrichten"])
-        #expect(plan.skipped.count == 5)
-        #expect(plan.skipped.first { $0.folder.name == "[Gmail]/Spam" }?.reason.contains("D-104") == true)
-    }
-
-    @Test func gmailWithoutExtensionsOrAllMailFails() {
-        #expect(throws: SyncError.self) {
-            try FolderPlanner.plan(provider: .gmail, folders: [folder("x", "\\All")], capabilities: [])
-        }
-        #expect(throws: SyncError.allMailNotFound) {
-            try FolderPlanner.plan(provider: .gmail, folders: [folder("INBOX")], capabilities: ["X-GM-EXT-1"])
+    /// Gmail syncs through the Gmail API (D-583); its IMAP planning is gone (D-601).
+    @Test func gmailIsNeverPlannedOverIMAP() {
+        let folders = [folder("INBOX"), folder("[Gmail]/All Mail", "\\All")]
+        #expect(throws: SyncError.gmailUsesTheAPI) {
+            try FolderPlanner.plan(provider: .gmail, folders: folders, capabilities: ["X-GM-EXT-1"])
         }
     }
 
@@ -74,7 +64,7 @@ import Testing
         #expect(skipped.count == 12)
         #expect(skipped["Calendar/Birthdays"]?.contains("D-112") == true)
         #expect(skipped["Agenda"]?.contains("\\calendar") == true)
-        // Gmail is not affected: a Gmail label called Calendar is just a label.
+        // The name rule alone matches a top-level Calendar.
         #expect(FolderPlanner.nonMailReason(folder("Calendar")) != nil)
     }
 
@@ -116,21 +106,21 @@ import Testing
         #expect(try await budget.allows(Int64.max / 2))
     }
 
-    @Test func gmailLimitStaysUnderGooglesCap() {
+    @Test func gmailHasNoIMAPServerAndKeepsItsDailyCap() {
         #expect(ProviderProfile.gmail.dailyByteLimit == 2_000_000_000)
-        #expect(ProviderProfile.gmail.maxConnections <= 3)
+        #expect(ProviderProfile.gmail.maxConnections == ProviderProfile.gmailAPIRequestsInFlight)
+        #expect(ProviderProfile.gmail.endpoint == nil) // D-601
         #expect(ProviderProfile.microsoft.dailyByteLimit == nil)
         #expect((1...2).contains(ProviderProfile.microsoft.maxConnections))
-        #expect(ProviderProfile.gmail.endpoint == IMAPEndpoint(host: "imap.gmail.com", port: 993))
         #expect(ProviderProfile.microsoft.endpoint == IMAPEndpoint(host: "outlook.office365.com", port: 993))
-        #expect(ProviderProfile.gmail.endpoint.useTLS && ProviderProfile.microsoft.endpoint.useTLS)
+        #expect(ProviderProfile.microsoft.endpoint?.useTLS == true)
     }
 
     @Test func icloudKeepsToTwoConnectionsOnImplicitTLS() throws {
         #expect(try ProviderProfile.forProvider(.icloud) == .icloud)
         #expect(throws: SyncError.importOnly) { try ProviderProfile.forProvider(.imported) }
         #expect(ProviderProfile.icloud.endpoint == IMAPEndpoint(host: "imap.mail.me.com", port: 993))
-        #expect(ProviderProfile.icloud.endpoint.useTLS && ProviderProfile.icloud.endpoint.allowsPassword)
+        #expect(ProviderProfile.icloud.endpoint?.useTLS == true && ProviderProfile.icloud.endpoint?.allowsPassword == true)
         #expect(ProviderProfile.icloud.maxConnections == 2) // D-475
         #expect(ProviderProfile.icloud.dailyByteLimit == nil)
         // A password goes only over implicit TLS, on any port (D-467, widened by D-570
@@ -161,10 +151,10 @@ import Testing
             .login(user: "u@example.com", password: try! MailPassword(serverPassword: "a server password")),
             .listAll,
             .examine(rawName: Array("INBOX".utf8), condstore: false), .examine(rawName: Array("INBOX".utf8), condstore: true),
-            .fetchSummaries(1...10, gmail: false), .fetchSummaries(1...10, gmail: true), .fetchSummariesOf(uids: [4, 9]),
+            .fetchSummaries(1...10), .fetchSummaries(1...10), .fetchSummariesOf(uids: [4, 9]),
             .fetchHeaderFields(.list([3, 4]), fields: ["From", "List-Unsubscribe"]), .fetchHeaderFields(.range(1...9), fields: ["Message-ID"]),
-            .fetchMessages(uids: [1, 2, 5], gmail: true), .fetchStates(1...10, gmail: true, changedSince: nil),
-            .fetchStates(1...10, gmail: false, changedSince: 42), .fetchGmailIDs(1...10),
+            .fetchMessages(uids: [1, 2, 5]), .fetchStates(1...10, changedSince: nil),
+            .fetchStates(1...10, changedSince: 42),
             .getQuotaRoot(rawName: Array("INBOX".utf8)), .logout,
         ]
         // GETQUOTAROOT (D-404), AUTHENTICATE PLAIN (D-467) and LOGIN (D-570) are the only commands added since D-109; nothing else may appear.

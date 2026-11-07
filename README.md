@@ -17,20 +17,20 @@
 
 Stow is a private email archive for Mac that brings years of old email down from the cloud into an encrypted, searchable archive on your computer. *Your mail. Your Mac.*
 
-This repository is the engine: IMAP sync for Gmail and Outlook, encrypted storage, full-text search, rules and a local read-only MCP server, plus the `stowmail` CLI. It is open source under Apache 2.0 so you can read every line that touches your mail. It never sends, deletes or changes email in your account.
+This repository is the engine: Gmail sync through the Gmail API with Google's read-only permission, IMAP sync for Outlook, iCloud and other servers, encrypted storage, full-text search, rules and a local read-only MCP server, plus the `stowmail` CLI. It is open source under Apache 2.0 so you can read every line that touches your mail. It never sends, deletes or changes email in your account.
 
 **Just want the app?** Download Stow from [getstow.ee](https://getstow.ee).
 
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="docs/images/how-it-works-dark.png">
-    <img src="docs/images/how-it-works-light.png" alt="How it works: Stow reads mail from Gmail and Outlook over IMAP with OAuth, read-only, into an encrypted archive on your Mac with full-text search, bulk-mail rules and a local read-only MCP server. Stow servers: none." width="100%">
+    <img src="docs/images/how-it-works-light.png" alt="How it works: Stow reads mail from Gmail through the Gmail API and from Outlook over IMAP, signed in with OAuth, read-only, into an encrypted archive on your Mac with full-text search, bulk-mail rules and a local read-only MCP server. Stow servers: none." width="100%">
   </picture>
 </p>
 
 ## For developers
 
-The engine uses IMAP with OAuth, encrypted SQLite storage, full-text search,
+The engine uses the Gmail API and IMAP with OAuth, encrypted SQLite storage, full-text search,
 bulk-mail rules and a local MCP server. No UI code lives here.
 
 Status: sync, encrypted archive, search, rules, background sync and a local MCP server are working, and the engine has had a security review (October 2026). It is pre-1.0: interfaces may still change. Comments cite design decisions as D-numbers from Stow's internal decision log.
@@ -67,7 +67,7 @@ tokens and encryption keys live in the macOS Keychain only.
 |---|---|
 | `StowCore` | Shared types and protocols: accounts and the account directory, raw messages, sink and source, sync state, headers, search shapes, log redaction. A file-based raw message store for tests and imports. No package dependencies. |
 | `StowSecrets` | Keychain access, OAuth token storage, archive key management, the recovery key and its bundle, app configuration. |
-| `StowSync` | IMAP sync and OAuth sign-in. Read-only by construction: commands only through `ReadOnlyCommand` (EXAMINE, `BODY.PEEK[]`). |
+| `StowSync` | Gmail API sync, IMAP sync and OAuth sign-in. Read-only by construction: Gmail calls only through `GmailReadOnlyRequest` (GET only), IMAP commands only through `ReadOnlyCommand` (EXAMINE, `BODY.PEEK[]`). |
 | `StowStore` | MIME parsing, encrypted database, skeletons and attachment files, the sync sink and state, accounts, tidy-up, coverage, verify, export, archive location. |
 | `StowSearch` | FTS5 search, text extraction and OCR. |
 | `StowRules` | Bulk-mail signals and rules, from headers only. |

@@ -189,11 +189,11 @@ public struct AccountSyncer: Sendable {
         self.now = now
     }
 
-    var gmail: Bool { account.provider == .gmail }
-
     /// Runs until everything is downloaded, the limit, budget or deadline is
     /// reached, or a non-retryable error occurs. Retryable failures reconnect with back-off.
     public func run(_ options: SyncOptions = SyncOptions(), onEvent: @escaping @Sendable (SyncEvent) -> Void = { _ in }) async throws -> SyncReport {
+        // Gmail syncs through the Gmail API (`GmailSyncer`); its IMAP path is gone (D-601).
+        guard account.provider != .gmail else { throw SyncError.gmailUsesTheAPI }
         var report = SyncReport()
         // Identifies this run, so a reconnect within it never counts as a second attempt (D-115).
         let runID = UUID().uuidString
@@ -334,7 +334,7 @@ public struct AccountSyncer: Sendable {
         var windowStart = listedThrough + 1
         while windowStart <= upper {
             let windowEnd = upper - windowStart < window ? upper : windowStart + window - 1
-            let summaries = try await session.fetchUIDs(windowStart...windowEnd, gmail: gmail)
+            let summaries = try await session.fetchUIDs(windowStart...windowEnd)
             var priorities: [UInt32: Int] = [:]
             if let prioritiser, !summaries.isEmpty {
                 for start in stride(from: 0, to: summaries.count, by: options.headerChunk) {
@@ -346,7 +346,7 @@ public struct AccountSyncer: Sendable {
             }
             let messages = summaries.map {
                 QueuedMessage(folder: folder.name, uidValidity: status.uidValidity, uid: $0.uid, size: $0.size,
-                              internalDate: $0.internalDate, priority: priorities[$0.uid] ?? 0, gmailMessageID: $0.gmailMessageID)
+                              internalDate: $0.internalDate, priority: priorities[$0.uid] ?? 0)
             }
             // Without UIDNEXT the window ran to the end, so the highest UID seen is the honest mark.
             let through = windowEnd == UInt32.max ? (summaries.last?.uid ?? listedThrough) : windowEnd
@@ -400,9 +400,7 @@ public struct AccountSyncer: Sendable {
             for message in messages {
                 try await sink.write(RawMessage(
                     key: RawMessageKey(accountID: account.id, folder: first.folder, uidValidity: first.uidValidity, uid: message.uid),
-                    labels: message.labels,
-                    gmailMessageID: message.gmailMessageID,
-                    gmailThreadID: message.gmailThreadID,
+                    labels: [],
                     internalDate: message.internalDate,
                     size: message.size,
                     flags: message.flags,
@@ -465,7 +463,7 @@ public struct AccountSyncer: Sendable {
         _ uids: [UInt32], sizes: [UInt32: Int], session: IMAPSession, options: SyncOptions, folderIndex: Int
     ) async throws -> [FetchedMessage] {
         func expected(_ uids: [UInt32]) -> Int { uids.reduce(0) { $0 + min(sizes[$1] ?? 0, Int(IMAPConnection.bodySizeLimit)) } }
-        let first = try await session.fetchMessagesWithDiagnostics(uids: uids, gmail: gmail, expectedBytes: expected(uids))
+        let first = try await session.fetchMessagesWithDiagnostics(uids: uids, expectedBytes: expected(uids))
         var messages = checked(first.messages, folderIndex: folderIndex)
         var missing = Self.missing(uids, from: messages)
         guard !missing.isEmpty else { return messages }
@@ -479,7 +477,7 @@ public struct AccountSyncer: Sendable {
             }
             for start in stride(from: 0, to: missing.count, by: round.chunkSize) {
                 let chunk = Array(missing[start..<min(start + round.chunkSize, missing.count)])
-                let reply = try await session.fetchMessagesWithDiagnostics(uids: chunk, gmail: gmail, expectedBytes: expected(chunk))
+                let reply = try await session.fetchMessagesWithDiagnostics(uids: chunk, expectedBytes: expected(chunk))
                 let accepted = checked(reply.messages, folderIndex: folderIndex)
                 messages += accepted
                 if accepted.count < chunk.count {
@@ -556,8 +554,17 @@ public struct AccountSyncer: Sendable {
         for folder in plan.toSync {
             guard let open = opened[folder.name],
                   let saved = try await state.folderState(account.id, folder: folder.name),
-                  saved.uidValidity == open.status.uidValidity, saved.listedThroughUID > 0
+                  saved.uidValidity == open.status.uidValidity
             else { continue }
+            guard saved.listedThroughUID > 0 else {
+                // Empty, and nothing ever listed in it: nothing to compare, so a full
+                // check is complete. Without this, one always-empty folder (an unused
+                // Deleted Items) kept the deletion check from ever being current (D-408).
+                if mode == .full, open.status.exists == 0 {
+                    fullyChecked.append((folder.name, saved.uidValidity, open.status.highestModSeq))
+                }
+                continue
+            }
             let range = 1...saved.listedThroughUID
             switch mode {
             case .skip:
@@ -566,7 +573,7 @@ public struct AccountSyncer: Sendable {
                 // Only with CONDSTORE, and only when something changed since the last check.
                 guard condstore, let since = saved.highestModSeq, let current = open.status.highestModSeq, current > since else { continue }
                 _ = try await session.examine(folder, condstore: true)
-                let states = try await session.fetchStates(range, gmail: gmail, changedSince: since)
+                let states = try await session.fetchStates(range, changedSince: since)
                 try await state.applyCopyStates(account.id, folder: folder.name, uidValidity: saved.uidValidity, states, at: at)
                 flagsUpdated += states.count
                 try await state.folderChecked(account.id, folder: folder.name, uidValidity: saved.uidValidity,
@@ -578,7 +585,7 @@ public struct AccountSyncer: Sendable {
                 var windowStart = range.lowerBound
                 while windowStart <= range.upperBound {
                     let windowEnd = range.upperBound - windowStart < window ? range.upperBound : windowStart + window - 1
-                    states += try await session.fetchStates(windowStart...windowEnd, gmail: gmail)
+                    states += try await session.fetchStates(windowStart...windowEnd)
                     guard windowEnd < range.upperBound else { break }
                     windowStart = windowEnd + 1
                 }
@@ -626,44 +633,26 @@ public struct AccountSyncer: Sendable {
         }
     }
 
-    /// Spam, trashed or gone, for messages no longer anywhere sync looks (D-039).
-    /// Gmail: their message IDs are looked for in Spam and Bin. Microsoft: their
-    /// Message-IDs are looked for in Junk (Deleted Items is synced, so trashed
-    /// messages never get here). Only identifiers are fetched from those
-    /// folders, never content.
+    /// Spam or gone, for messages no longer anywhere sync looks (D-039). Their
+    /// Message-IDs are looked for in Junk (Deleted Items and Trash are synced,
+    /// so trashed messages never get here). Only identifiers are fetched from
+    /// Junk, never content. Gmail classifies through the API (D-596).
     private func classify(_ vanished: [VanishedMessage], folders: [IMAPFolder], session: IMAPSession) async throws -> [Int64: SourceState] {
         var result: [Int64: SourceState] = [:]
-        if gmail {
-            let spam = try await gmailIDs(in: folders.first { $0.has("\\Junk") && $0.isSelectable }, session: session)
-            let trash = try await gmailIDs(in: folders.first { $0.has("\\Trash") && $0.isSelectable }, session: session)
-            for message in vanished {
-                guard let id = message.gmailMessageID else { result[message.messageID] = .gone; continue }
-                result[message.messageID] = spam.contains(id) ? .spam : trash.contains(id) ? .trashed : .gone
-            }
-        } else {
-            var junkIDs: Set<String> = []
-            if let junk = folders.first(where: { $0.has("\\Junk") && $0.isSelectable }),
-               vanished.contains(where: { $0.rfc822MessageID != nil }) {
-                let status = try await session.examine(junk)
-                if status.exists > 0 {
-                    let upper = status.uidNext.map { max($0, 2) - 1 } ?? UInt32.max
-                    for fields in try await session.fetchHeaderFields(1...upper, fields: ["Message-ID"]).values {
-                        if let id = HeaderParser().parseHeaders(fields).messageID { junkIDs.insert(id) }
-                    }
+        var junkIDs: Set<String> = []
+        if let junk = folders.first(where: { $0.has("\\Junk") && $0.isSelectable }),
+           vanished.contains(where: { $0.rfc822MessageID != nil }) {
+            let status = try await session.examine(junk)
+            if status.exists > 0 {
+                let upper = status.uidNext.map { max($0, 2) - 1 } ?? UInt32.max
+                for fields in try await session.fetchHeaderFields(1...upper, fields: ["Message-ID"]).values {
+                    if let id = HeaderParser().parseHeaders(fields).messageID { junkIDs.insert(id) }
                 }
             }
-            for message in vanished {
-                result[message.messageID] = message.rfc822MessageID.map(junkIDs.contains) == true ? .spam : .gone
-            }
+        }
+        for message in vanished {
+            result[message.messageID] = message.rfc822MessageID.map(junkIDs.contains) == true ? .spam : .gone
         }
         return result
-    }
-
-    private func gmailIDs(in folder: IMAPFolder?, session: IMAPSession) async throws -> Set<UInt64> {
-        guard let folder else { return [] }
-        let status = try await session.examine(folder)
-        guard status.exists > 0 else { return [] }
-        let upper = status.uidNext.map { max($0, 2) - 1 } ?? UInt32.max
-        return try await session.fetchGmailIDs(1...upper)
     }
 }

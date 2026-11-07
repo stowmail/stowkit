@@ -33,9 +33,6 @@ struct FetchAssembler {
         var uid: UInt32?
         var size: Int?
         var internalDate: Date?
-        var gmailMessageID: UInt64?
-        var gmailThreadID: UInt64?
-        var labels: [String] = []
         var flags: [String] = []
         var modSeq: UInt64?
         var body: Data?
@@ -81,9 +78,6 @@ struct FetchAssembler {
             case .uid(let uid): current?.uid = uid.rawValue
             case .rfc822Size(let size): current?.size = min(max(size, 0), Self.maximumReportedSize)
             case .internalDate(let date): current?.internalDate = date.date
-            case .gmailMessageID(let id): current?.gmailMessageID = id
-            case .gmailThreadID(let id): current?.gmailThreadID = id
-            case .gmailLabels(let labels): current?.labels = labels.map { $0.makeDisplayString() }
             case .flags(let flags): current?.flags = flags.map { String($0) }
             case .fetchModificationSequence(let value): current?.modSeq = UInt64(value)
             case .nilBody(.body(section: let section, offset: nil)) where Self.isHeaderFields(section):

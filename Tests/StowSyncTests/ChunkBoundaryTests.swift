@@ -112,7 +112,7 @@ func literalBoundaryCuts(_ reply: Data) -> [Int] {
     /// its final CR and LF. Every stored message must equal the original.
     @Test func splitRepliesAreStoredByteForByte() async throws {
         let fixtures = try Fixtures.all()
-        let server = gmailServer(fixtures)
+        let server = microsoftServer(fixtures)
         server.splitFetchReply = { literalBoundaryCuts($0) }
         let harness = try await SyncHarness(server: server)
         defer { harness.cleanUp() }
@@ -129,7 +129,7 @@ func literalBoundaryCuts(_ reply: Data) -> [Int] {
     /// The same, through the D-118 retry paths (sub-batches, then one UID at a time).
     @Test func splitRepliesOnTheRetryPathsAreByteForByte() async throws {
         let fixtures = try Fixtures.small()
-        let server = gmailServer(fixtures)
+        let server = microsoftServer(fixtures)
         server.splitFetchReply = { literalBoundaryCuts($0) }
         server.refusals = [5: 1, 9: 2, 13: 2]
         let harness = try await SyncHarness(server: server)
@@ -154,7 +154,7 @@ func literalBoundaryCuts(_ reply: Data) -> [Int] {
 
     @Test func syncStoresExactBytesWhateverRFC822SizeSays() async throws {
         let fixtures = try Fixtures.all()
-        let server = gmailServer(fixtures)
+        let server = microsoftServer(fixtures)
         server.reportedSize = Self.estimate
         server.splitFetchReply = { literalBoundaryCuts($0) }
         let harness = try await SyncHarness(server: server)

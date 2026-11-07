@@ -19,7 +19,7 @@ final class EngineHarness: @unchecked Sendable {
     let account: Account
     let sleeps = RecordedSleeps()
 
-    init(server: FakeIMAPServer, provider: Provider = .gmail, email: String = "sam@example.com") async throws {
+    init(server: FakeIMAPServer, provider: Provider = .microsoft, email: String = "sam@example.com") async throws {
         root = TestFixtures.temporaryDirectory()
         archive = try Archive.open(ArchiveLocation(root: root), keys: keys)
         self.server = server
@@ -61,23 +61,31 @@ final class EngineHarness: @unchecked Sendable {
     }
 }
 
-let allMail = "[Gmail]/All Mail"
+extension EngineHarness {
+    /// A Gmail account's archive. Gmail syncs only through the Gmail API (D-583,
+    /// D-601), which tests play with `FakeGmailAPI`; the IMAP server is never reached.
+    static func gmail() async throws -> EngineHarness {
+        try await EngineHarness(server: FakeIMAPServer(), provider: .gmail)
+    }
+}
 
-/// A Gmail-like server: All Mail with the fixtures (sparse UIDs, labels,
-/// Gmail IDs), plus Spam, Bin, a label folder and the [Gmail] parent.
-func gmailServer(_ fixtures: [(name: String, bytes: Data)], uidValidity: UInt32 = 7, condstore: Bool = true) -> FakeIMAPServer {
+let inbox = "INBOX"
+
+/// A Microsoft-like server: INBOX with the fixtures (sparse UIDs, the first
+/// one read), plus an empty Junk Email (`\Junk`, never synced) and Deleted
+/// Items (`\Trash`, synced), as `FolderPlanner.planMicrosoft` expects.
+/// Exchange Online does not offer CONDSTORE; `condstore` adds it for the tests
+/// of that path, which is the same for every IMAP provider.
+func microsoftServer(_ fixtures: [(name: String, bytes: Data)], uidValidity: UInt32 = 7, condstore: Bool = false) -> FakeIMAPServer {
     let messages = fixtures.enumerated().map { index, fixture in
-        FakeIMAPServer.Message(uid: UInt32(index * 2 + 3), bytes: fixture.bytes, labels: ["\\Inbox"],
-                               gmailMessageID: 1_900_000_000_000 + UInt64(index), gmailThreadID: 1_900_000_000_000 + UInt64(index),
-                               flags: index == 0 ? ["\\Seen"] : [])
+        FakeIMAPServer.Message(uid: UInt32(index * 2 + 3), bytes: fixture.bytes, flags: index == 0 ? ["\\Seen"] : [])
     }
     let server = FakeIMAPServer(mailboxes: [
-        .init(name: "INBOX", attributes: ["\\HasNoChildren"], uidValidity: 1, messages: []),
-        .init(name: "[Gmail]", attributes: ["\\HasChildren", "\\Noselect"], uidValidity: 3, messages: []),
-        .init(name: allMail, attributes: ["\\All", "\\HasNoChildren"], uidValidity: uidValidity, messages: messages),
-        .init(name: "[Gmail]/Spam", attributes: ["\\HasNoChildren", "\\Junk"], uidValidity: 4, messages: []),
-        .init(name: "[Gmail]/Bin", attributes: ["\\HasNoChildren", "\\Trash"], uidValidity: 5, messages: []),
+        .init(name: inbox, attributes: ["\\HasNoChildren"], uidValidity: uidValidity, messages: messages),
+        .init(name: "Junk Email", attributes: ["\\HasNoChildren", "\\Junk"], uidValidity: 4, messages: []),
+        .init(name: "Deleted Items", attributes: ["\\HasNoChildren", "\\Trash"], uidValidity: 5, messages: []),
     ])
+    server.capabilities = ["IMAP4rev1", "AUTH=XOAUTH2", "SASL-IR", "UIDPLUS"]
     if condstore { server.capabilities.append("CONDSTORE") }
     return server
 }

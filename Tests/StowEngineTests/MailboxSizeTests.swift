@@ -8,9 +8,9 @@ import Testing
 
 /// R6 (D-055 step 5, D-404): the mailbox's size before anything downloads.
 @Suite(.serialized) struct MailboxSizeTests {
-    @Test func gmailSizeAndQuotaWithoutDownloading() async throws {
+    @Test func sizeAndQuotaWithoutDownloading() async throws {
         let fixtures = try TestFixtures.small()
-        let server = gmailServer(fixtures)
+        let server = microsoftServer(fixtures)
         server.capabilities.append("QUOTA")
         server.storageQuotaKiB = (used: 6_500_000, limit: 15_728_640) // about 6.2 of 15 GiB
         let harness = try await EngineHarness(server: server)
@@ -19,7 +19,7 @@ import Testing
         let size = try await harness.sync.mailboxSize(for: harness.account)
         #expect(size.messages == fixtures.count)
         #expect(size.bytes == Int64(fixtures.map(\.bytes.count).reduce(0, +)))
-        #expect(!size.sizesAreEstimates)
+        #expect(size.sizesAreEstimates) // Exchange's sizes are estimates (D-120)
         #expect(size.quotaAdvertised)
         #expect(size.quota == MailboxQuota(usedBytes: 6_500_000 * 1024, limitBytes: 15_728_640 * 1024))
         // Nothing was downloaded or compared, and only read-only commands were sent.
@@ -53,10 +53,11 @@ import Testing
         #expect(!server.commandLog.contains { $0.uppercased().contains("QUOTA") })
     }
 
-    /// What Gmail answered for a Google Workspace account on 25 Oct 2026: 0 used, a limit of about 2^53 KiB.
-    @Test func aWorkspaceQuotaThatSaysNothingGivesSizeOnly() async throws {
+    /// A quota that says nothing (0 used, a limit of about 2^53 KiB, as Gmail
+    /// once answered for a Google Workspace account) gives the size alone.
+    @Test func aQuotaThatSaysNothingGivesSizeOnly() async throws {
         let fixtures = try TestFixtures.small()
-        let server = gmailServer(fixtures)
+        let server = microsoftServer(fixtures)
         server.capabilities.append("QUOTA")
         server.storageQuotaKiB = (used: 0, limit: 9_007_199_254_740_991)
         let harness = try await EngineHarness(server: server)
@@ -80,7 +81,7 @@ import Testing
 
     @Test func aRefusedQuotaGivesSizeOnly() async throws {
         let fixtures = try TestFixtures.small()
-        let server = gmailServer(fixtures)
+        let server = microsoftServer(fixtures)
         server.capabilities.append("QUOTA") // offered, but answers NO
         let harness = try await EngineHarness(server: server)
         defer { harness.cleanUp() }

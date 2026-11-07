@@ -13,9 +13,8 @@ public struct FolderPlan: Sendable {
 }
 
 public enum FolderPlanner {
-    /// - Gmail: only the folder flagged `\All` (All Mail, whose name is
-    ///   localised). Every other label is a view onto All Mail, and the labels
-    ///   arrive with each message. Spam and Bin are not in All Mail and are not synced.
+    /// - Gmail: never planned here. Gmail syncs through the Gmail API, which
+    ///   lists All Mail by ID (D-583); asking throws `gmailUsesTheAPI` (D-601).
     /// - Microsoft: every selectable folder except Junk (`\Junk`). Deleted
     ///   Items is kept, because Exchange does not empty it by default and
     ///   people often treat it as storage. Exchange's non-mail folders
@@ -31,7 +30,7 @@ public enum FolderPlanner {
     ///   and keeping mail someone treats as stored beats losing it (D-571).
     public static func plan(provider: Provider, folders: [IMAPFolder], capabilities: Set<String>) throws -> FolderPlan {
         switch provider {
-        case .gmail: try planGmail(folders: folders, capabilities: capabilities)
+        case .gmail: throw SyncError.gmailUsesTheAPI
         case .microsoft: planMicrosoft(folders: folders)
         case .icloud: planICloud(folders: folders)
         case .imap: planGeneric(folders: folders)
@@ -63,30 +62,6 @@ public enum FolderPlanner {
             }
         }
         return plan
-    }
-
-    static func planGmail(folders: [IMAPFolder], capabilities: Set<String>) throws -> FolderPlan {
-        guard capabilities.contains("X-GM-EXT-1") else {
-            throw SyncError.protocolViolation("This server does not offer Gmail's IMAP extensions (X-GM-EXT-1)")
-        }
-        guard let allMail = folders.first(where: { $0.has("\\All") && $0.isSelectable }) else {
-            throw SyncError.allMailNotFound
-        }
-        var skipped: [FolderPlan.Skipped] = []
-        for folder in folders where folder != allMail {
-            let reason: String
-            if !folder.isSelectable {
-                reason = "cannot be opened (\\Noselect)"
-            } else if folder.has("\\Junk") {
-                reason = "Spam: not in All Mail, not archived (D-104)"
-            } else if folder.has("\\Trash") {
-                reason = "Bin: not in All Mail, not archived (D-104)"
-            } else {
-                reason = "label: its messages come from All Mail, with labels attached"
-            }
-            skipped.append(.init(folder: folder, reason: reason))
-        }
-        return FolderPlan(toSync: [allMail], skipped: skipped)
     }
 
     /// Exchange's built-in folders that hold calendar items, contacts and so on

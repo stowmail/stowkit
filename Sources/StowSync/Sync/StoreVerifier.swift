@@ -132,7 +132,7 @@ public struct StoreVerifier: Sendable {
                     let uids = byUID.keys.sorted()
                     for start in stride(from: 0, to: uids.count, by: chunkSize) {
                         let chunk = Array(uids[start..<min(start + chunkSize, uids.count)])
-                        let reply = try await session.fetchMessagesWithDiagnostics(uids: chunk, gmail: false)
+                        let reply = try await session.fetchMessagesWithDiagnostics(uids: chunk)
                         var bytes: Int64 = 0
                         var answered: Set<UInt32> = []
                         for message in reply.messages {

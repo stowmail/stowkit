@@ -205,15 +205,15 @@ func testKeychain() -> KeychainStore {
         let fixtures = try TestFixtures.small()
         let (archive, location, keys) = try confirmedArchive()
         defer { try? FileManager.default.removeItem(at: location.root) }
-        let gmail = gmailServer(fixtures)
+        let first = microsoftServer(fixtures)
         let microsoft = FakeIMAPServer(mailboxes: [
             .init(name: "INBOX", attributes: [], uidValidity: 3, messages: fixtures.prefix(10).enumerated().map { .init(uid: UInt32($0.offset + 1), bytes: $0.element.bytes) }),
         ])
         microsoft.capabilities = ["IMAP4rev1", "AUTH=XOAUTH2", "SASL-IR"]
-        let ports = [Provider.gmail: Int(try await gmail.start()), .microsoft: Int(try await microsoft.start())]
-        defer { gmail.stop(); microsoft.stop() }
+        let ports = ["A": Int(try await first.start()), "M": Int(try await microsoft.start())]
+        defer { first.stop(); microsoft.stop() }
         let accounts = ArchiveAccounts(archive: archive)
-        try accounts.add(AccountRecord(account: Account(id: .generate(), provider: .gmail, email: "sam@example.com", displayName: "G")))
+        try accounts.add(AccountRecord(account: Account(id: .generate(), provider: .microsoft, email: "sam@example.com", displayName: "A")))
         try accounts.add(AccountRecord(account: Account(id: .generate(), provider: .microsoft, email: "sam@example.org", displayName: "M")))
         try archive.database.close()
 
@@ -224,7 +224,7 @@ func testKeychain() -> KeychainStore {
             makeSync: { archive in
                 EngineSync(archive: archive, settingsURL: location.root.appendingPathComponent("none.json"), sleep: { _ in }) { account in
                     {
-                        let session = try await IMAPSession.connect(to: .plaintextLoopback(port: ports[account.provider]!))
+                        let session = try await IMAPSession.connect(to: .plaintextLoopback(port: ports[account.displayName]!))
                         try await session.authenticate(user: account.email, accessToken: "good-token")
                         return session
                     }
@@ -263,13 +263,13 @@ func testKeychain() -> KeychainStore {
     @Test func aFailingAccountWaitsLongerEachTimeAndTheOthersCarryOn() async throws {
         let (archive, location, keys) = try confirmedArchive()
         defer { try? FileManager.default.removeItem(at: location.root) }
-        let server = gmailServer(try TestFixtures.small().prefix(3).map { $0 })
+        let server = microsoftServer(try TestFixtures.small().prefix(3).map { $0 })
         server.acceptedTokens = ["good-token"]
         let port = Int(try await server.start())
         defer { server.stop() }
         let accounts = ArchiveAccounts(archive: archive)
-        let good = Account(id: .generate(), provider: .gmail, email: "sam@example.com", displayName: "Good")
-        let bad = Account(id: .generate(), provider: .gmail, email: "pat@example.com", displayName: "Bad")
+        let good = Account(id: .generate(), provider: .microsoft, email: "sam@example.com", displayName: "Good")
+        let bad = Account(id: .generate(), provider: .microsoft, email: "pat@example.com", displayName: "Bad")
         try accounts.add(AccountRecord(account: good))
         try accounts.add(AccountRecord(account: bad))
 

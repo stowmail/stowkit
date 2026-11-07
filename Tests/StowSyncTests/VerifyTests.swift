@@ -29,7 +29,7 @@ import Testing
 
     @Test func cleanStoreVerifiesAndCorruptionIsFoundByFolderAndUID() async throws {
         let fixtures = try Fixtures.small()
-        let harness = try await SyncHarness(server: gmailServer(fixtures))
+        let harness = try await SyncHarness(server: microsoftServer(fixtures))
         defer { harness.cleanUp() }
         _ = try await harness.syncer().run()
 
@@ -57,7 +57,7 @@ import Testing
 
     @Test func sampleDeletedMessagesAndChangedFolders() async throws {
         let fixtures = try Fixtures.small()
-        let harness = try await SyncHarness(server: gmailServer(fixtures))
+        let harness = try await SyncHarness(server: microsoftServer(fixtures))
         defer { harness.cleanUp() }
         _ = try await harness.syncer().run()
 
@@ -65,7 +65,7 @@ import Testing
         #expect(sampled.sampled == 5 && sampled.compared == 5 && sampled.isClean)
 
         var mailboxes = harness.server.mailboxes
-        let index = mailboxes.firstIndex { $0.attributes.contains("\\All") }!
+        let index = mailboxes.firstIndex { $0.name == "INBOX" }!
         mailboxes[index].messages.removeAll { $0.uid == 3 }
         harness.server.mailboxes = mailboxes
         let afterDelete = try await verifier(harness).run(sample: nil)
@@ -82,7 +82,7 @@ import Testing
     /// Verify goes through the same connection, so split replies compare clean too (D-120).
     @Test func splitRepliesVerifyClean() async throws {
         let fixtures = try Fixtures.all()
-        let server = gmailServer(fixtures)
+        let server = microsoftServer(fixtures)
         let harness = try await SyncHarness(server: server)
         defer { harness.cleanUp() }
         _ = try await harness.syncer().run()

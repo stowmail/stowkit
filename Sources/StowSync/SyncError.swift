@@ -21,6 +21,9 @@ public enum SyncError: Error, Equatable, CustomStringConvertible {
     /// The Gmail API is not enabled for Stow's Google project: Stow's fault, not
     /// the user's. Logged with the reason code only (D-592).
     case gmailAPIUnavailable
+    /// Something asked the IMAP path to reach Gmail. Gmail syncs only through
+    /// the Gmail API (D-583, D-601), so nothing was sent.
+    case gmailUsesTheAPI
     /// The account was removed (disconnected) from Stow. Nothing is refreshed
     /// or saved for it; adding the address again reconnects it (A-12, D-513).
     case accountRemoved(AccountID)
@@ -98,6 +101,8 @@ public enum SyncError: Error, Equatable, CustomStringConvertible {
             "Your Google Workspace admin has blocked Stow from reading this account's mail. Ask your admin to allow Stow, or add a personal account instead."
         case .gmailAPIUnavailable:
             "Stow couldn't reach Gmail. This is our fault, not yours: the background sync tries again later, and an update will fix it."
+        case .gmailUsesTheAPI:
+            "Gmail syncs through the Gmail API, not IMAP, so Stow did not connect. This is our fault, not yours."
         case .importOnly: "This is an import-only account: its mail came from files, and it never syncs."
         case .accountRemoved(let id):
             "Account \(id) was removed from Stow, so it no longer signs in or syncs. Add the address again with `stowmail account add` to reconnect it."

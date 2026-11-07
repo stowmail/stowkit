@@ -149,7 +149,7 @@ public actor IMAPSession {
         Set(list.map { capability in (capability.name + (capability.value.map { "=" + $0 } ?? "")).uppercased() })
     }
 
-    /// Capability names, uppercased, for example `IMAP4REV1`, `X-GM-EXT-1`, `AUTH=PLAIN`.
+    /// Capability names, uppercased, for example `IMAP4REV1`, `CONDSTORE`, `AUTH=PLAIN`.
     public func capabilities() async throws -> Set<String> {
         if let knownCapabilities { return knownCapabilities }
         var found: Set<String> = []
@@ -240,16 +240,16 @@ public actor IMAPSession {
         return FolderStatus(uidValidity: uidValidity, uidNext: uidNext, exists: exists, highestModSeq: highestModSeq)
     }
 
-    /// UIDs, sizes, arrival dates and (for Gmail) message IDs of the messages
-    /// whose UID is in `range`, in UID order. Downloads no message content.
-    public func fetchUIDs(_ range: ClosedRange<UInt32>, gmail: Bool = false) async throws -> [MessageSummary] {
+    /// UIDs, sizes and arrival dates of the messages whose UID is in `range`,
+    /// in UID order. Downloads no message content.
+    public func fetchUIDs(_ range: ClosedRange<UInt32>) async throws -> [MessageSummary] {
         var builder = FetchAssembler(wanted: .range(range))
-        _ = try await run(.fetchSummaries(range, gmail: gmail)) { try builder.consume($0) }
+        _ = try await run(.fetchSummaries(range)) { try builder.consume($0) }
         noteDropped(builder)
         return builder.finished
             .compactMap { message in
                 message.uid.map {
-                    MessageSummary(uid: $0, size: message.size ?? 0, internalDate: message.internalDate, gmailMessageID: message.gmailMessageID)
+                    MessageSummary(uid: $0, size: message.size ?? 0, internalDate: message.internalDate)
                 }
             }
             .filter { range.contains($0.uid) } // "n:hi" can return the last message even if below n.
@@ -294,32 +294,24 @@ public actor IMAPSession {
         return result
     }
 
-    /// Flags (and Gmail labels) of the messages in `range`: all of them, or with
-    /// `changedSince` only those whose CONDSTORE mod-sequence is higher (D-038).
-    public func fetchStates(_ range: ClosedRange<UInt32>, gmail: Bool, changedSince: UInt64? = nil) async throws -> [CopyState] {
+    /// Flags of the messages in `range`: all of them, or with `changedSince`
+    /// only those whose CONDSTORE mod-sequence is higher (D-038).
+    public func fetchStates(_ range: ClosedRange<UInt32>, changedSince: UInt64? = nil) async throws -> [CopyState] {
         var builder = FetchAssembler(wanted: .range(range))
-        _ = try await run(.fetchStates(range, gmail: gmail, changedSince: changedSince)) { try builder.consume($0) }
+        _ = try await run(.fetchStates(range, changedSince: changedSince)) { try builder.consume($0) }
         noteDropped(builder)
         return builder.finished
             .compactMap { message in
-                message.uid.map { CopyState(uid: $0, flags: message.flags, labels: gmail ? message.labels : nil) }
+                message.uid.map { CopyState(uid: $0, flags: message.flags, labels: nil) }
             }
             .filter { range.contains($0.uid) }
             .sorted { $0.uid < $1.uid }
     }
 
-    /// The Gmail message IDs in the open folder's `range` (D-039). Identifiers only.
-    public func fetchGmailIDs(_ range: ClosedRange<UInt32>) async throws -> Set<UInt64> {
-        var builder = FetchAssembler(wanted: .range(range))
-        _ = try await run(.fetchGmailIDs(range)) { try builder.consume($0) }
-        noteDropped(builder)
-        return Set(builder.finished.compactMap(\.gmailMessageID))
-    }
-
     /// Downloads complete messages with BODY.PEEK[]. Messages deleted on the
     /// server in the meantime are simply absent from the result.
-    public func fetchMessages(uids: [UInt32], gmail: Bool, expectedBytes: Int? = nil) async throws -> [FetchedMessage] {
-        try await fetchMessagesWithDiagnostics(uids: uids, gmail: gmail, expectedBytes: expectedBytes).messages
+    public func fetchMessages(uids: [UInt32], expectedBytes: Int? = nil) async throws -> [FetchedMessage] {
+        try await fetchMessagesWithDiagnostics(uids: uids, expectedBytes: expectedBytes).messages
     }
 
     /// Like `fetchMessages`, plus how the server completed the command, for
@@ -330,7 +322,7 @@ public actor IMAPSession {
     /// `expectedBytes`, the sizes the server listed for these messages, sets
     /// how many bytes the reply may bring and how long it may take (D-496).
     public func fetchMessagesWithDiagnostics(
-        uids: [UInt32], gmail: Bool, expectedBytes: Int? = nil
+        uids: [UInt32], expectedBytes: Int? = nil
     ) async throws -> (messages: [FetchedMessage], diagnostics: FetchDiagnostics) {
         guard !uids.isEmpty else { return ([], FetchDiagnostics(status: "OK")) }
         let expected = min(expectedBytes ?? uids.count.multipliedReportingOverflow(by: Self.assumedMessageBytes).partialValue,
@@ -339,7 +331,7 @@ public actor IMAPSession {
         var untagged: [String] = []
         let byeBefore = lastBye
         let deadline = timeouts.command + Double(expected / Self.messageFetchRate)
-        let completion = try await runForCompletion(.fetchMessages(uids: uids, gmail: gmail), deadline: deadline) { response in
+        let completion = try await runForCompletion(.fetchMessages(uids: uids), deadline: deadline) { response in
             switch response {
             case .untagged(.conditionalState(.no(let text))): untagged.append("NO " + Self.describe(text))
             case .untagged(.conditionalState(.bad(let text))): untagged.append("BAD " + Self.describe(text))
@@ -382,9 +374,6 @@ public actor IMAPSession {
                 uid: uid,
                 size: partial.size ?? bytes.count,
                 internalDate: internalDate,
-                gmailMessageID: partial.gmailMessageID,
-                gmailThreadID: partial.gmailThreadID,
-                labels: partial.labels,
                 flags: partial.flags,
                 bytes: bytes
             )

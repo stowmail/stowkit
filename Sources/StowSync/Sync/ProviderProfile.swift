@@ -4,21 +4,21 @@ import StowCore
 /// Per-provider connection details and limits (brief step 5, D-106).
 public struct ProviderProfile: Sendable, Equatable {
     public let provider: Provider
-    public let endpoint: IMAPEndpoint
+    /// The IMAP server, or nil for Gmail, which syncs through the Gmail API (D-601).
+    public let endpoint: IMAPEndpoint?
     /// Most connections Stow may open to one account at once. Phase 1 uses one;
     /// the Phase 2 scheduler may use up to this many.
     public let maxConnections: Int
     /// Stow's own download cap per rolling 24 hours, or nil for none.
     public let dailyByteLimit: Int64?
 
-    public init(provider: Provider, endpoint: IMAPEndpoint, maxConnections: Int, dailyByteLimit: Int64?) {
+    public init(provider: Provider, endpoint: IMAPEndpoint?, maxConnections: Int, dailyByteLimit: Int64?) {
         self.provider = provider
         self.endpoint = endpoint
         self.maxConnections = maxConnections
         self.dailyByteLimit = dailyByteLimit
     }
 
-    /// Gmail allows 15 connections and 2,500 MB a day; Stow stays well under both.
     /// Gmail API requests in flight per account while describing and
     /// downloading (brief step 6). One until the test account's measurements
     /// set it.
@@ -31,7 +31,10 @@ public struct ProviderProfile: Sendable, Equatable {
     public static let gmailAPIUnitsPerMinute = 5_000
     public static let gmailAPIUnitBurst = 800
 
-    public static let gmail = ProviderProfile(provider: .gmail, endpoint: .gmail, maxConnections: 3, dailyByteLimit: 2_000_000_000)
+    /// Gmail through the Gmail API: no IMAP server, one request in flight
+    /// (D-598), and Stow's own daily cap kept at the figure it had over IMAP
+    /// until a large real sync shows otherwise (D-598 item 4).
+    public static let gmail = ProviderProfile(provider: .gmail, endpoint: nil, maxConnections: gmailAPIRequestsInFlight, dailyByteLimit: 2_000_000_000)
 
     /// Exchange Online publishes no per-mailbox IMAP cap, so Stow keeps to a
     /// small number of connections and backs off when told to (D-004).

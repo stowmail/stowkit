@@ -42,7 +42,8 @@ extension SessionFactory {
         if let server = try ServerProfile.forAccount(account, in: archive) {
             self.init(account: account, server: server, tokens: tokens, timeouts: timeouts)
         } else {
-            self.init(account: account, endpoint: try ProviderProfile.forProvider(account.provider).endpoint, tokens: tokens, timeouts: timeouts)
+            guard let endpoint = try ProviderProfile.forProvider(account.provider).endpoint else { throw SyncError.gmailUsesTheAPI }
+            self.init(account: account, endpoint: endpoint, tokens: tokens, timeouts: timeouts)
         }
     }
 }

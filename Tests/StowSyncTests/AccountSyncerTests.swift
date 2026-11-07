@@ -16,7 +16,7 @@ struct SyncHarness {
     let sleeps = RecordedSleeps()
     let state = MemorySyncState()
 
-    init(server: FakeIMAPServer, provider: Provider = .gmail) async throws {
+    init(server: FakeIMAPServer, provider: Provider = .microsoft) async throws {
         self.server = server
         port = try await server.start()
         root = temporaryDirectory(".noindex")
@@ -83,37 +83,38 @@ actor CrashingSink: RawMessageSink {
 }
 
 @Suite struct AccountSyncerTests {
-    @Test func gmailSyncDownloadsAllMailOnlyByteForByteWithLabels() async throws {
+    @Test func firstSyncDownloadsByteForByteAndLeavesJunkAlone() async throws {
         let fixtures = try Fixtures.all() // includes the 15 MiB message
-        let harness = try await SyncHarness(server: gmailServer(fixtures))
+        let harness = try await SyncHarness(server: microsoftServer(fixtures))
         defer { harness.cleanUp() }
 
         let report = try await harness.syncer().run(SyncOptions(batches: BatchPlanner(maxMessages: 10)))
         #expect(report.outcome == .complete)
         #expect(report.messagesWritten == fixtures.count)
-        #expect(report.foldersSynced == 1)
+        // INBOX and the empty Deleted Items, which Microsoft keeps (D-104); Junk Email is skipped.
+        #expect(report.foldersSynced == 2)
 
         let keys = try await harness.store.listKeys()
         #expect(keys.count == fixtures.count)
-        #expect(Set(keys.map(\.folder)) == ["[Gmail]/Tous les messages"])
+        #expect(Set(keys.map(\.folder)) == ["INBOX"])
         #expect(Set(keys.map(\.uidValidity)) == [7])
         for (index, key) in keys.sorted(by: { $0.uid < $1.uid }).enumerated() {
             let stored = try await harness.store.read(key)
             #expect(stored.bytes == fixtures[index].bytes, "fixture \(fixtures[index].name) changed in transit")
             #expect(stored.size == fixtures[index].bytes.count)
-            #expect(stored.gmailMessageID == 1_800_000_000_000 + UInt64(index))
-            #expect(stored.labels == (index % 2 == 0 ? ["\\Inbox", "Receipts"] : ["\\Important"]))
+            // IMAP copies carry no Gmail IDs or labels (D-601).
+            #expect(stored.gmailMessageID == nil && stored.gmailThreadID == nil && stored.labels.isEmpty)
         }
-        let folderState = await harness.state.folderState(harness.account.id, folder: "[Gmail]/Tous les messages")
+        let folderState = await harness.state.folderState(harness.account.id, folder: "INBOX")
         #expect(folderState?.listedThroughUID == keys.map(\.uid).max())
         #expect(folderState?.uidValidity == 7)
         #expect(folderState?.firstSyncCompletedAt != nil)
 
         let log = harness.server.commandLog
         assertReadOnly(log)
-        // Only All Mail was opened: never a label, Spam or Bin.
-        #expect(log.filter { $0.contains("EXAMINE") }.allSatisfy { $0.contains("Tous les messages") })
-        #expect(log.contains { $0.contains("X-GM-LABELS") })
+        // Junk Email was never opened, and no fetch asked for Gmail's items.
+        #expect(!log.contains { $0.contains("EXAMINE") && $0.contains("Junk") })
+        #expect(!log.contains { $0.uppercased().contains("X-GM-") })
 
         // A second run finds nothing new and downloads nothing.
         let fetchesBefore = harness.server.bodyFetchCount
@@ -122,29 +123,40 @@ actor CrashingSink: RawMessageSink {
         #expect(harness.server.bodyFetchCount == fetchesBefore)
     }
 
+    /// Gmail syncs through the Gmail API (D-583). Handed to the IMAP syncer, it
+    /// is refused before any connection is opened (D-601).
+    @Test func aGmailAccountIsRefusedBeforeConnecting() async throws {
+        let server = microsoftServer(try Fixtures.small())
+        let harness = try await SyncHarness(server: server, provider: .gmail)
+        defer { harness.cleanUp() }
+        await #expect(throws: SyncError.gmailUsesTheAPI) { _ = try await harness.syncer().run() }
+        await #expect(throws: SyncError.gmailUsesTheAPI) { _ = try await harness.syncer().run(SyncOptions(listOnly: true)) }
+        #expect(server.connectionCount == 0)
+        #expect(server.commandLog.isEmpty)
+        #expect(harness.sleeps.delays.isEmpty)
+        #expect(await harness.state.events.isEmpty)
+    }
+
     @Test func picksUpNewMessagesAfterTheCheckpoint() async throws {
         let fixtures = try Fixtures.small()
-        let harness = try await SyncHarness(server: gmailServer(fixtures))
+        let harness = try await SyncHarness(server: microsoftServer(fixtures))
         defer { harness.cleanUp() }
         _ = try await harness.syncer().run()
 
         var mailboxes = harness.server.mailboxes
-        let index = mailboxes.firstIndex { $0.attributes.contains("\\All") }!
-        // No labels at all, as Gmail sends for an archived message: X-GM-LABELS ().
-        mailboxes[index].messages.append(.init(uid: 500, bytes: Data("Subject: new\r\n\r\nnew\r\n".utf8), labels: [], gmailMessageID: 42, gmailThreadID: 42))
+        let index = mailboxes.firstIndex { $0.name == "INBOX" }!
+        mailboxes[index].messages.append(.init(uid: 500, bytes: Data("Subject: new\r\n\r\nnew\r\n".utf8)))
         harness.server.mailboxes = mailboxes
 
         let report = try await harness.syncer().run()
         #expect(report.messagesWritten == 1)
         #expect(try await harness.storedUIDs().last == 500)
-        let key = try #require(try await harness.store.listKeys().last)
-        #expect(try await harness.store.read(key).labels == [])
     }
 
     /// QA: a dropped connection mid-sync reconnects and resumes with no gaps and no duplicates.
     @Test func resumesAfterADroppedConnection() async throws {
         let fixtures = try Fixtures.small()
-        let server = gmailServer(fixtures)
+        let server = microsoftServer(fixtures)
         server.dropOnBodyFetchNumber = 3
         let harness = try await SyncHarness(server: server)
         defer { harness.cleanUp() }
@@ -163,7 +175,7 @@ actor CrashingSink: RawMessageSink {
     /// QA: killing the process mid-sync and restarting gives no duplicates and no gaps.
     @Test func restartAfterACrashBetweenWriteAndCheckpoint() async throws {
         let fixtures = try Fixtures.small()
-        let harness = try await SyncHarness(server: gmailServer(fixtures))
+        let harness = try await SyncHarness(server: microsoftServer(fixtures))
         defer { harness.cleanUp() }
 
         let crashing = CrashingSink(harness.store, crashOnFlush: 3)
@@ -171,7 +183,7 @@ actor CrashingSink: RawMessageSink {
             _ = try await harness.syncer(sink: crashing).run(SyncOptions(batches: BatchPlanner(maxMessages: 4)))
         }
         // Batches 1 and 2 left the queue; batch 3 was written but is still queued.
-        #expect(try await harness.queued("[Gmail]/Tous les messages").count == fixtures.count - 8)
+        #expect(try await harness.queued("INBOX").count == fixtures.count - 8)
 
         // A fresh run (a new process) repeats batch 3 and finishes.
         let report = try await harness.syncer().run(SyncOptions(batches: BatchPlanner(maxMessages: 4)))
@@ -184,7 +196,7 @@ actor CrashingSink: RawMessageSink {
 
     @Test func cancellingStopsCleanlyAndALaterRunFinishes() async throws {
         let fixtures = try Fixtures.small()
-        let harness = try await SyncHarness(server: gmailServer(fixtures))
+        let harness = try await SyncHarness(server: microsoftServer(fixtures))
         defer { harness.cleanUp() }
 
         let syncer = harness.syncer()
@@ -206,12 +218,12 @@ actor CrashingSink: RawMessageSink {
 
     @Test func uidValidityChangeResyncsTheFolder() async throws {
         let fixtures = try Fixtures.small()
-        let harness = try await SyncHarness(server: gmailServer(fixtures, uidValidity: 7))
+        let harness = try await SyncHarness(server: microsoftServer(fixtures, uidValidity: 7))
         defer { harness.cleanUp() }
         _ = try await harness.syncer().run()
 
         var mailboxes = harness.server.mailboxes
-        let index = mailboxes.firstIndex { $0.attributes.contains("\\All") }!
+        let index = mailboxes.firstIndex { $0.name == "INBOX" }!
         mailboxes[index].uidValidity = 8
         harness.server.mailboxes = mailboxes
 
@@ -221,13 +233,13 @@ actor CrashingSink: RawMessageSink {
         let keys = try await harness.store.listKeys()
         #expect(keys.filter { $0.uidValidity == 8 }.count == fixtures.count)
         #expect(keys.filter { $0.uidValidity == 7 }.count == fixtures.count) // the old copies are kept
-        #expect(await harness.state.folderState(harness.account.id, folder: "[Gmail]/Tous les messages")?.uidValidity == 8)
+        #expect(await harness.state.folderState(harness.account.id, folder: "INBOX")?.uidValidity == 8)
         #expect(await harness.state.events.map(\.kind) == ["uidvalidity_changed"])
     }
 
     @Test func limitStopsAndTheNextRunContinues() async throws {
         let fixtures = try Fixtures.small()
-        let harness = try await SyncHarness(server: gmailServer(fixtures))
+        let harness = try await SyncHarness(server: microsoftServer(fixtures))
         defer { harness.cleanUp() }
 
         let first = try await harness.syncer().run(SyncOptions(limit: 3))
@@ -242,7 +254,7 @@ actor CrashingSink: RawMessageSink {
 
     @Test func byteBudgetStopsTheSyncAndPersists() async throws {
         let fixtures = try Fixtures.small()
-        let harness = try await SyncHarness(server: gmailServer(fixtures))
+        let harness = try await SyncHarness(server: microsoftServer(fixtures))
         defer { harness.cleanUp() }
         let budgetFile = harness.root.deletingLastPathComponent().appendingPathComponent("budget-\(UUID().uuidString).json")
         defer { try? FileManager.default.removeItem(at: budgetFile) }
@@ -262,7 +274,7 @@ actor CrashingSink: RawMessageSink {
     }
 
     @Test func throttlingByeBacksOffAndRetries() async throws {
-        let server = gmailServer(try Fixtures.small())
+        let server = microsoftServer(try Fixtures.small())
         server.byeOnBodyFetchNumber = (1, "[UNAVAILABLE] Server busy, try again later")
         let harness = try await SyncHarness(server: server)
         defer { harness.cleanUp() }
@@ -272,7 +284,7 @@ actor CrashingSink: RawMessageSink {
     }
 
     @Test func dailyQuotaByeStopsWithoutRetrying() async throws {
-        let server = gmailServer(try Fixtures.small())
+        let server = microsoftServer(try Fixtures.small())
         server.byeOnBodyFetchNumber = (1, "[OVERQUOTA] Account exceeded command or bandwidth limits")
         let harness = try await SyncHarness(server: server)
         defer { harness.cleanUp() }
@@ -286,7 +298,7 @@ actor CrashingSink: RawMessageSink {
     }
 
     @Test func repeatedFailuresWithoutProgressGiveUp() async throws {
-        let server = gmailServer(try Fixtures.small())
+        let server = microsoftServer(try Fixtures.small())
         server.dropEveryBodyFetch = true
         let harness = try await SyncHarness(server: server)
         defer { harness.cleanUp() }
@@ -296,7 +308,7 @@ actor CrashingSink: RawMessageSink {
     }
 
     @Test func rejectedTokenIsNotRetried() async throws {
-        let harness = try await SyncHarness(server: gmailServer(try Fixtures.small()))
+        let harness = try await SyncHarness(server: microsoftServer(try Fixtures.small()))
         defer { harness.cleanUp() }
         await #expect {
             _ = try await harness.syncer(token: "revoked").run()
@@ -346,18 +358,18 @@ actor CrashingSink: RawMessageSink {
     @Test func refusedTokenIsRefreshedOnceThenWorks() async throws {
         let keychain = makeTestKeychain()
         defer { try? keychain.deleteAll() }
-        let server = gmailServer([])
+        let server = microsoftServer([])
         server.acceptedTokens = ["fresh-token"]
         let port = try await server.start()
         defer { server.stop() }
 
         let registry = AccountRegistry(keychain: keychain)
         let tokens = TokenStore(keychain: keychain)
-        let account = Account(id: .generate(), provider: .gmail, email: "sam@example.com", displayName: "Sam")
+        let account = Account(id: .generate(), provider: .microsoft, email: "sam@example.com", displayName: "Sam")
         try registry.add(AccountRecord(account: account))
         try tokens.save(OAuthTokens(accessToken: "stale-token", refreshToken: "r", expiresAt: Date().addingTimeInterval(3600)), for: account.id)
         let endpoint = FakeTokenEndpoint { _ in (200, #"{"access_token":"fresh-token","expires_in":3600}"#) }
-        let provider = TokenProvider(tokenStore: tokens, registry: registry) { _ in OAuthClient(config: .google(testAppConfig), http: endpoint) }
+        let provider = TokenProvider(tokenStore: tokens, registry: registry) { _ in OAuthClient(config: .microsoft(testAppConfig), http: endpoint) }
 
         let factory = SessionFactory(account: account, endpoint: .plaintextLoopback(port: Int(port)), tokens: provider)
         let session = try await factory.open()
@@ -379,13 +391,13 @@ actor CrashingSink: RawMessageSink {
 
 /// Messages listed but not returned (D-113, D-115, D-118), under the Phase 2 queue (D-027).
 @Suite struct MissingMessageTests {
-    static let allMail = "[Gmail]/Tous les messages"
+    static let inbox = "INBOX"
 
     /// The Microsoft 365 bug: the server lists UIDs but returns no FETCH data.
     /// The message stays queued and is tried again; everything else downloads.
     @Test func listedButNotReturnedStaysQueuedAndBlocksNothing() async throws {
         let fixtures = try Fixtures.small()
-        let server = gmailServer(fixtures) // UIDs 3, 5, 7, 9, ...
+        let server = microsoftServer(fixtures) // UIDs 3, 5, 7, 9, ...
         server.bodylessUIDs = [9]
         let harness = try await SyncHarness(server: server)
         defer { harness.cleanUp() }
@@ -395,12 +407,12 @@ actor CrashingSink: RawMessageSink {
         #expect(first.notDownloaded == 1)
         #expect(first.outcome == .complete)
         #expect(try await harness.storedUIDs() == everything.filter { $0 != 9 })
-        #expect(try await harness.queued(Self.allMail) == [9])
-        #expect(await harness.state.folderState(harness.account.id, folder: Self.allMail)?.firstSyncCompletedAt == nil)
+        #expect(try await harness.queued(Self.inbox) == [9])
+        #expect(await harness.state.folderState(harness.account.id, folder: Self.inbox)?.firstSyncCompletedAt == nil)
         // A rerun tries it again: still queued, never silently skipped.
         let second = try await harness.syncer().run(SyncOptions(batches: BatchPlanner(maxMessages: 6)))
         #expect(second.notDownloaded == 1)
-        #expect(try await harness.queued(Self.allMail) == [9])
+        #expect(try await harness.queued(Self.inbox) == [9])
 
         // Once the server returns it, the next run fills the gap and the first sync is complete.
         server.bodylessUIDs = []
@@ -408,12 +420,12 @@ actor CrashingSink: RawMessageSink {
         #expect(third.notDownloaded == 0)
         #expect(third.messagesWritten == 1)
         #expect(try await harness.storedUIDs() == everything)
-        #expect(await harness.state.folderState(harness.account.id, folder: Self.allMail)?.firstSyncCompletedAt != nil)
+        #expect(await harness.state.folderState(harness.account.id, folder: Self.inbox)?.firstSyncCompletedAt != nil)
     }
 
     @Test func messagesDeletedBetweenListingAndFetchAreConfirmedGoneThenDropped() async throws {
         let fixtures = try Fixtures.small()
-        let server = gmailServer(fixtures)
+        let server = microsoftServer(fixtures)
         server.expungeOnBodyFetch = [9, 11]
         let harness = try await SyncHarness(server: server)
         defer { harness.cleanUp() }
@@ -423,7 +435,7 @@ actor CrashingSink: RawMessageSink {
         #expect(report.outcome == .complete)
         let expected = (0..<fixtures.count).map { UInt32($0 * 2 + 3) }.filter { $0 != 9 && $0 != 11 }
         #expect(try await harness.storedUIDs() == expected)
-        #expect(try await harness.queued(Self.allMail).isEmpty)
+        #expect(try await harness.queued(Self.inbox).isEmpty)
         // The re-list was a UID FETCH of just the missing UIDs, without bodies.
         #expect(harness.server.commandLog.contains { $0.contains("UID FETCH 9,11 (UID RFC822.SIZE FLAGS INTERNALDATE)") })
     }
@@ -450,16 +462,17 @@ actor CrashingSink: RawMessageSink {
     }
 
     /// The announced count covers the whole folder even when the first
-    /// listing window is empty (Gmail UIDs are sparse).
+    /// listing window is empty (UIDs are sparse).
     @Test func announcedCountIsRightWhenTheFirstWindowIsEmpty() async throws {
         let fixtures = try Fixtures.small()
-        let harness = try await SyncHarness(server: gmailServer(fixtures)) // first UID is 3
+        let harness = try await SyncHarness(server: microsoftServer(fixtures)) // first UID is 3
         defer { harness.cleanUp() }
         let counts = AnnouncedCounts()
         _ = try await harness.syncer().run(SyncOptions(listWindow: 2)) { event in
             if case .folderListed(_, _, let count) = event { counts.add(count) }
         }
-        #expect(counts.values == [fixtures.count])
+        // INBOX, then the empty Deleted Items that Microsoft also syncs.
+        #expect(counts.values == [fixtures.count, 0])
     }
 }
 
@@ -472,13 +485,13 @@ final class AnnouncedCounts: @unchecked Sendable {
 
 /// D-115: messages listed but never returned are recorded after three separate runs.
 @Suite struct UnfetchableTests {
-    static let allMail = "[Gmail]/Tous les messages"
+    static let inbox = "INBOX"
 
     /// The Deleted Items case: on runs 1 and 2 the stuck messages stay queued
     /// (everything else is downloaded on run 1); on run 3 they are recorded and passed.
     @Test func stuckMessagesAreRecordedOnTheThirdRun() async throws {
         let fixtures = try Fixtures.small()
-        let server = gmailServer(fixtures) // UIDs 3, 5, 7, 9, 11, ...
+        let server = microsoftServer(fixtures) // UIDs 3, 5, 7, 9, 11, ...
         server.bodylessUIDs = [9, 11]
         let harness = try await SyncHarness(server: server)
         defer { harness.cleanUp() }
@@ -492,7 +505,7 @@ final class AnnouncedCounts: @unchecked Sendable {
             #expect(report.notDownloaded == 2)
             #expect(report.recordedUnfetchable == 0)
             #expect(report.messagesWritten == (attempt == 1 ? expected.count : 0))
-            #expect(await harness.state.entry(Self.allMail, uid: 9)?.attempts == attempt)
+            #expect(await harness.state.entry(Self.inbox, uid: 9)?.attempts == attempt)
         }
         let third = try await run()
         #expect(third.notDownloaded == 0)
@@ -501,7 +514,7 @@ final class AnnouncedCounts: @unchecked Sendable {
         #expect(third.remaining == QueueTotals(queued: 0, queuedBytes: 0, unfetchable: 2))
         #expect(try await harness.storedUIDs() == expected)
         // Recorded messages count as passed: the folder's first sync is complete.
-        #expect(await harness.state.folderState(harness.account.id, folder: Self.allMail)?.firstSyncCompletedAt != nil)
+        #expect(await harness.state.folderState(harness.account.id, folder: Self.inbox)?.firstSyncCompletedAt != nil)
 
         // A fourth run has nothing left to do and reports nothing new.
         let fourth = try await run()
@@ -534,7 +547,7 @@ final class AnnouncedCounts: @unchecked Sendable {
     @Test func noMailboxIsItsOwnErrorAndDoesNotMarkTheAccount() async throws {
         let keychain = makeTestKeychain()
         defer { try? keychain.deleteAll() }
-        let server = gmailServer([])
+        let server = microsoftServer([])
         server.authFailureText = "User is authenticated but not connected."
         let port = try await server.start()
         defer { server.stop() }
@@ -570,11 +583,11 @@ final class AnnouncedCounts: @unchecked Sendable {
 /// D-118: Microsoft 365 sometimes returns only part of a FETCH batch, then the
 /// rest on a later try. Missing UIDs are retried within the run first.
 @Suite struct PartialFetchTests {
-    static let allMail = "[Gmail]/Tous les messages"
+    static let inbox = "INBOX"
 
     @Test func uidsLeftOutOnceAreRecoveredWithinTheRun() async throws {
         let fixtures = try Fixtures.small()
-        let server = gmailServer(fixtures) // UIDs 3, 5, 7, ...
+        let server = microsoftServer(fixtures) // UIDs 3, 5, 7, ...
         server.refusals = [9: 1, 13: 1]
         let harness = try await SyncHarness(server: server)
         defer { harness.cleanUp() }
@@ -590,7 +603,7 @@ final class AnnouncedCounts: @unchecked Sendable {
 
     @Test func stubbornUIDsAreFetchedOneAtATimeAfterTheSecondPause() async throws {
         let fixtures = try Fixtures.small()
-        let server = gmailServer(fixtures)
+        let server = microsoftServer(fixtures)
         server.refusals = [9: 2, 13: 2]
         let harness = try await SyncHarness(server: server)
         defer { harness.cleanUp() }
@@ -605,14 +618,14 @@ final class AnnouncedCounts: @unchecked Sendable {
 
     @Test func stillMissingAfterTheRetriesFallsThroughToD113() async throws {
         let fixtures = try Fixtures.small()
-        let server = gmailServer(fixtures)
+        let server = microsoftServer(fixtures)
         server.refusals = [9: 3]
         let harness = try await SyncHarness(server: server)
         defer { harness.cleanUp() }
 
         let first = try await harness.syncer().run(SyncOptions(batches: BatchPlanner(maxMessages: 6)))
         #expect(first.notDownloaded == 1)
-        #expect(try await harness.queued(Self.allMail) == [9])
+        #expect(try await harness.queued(Self.inbox) == [9])
         // Transient: the next run gets it, and the folder completes.
         let second = try await harness.syncer().run()
         #expect(second.notDownloaded == 0)
@@ -624,7 +637,7 @@ final class AnnouncedCounts: @unchecked Sendable {
     @Test func noCompletionIsPartialAndDiagnosticsAreLogged() async throws {
         _ = CapturedLogs.installed
         let fixtures = try Fixtures.small()
-        let server = gmailServer(fixtures)
+        let server = microsoftServer(fixtures)
         server.refusals = [9: 1]
         server.partialCompletion = "NO [UNAVAILABLE] Some messages could not be FETCHed (Failure)"
         server.partialUntagged = "NO Item 9 is temporarily unavailable"

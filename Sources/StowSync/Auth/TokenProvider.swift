@@ -18,7 +18,7 @@ public enum SignInCredential: Sendable {
 /// - Refresh when the token has less than five minutes left.
 /// - On `invalid_grant`, mark the account as needing sign-in and stop. Never retry.
 /// - An account already marked is refused at once, without touching the network.
-/// - A Gmail token granted before D-583, under `https://mail.google.com/`, is
+/// - A Gmail token granted before D-583, under Gmail's full-access IMAP scope, is
 ///   refused with its own message and marks the account once (D-583).
 /// - A refused app-specific password marks the account the same way; it is
 ///   never retried, since there is nothing to refresh (D-467 item 5).
@@ -94,7 +94,7 @@ public actor TokenProvider {
         guard record.isConnected else { throw SyncError.accountRemoved(accountID) }
         let tokens = try tokenStore.tokens(for: accountID)
         if let tokens, Self.isOldPermission(tokens, for: oauth) {
-            // Signed in before D-583 under `https://mail.google.com/`: the token
+            // Signed in before D-583 under the full-access IMAP scope: the token
             // cannot reach the Gmail API's read-only calls, and refreshing keeps
             // the old grant. Marked once; nothing is sent (D-110).
             if !record.needsSignIn {

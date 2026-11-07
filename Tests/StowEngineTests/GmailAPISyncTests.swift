@@ -2,13 +2,15 @@ import Foundation
 import GRDB
 import StowCore
 import StowEngine
+import StowSecrets
 import StowStore
 @testable import StowSync
 import StowTestSupport
 import Testing
 
-/// Plays the Gmail API for the same fixtures and Gmail IDs that `gmailServer`
-/// serves over IMAP, so an account synced by IMAP can move to the API. It keeps
+/// Plays the Gmail API for the same fixtures and Gmail IDs that
+/// `seedIMAPSyncedGmail` stores as IMAP sync did, so an account synced by IMAP
+/// can move to the API. It keeps
 /// a history of the changes the tests make, as Gmail does.
 actor FakeGmailAPI: GmailTransport {
     struct Message {
@@ -170,7 +172,7 @@ actor FakeGmailAPI: GmailTransport {
 
     @Test func aNewAccountSyncsEverythingByteForByteWithNoUIDs() async throws {
         let fixtures = try TestFixtures.small()
-        let harness = try await EngineHarness(server: gmailServer(fixtures))
+        let harness = try await EngineHarness.gmail()
         defer { harness.cleanUp() }
         let api = FakeGmailAPI(fixtures)
 
@@ -209,7 +211,7 @@ actor FakeGmailAPI: GmailTransport {
     /// QA: killing the process mid-sync and starting again gives no duplicates and no gaps.
     @Test func aCrashMidDownloadResumesWithNoDuplicatesOrGaps() async throws {
         let fixtures = try TestFixtures.small()
-        let harness = try await EngineHarness(server: gmailServer(fixtures))
+        let harness = try await EngineHarness.gmail()
         defer { harness.cleanUp() }
         let api = FakeGmailAPI(fixtures)
         let store = ArchiveSyncStore(archive: harness.archive)
@@ -231,7 +233,7 @@ actor FakeGmailAPI: GmailTransport {
     /// crash still resumes with no duplicates or gaps.
     @Test func requestsInFlightGiveTheSameArchive() async throws {
         let fixtures = try TestFixtures.small()
-        let harness = try await EngineHarness(server: gmailServer(fixtures))
+        let harness = try await EngineHarness.gmail()
         defer { harness.cleanUp() }
         let api = FakeGmailAPI(fixtures)
         let store = ArchiveSyncStore(archive: harness.archive)
@@ -254,7 +256,7 @@ actor FakeGmailAPI: GmailTransport {
     /// `stowmail size` before the first download counts Gmail's own queue (step 6).
     @Test func theMailboxSizeCountsGmailsQueue() async throws {
         let fixtures = try TestFixtures.small()
-        let harness = try await EngineHarness(server: gmailServer(fixtures))
+        let harness = try await EngineHarness.gmail()
         defer { harness.cleanUp() }
         _ = try await syncer(harness, FakeGmailAPI(fixtures)).run(SyncOptions(listOnly: true))
         let size = try MailboxSize.totals(harness.archive, account: harness.account.id)
@@ -267,7 +269,7 @@ actor FakeGmailAPI: GmailTransport {
     /// backs off and carries on; nothing is counted against the message.
     @Test func aThrottledBatchStopsAtTheRefusal() async throws {
         let fixtures = try TestFixtures.small()
-        let harness = try await EngineHarness(server: gmailServer(fixtures))
+        let harness = try await EngineHarness.gmail()
         defer { harness.cleanUp() }
         let api = FakeGmailAPI(fixtures)
         _ = try await syncer(harness, api).run(SyncOptions(listOnly: true))
@@ -283,7 +285,7 @@ actor FakeGmailAPI: GmailTransport {
     /// Removed Gmail API mail comes back by its Gmail ID (D-598): no folder or UID needed.
     @Test func removedMailIsRestoredByGmailID() async throws {
         let fixtures = try TestFixtures.small()
-        let harness = try await EngineHarness(server: gmailServer(fixtures))
+        let harness = try await EngineHarness.gmail()
         defer { harness.cleanUp() }
         let api = FakeGmailAPI(fixtures)
         _ = try await syncer(harness, api).run()
@@ -364,9 +366,9 @@ actor FakeGmailAPI: GmailTransport {
     /// with nothing downloaded again, no duplicates and nothing counted as removed.
     @Test func anIMAPSyncedAccountIsAdoptedWithoutDownloading() async throws {
         let fixtures = try TestFixtures.small()
-        let harness = try await EngineHarness(server: gmailServer(fixtures))
+        let harness = try await EngineHarness.gmail()
         defer { harness.cleanUp() }
-        _ = try await harness.run()
+        try await harness.seedIMAPSyncedGmail(fixtures)
         let before = try harness.count("messages")
         #expect(before == fixtures.count)
         #expect(try harness.count("message_folders", "uid IS NOT NULL") == fixtures.count)
@@ -394,7 +396,7 @@ actor FakeGmailAPI: GmailTransport {
     /// message whose reply is never usable is recorded after three runs.
     @Test func goneAndUnreadableMessagesAreHandledByID() async throws {
         let fixtures = try TestFixtures.small()
-        let harness = try await EngineHarness(server: gmailServer(fixtures))
+        let harness = try await EngineHarness.gmail()
         defer { harness.cleanUp() }
         let api = FakeGmailAPI(fixtures)
         let store = ArchiveSyncStore(archive: harness.archive)
@@ -425,7 +427,7 @@ actor FakeGmailAPI: GmailTransport {
     /// A message the user removed from the archive is never downloaded again (D-033).
     @Test func aTombstonedGmailIDIsNotQueued() async throws {
         let fixtures = try TestFixtures.small()
-        let harness = try await EngineHarness(server: gmailServer(fixtures))
+        let harness = try await EngineHarness.gmail()
         defer { harness.cleanUp() }
         try await harness.archive.database.write { db in
             try db.execute(sql: """
@@ -438,12 +440,30 @@ actor FakeGmailAPI: GmailTransport {
         #expect(try harness.count("messages", "gmail_msgid = 1900000000000") == 0)
     }
 
-    /// Gmail accounts go to the API when `EngineSync` has tokens; IMAP otherwise.
+    /// Gmail accounts go to the API when `EngineSync` has tokens. Without them
+    /// they get the IMAP syncer, which refuses them before connecting (D-601).
     @Test func engineSyncPicksTheAPIForGmailWithTokens() async throws {
-        let fixtures = try TestFixtures.small()
-        let harness = try await EngineHarness(server: gmailServer(fixtures))
+        let server = microsoftServer(try TestFixtures.small())
+        let harness = try await EngineHarness(server: server, provider: .gmail)
         defer { harness.cleanUp() }
-        #expect(try harness.sync.syncer(for: harness.account) is AccountSyncer)
+        let syncer = try harness.sync.syncer(for: harness.account)
+        #expect(syncer is AccountSyncer)
+        await #expect(throws: SyncError.gmailUsesTheAPI) { _ = try await syncer.run(SyncOptions()) }
+        await #expect(throws: SyncError.gmailUsesTheAPI) { _ = try await harness.sync.mailboxSize(for: harness.account) }
+        #expect(server.connectionCount == 0 && server.commandLog.isEmpty)
+        #expect(try harness.count("folders") == 0)
+    }
+
+    /// Gmail has no IMAP server to open a session to (D-601).
+    @Test func noIMAPSessionIsMadeForGmail() async throws {
+        let harness = try await EngineHarness.gmail()
+        defer { harness.cleanUp() }
+        let keychain = KeychainStore(service: "ee.getstow.stow.tests.\(UUID().uuidString)", backend: .file, fileVaultIsOn: { true })
+        defer { try? keychain.deleteAll() }
+        let tokens = TokenProvider(tokenStore: TokenStore(keychain: keychain), registry: ArchiveAccounts(archive: harness.archive),
+                                   clientFor: { _ in throw SyncError.gmailUsesTheAPI })
+        #expect(throws: SyncError.gmailUsesTheAPI) { _ = try SessionFactory(account: harness.account, in: harness.archive, tokens: tokens) }
+        #expect(ProviderProfile.gmail.endpoint == nil)
     }
 }
 
@@ -506,10 +526,10 @@ final class CrashingSink: RawMessageSink, @unchecked Sendable {
     /// state and thread as IMAP sync stored them (D-595).
     @Test func labelsFlagsAndThreadsMatchIMAP() async throws {
         let fixtures = try TestFixtures.small()
-        let imap = try await EngineHarness(server: gmailServer(fixtures))
+        let imap = try await EngineHarness.gmail()
         defer { imap.cleanUp() }
-        _ = try await imap.run()
-        let api = try await EngineHarness(server: gmailServer(fixtures))
+        try await imap.seedIMAPSyncedGmail(fixtures)
+        let api = try await EngineHarness.gmail()
         defer { api.cleanUp() }
         _ = try await syncer(api, FakeGmailAPI(fixtures)).run()
         let viaIMAP = try await places(imap)
@@ -525,7 +545,7 @@ final class CrashingSink: RawMessageSink, @unchecked Sendable {
     /// label of the new name already there becomes the same label (D-595).
     @Test func aRenamedLabelKeepsItsMessages() async throws {
         let fixtures = try TestFixtures.small()
-        let harness = try await EngineHarness(server: gmailServer(fixtures))
+        let harness = try await EngineHarness.gmail()
         defer { harness.cleanUp() }
         let gmail = FakeGmailAPI(fixtures)
         await gmail.addUserLabel("Label_7", "Receipts")
@@ -556,7 +576,7 @@ final class CrashingSink: RawMessageSink, @unchecked Sendable {
     @Test func historyBringsNewMailLabelChangesAndRemovals() async throws {
         let fixtures = try TestFixtures.small()
         #expect(fixtures.count >= 6)
-        let harness = try await EngineHarness(server: gmailServer(fixtures))
+        let harness = try await EngineHarness.gmail()
         defer { harness.cleanUp() }
         let gmail = FakeGmailAPI(Array(fixtures.prefix(5)))
         await gmail.addUserLabel("Label_1", "Travel")
@@ -595,7 +615,7 @@ final class CrashingSink: RawMessageSink, @unchecked Sendable {
     /// Spam that arrives is not archived (D-104); moved out of Spam, it is.
     @Test func mailDeliveredToSpamIsQueuedOnlyWhenTakenOut() async throws {
         let fixtures = try TestFixtures.small()
-        let harness = try await EngineHarness(server: gmailServer(fixtures))
+        let harness = try await EngineHarness.gmail()
         defer { harness.cleanUp() }
         let gmail = FakeGmailAPI(Array(fixtures.prefix(2)))
         _ = try await syncer(harness, gmail).run()
@@ -611,7 +631,7 @@ final class CrashingSink: RawMessageSink, @unchecked Sendable {
     /// check, which finds what history would have said (D-597).
     @Test func anExpiredHistoryIDFallsBackToAFullCheck() async throws {
         let fixtures = try TestFixtures.small()
-        let harness = try await EngineHarness(server: gmailServer(fixtures))
+        let harness = try await EngineHarness.gmail()
         defer { harness.cleanUp() }
         let gmail = FakeGmailAPI(Array(fixtures.prefix(5)))
         _ = try await syncer(harness, gmail).run()
@@ -633,7 +653,7 @@ final class CrashingSink: RawMessageSink, @unchecked Sendable {
     /// The six-hourly full check catches a change history never reported.
     @Test func theFullCheckFindsWhatHistoryMissed() async throws {
         let fixtures = try TestFixtures.small()
-        let harness = try await EngineHarness(server: gmailServer(fixtures))
+        let harness = try await EngineHarness.gmail()
         defer { harness.cleanUp() }
         let gmail = FakeGmailAPI(Array(fixtures.prefix(4)))
         _ = try await syncer(harness, gmail).run()
@@ -642,5 +662,34 @@ final class CrashingSink: RawMessageSink, @unchecked Sendable {
         let full = try await syncer(harness, gmail).run(SyncOptions(checkChanges: .full))
         #expect(full.sourceChanges == [.spam: 1])
         #expect(try await places(harness)[base + 3]?.hasSuffix("| spam") == true)
+    }
+}
+
+extension EngineHarness {
+    /// The archive an IMAP sync of `fixtures` left behind before Gmail moved to
+    /// the API (D-601 removed that path): the folders it recorded, and All Mail
+    /// (special use `\all`) holding every message at UIDVALIDITY 7 and a sparse
+    /// UID, with its Gmail ID, thread ID, `\Inbox` label and flags, written
+    /// through `ArchiveSyncStore` as IMAP sync wrote them.
+    func seedIMAPSyncedGmail(_ fixtures: [(name: String, bytes: Data)]) async throws {
+        let store = ArchiveSyncStore(archive: archive)
+        let allMail = ArchiveSyncStore.gmailAllMailName
+        try await store.recordFolders(account.id, [
+            SyncFolder(name: "INBOX", delimiter: "/", skippedReason: "label: its messages come from All Mail, with labels attached"),
+            SyncFolder(name: "[Gmail]", delimiter: "/", isSelectable: false, skippedReason: "cannot be opened (\\Noselect)"),
+            SyncFolder(name: allMail, delimiter: "/", specialUse: "\\all"),
+            SyncFolder(name: "[Gmail]/Spam", delimiter: "/", specialUse: "\\junk", skippedReason: "Spam: not in All Mail, not archived (D-104)"),
+            SyncFolder(name: "[Gmail]/Bin", delimiter: "/", specialUse: "\\trash", skippedReason: "Bin: not in All Mail, not archived (D-104)"),
+        ])
+        _ = try await store.beginFolder(account.id, folder: allMail, uidValidity: 7, exists: fixtures.count)
+        for (index, fixture) in fixtures.enumerated() {
+            let gmailID = 1_900_000_000_000 + UInt64(index)
+            try await store.write(RawMessage(
+                key: RawMessageKey(accountID: account.id, folder: allMail, uidValidity: 7, uid: UInt32(index * 2 + 3)),
+                labels: ["\\Inbox"], gmailMessageID: gmailID, gmailThreadID: gmailID,
+                internalDate: Date(timeIntervalSince1970: 1_721_209_465), // the fake IMAP server's INTERNALDATE
+                size: fixture.bytes.count, flags: index == 0 ? ["\\Seen"] : [], bytes: fixture.bytes))
+        }
+        try await store.folderChecked(account.id, folder: allMail, uidValidity: 7, highestModSeq: 1, fullCheck: true, at: Date())
     }
 }

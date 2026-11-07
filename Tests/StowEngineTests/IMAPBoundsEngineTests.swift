@@ -10,7 +10,7 @@ import Testing
 /// asks in windows, and one stuck account does not hold up the round (D-496).
 @Suite(.serialized, .timeLimit(.minutes(1))) struct IMAPBoundsEngineTests {
     @Test func fullFlagCheckAsksInWindows() async throws {
-        let server = gmailServer(try TestFixtures.small())
+        let server = microsoftServer(try TestFixtures.small())
         let harness = try await EngineHarness(server: server)
         defer { harness.cleanUp() }
         let options = SyncOptions(listWindow: 10, checkChanges: .full)
@@ -31,14 +31,14 @@ import Testing
         let (archive, location, keys) = try SchedulerTests().confirmedArchive()
         defer { try? FileManager.default.removeItem(at: location.root) }
         let fixtures = try TestFixtures.small().prefix(3).map { $0 }
-        let stuck = gmailServer(fixtures)
-        let good = gmailServer(fixtures)
+        let stuck = microsoftServer(fixtures)
+        let good = microsoftServer(fixtures)
         stuck.trickleInterval = 0.2
         let ports = ["Stuck": Int(try await stuck.start()), "Good": Int(try await good.start())]
         defer { stuck.stop(); good.stop() }
         let accounts = ArchiveAccounts(archive: archive)
-        let stuckAccount = Account(id: .generate(), provider: .gmail, email: "pat@example.com", displayName: "Stuck")
-        let goodAccount = Account(id: .generate(), provider: .gmail, email: "sam@example.com", displayName: "Good")
+        let stuckAccount = Account(id: .generate(), provider: .microsoft, email: "pat@example.com", displayName: "Stuck")
+        let goodAccount = Account(id: .generate(), provider: .microsoft, email: "sam@example.com", displayName: "Good")
         try accounts.add(AccountRecord(account: stuckAccount))
         try accounts.add(AccountRecord(account: goodAccount))
 

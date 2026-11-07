@@ -111,7 +111,7 @@ public enum ICloudSetup {
     /// Returns how many folders iCloud listed. Throws `SetupError.passwordRefused`
     /// if iCloud refuses it; any other failure (network, certificate) as it came.
     public static func check(email: String, password: AppSpecificPassword,
-                             endpoint: IMAPEndpoint = ProviderProfile.icloud.endpoint,
+                             endpoint: IMAPEndpoint = ProviderProfile.icloud.endpoint!,
                              timeouts: IMAPTimeouts = .default) async throws -> Int {
         let probe = Account(id: AccountID(rawValue: "probe"), provider: .icloud, email: email, displayName: email)
         let session = try await IMAPSession.connect(to: endpoint, timeouts: timeouts)
@@ -135,7 +135,7 @@ public enum ICloudSetup {
     /// reconnected instead, keeping its ID and archived mail.
     public static func add(email typed: String, name: String?, password: AppSpecificPassword,
                            accounts: ArchiveAccounts, passwords: PasswordStore,
-                           endpoint: IMAPEndpoint = ProviderProfile.icloud.endpoint,
+                           endpoint: IMAPEndpoint = ProviderProfile.icloud.endpoint!,
                            timeouts: IMAPTimeouts = .default) async throws -> Outcome {
         let email = try checkAddress(typed)
         if let existing = try accounts.all().first(where: {
@@ -167,7 +167,7 @@ public enum ICloudSetup {
     /// sign-in" (D-467 item 6). A refused password changes nothing.
     public static func replacePassword(of record: AccountRecord, with password: AppSpecificPassword,
                                        accounts: ArchiveAccounts, passwords: PasswordStore,
-                                       endpoint: IMAPEndpoint = ProviderProfile.icloud.endpoint,
+                                       endpoint: IMAPEndpoint = ProviderProfile.icloud.endpoint!,
                                        timeouts: IMAPTimeouts = .default) async throws {
         precondition(record.account.provider == .icloud, "Only iCloud accounts have an app-specific password")
         _ = try await check(email: record.account.email, password: password, endpoint: endpoint, timeouts: timeouts)

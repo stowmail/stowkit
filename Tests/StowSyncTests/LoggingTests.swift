@@ -41,7 +41,10 @@ struct CaptureHandler: LogHandler {
     @Test func syncLogsNoTokensAddressesOrContent() async throws {
         _ = CapturedLogs.installed
         let fixtures = try Fixtures.small()
-        let server = gmailServer(fixtures)
+        let server = microsoftServer(fixtures)
+        // A folder with a personal name, which must not reach the logs either.
+        server.mailboxes.append(.init(name: "Tous les messages", attributes: ["\\HasNoChildren"], uidValidity: 9,
+                                      messages: [.init(uid: 1, bytes: fixtures[0].bytes)]))
         server.dropOnBodyFetchNumber = 2 // exercise the retry and error paths too
         server.acceptedTokens = ["secret-access-token-XYZ"]
         let harness = try await SyncHarness(server: server)

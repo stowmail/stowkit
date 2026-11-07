@@ -30,10 +30,10 @@ import Testing
         defer { server.stop() }
         let session = try await Self.open(server)
         server.unrequestedFetches = (2000, 0)
-        #expect(try await session.fetchStates(1...3, gmail: false).map(\.uid) == [1, 2, 3])
+        #expect(try await session.fetchStates(1...3).map(\.uid) == [1, 2, 3])
         #expect(try await session.fetchUIDs([2]).map(\.uid) == [2])
         server.unrequestedFetches = (50, 1000)
-        let reply = try await session.fetchMessagesWithDiagnostics(uids: [1, 3], gmail: false)
+        let reply = try await session.fetchMessagesWithDiagnostics(uids: [1, 3])
         #expect(reply.messages.map(\.uid) == [1, 3])
         #expect(await session.droppedResponses == 4050)
     }
@@ -56,7 +56,7 @@ import Testing
         let session = try await Self.open(server)
         server.unrequestedFetches = (40, 1 << 20) // 40 MB of bodies nobody asked for
         do {
-            _ = try await session.fetchMessagesWithDiagnostics(uids: [1], gmail: false, expectedBytes: 100)
+            _ = try await session.fetchMessagesWithDiagnostics(uids: [1], expectedBytes: 100)
             Issue.record("a 40 MB reply to a 100-byte request was accepted")
         } catch let error as SyncError {
             guard case .connectionClosed(let text?) = error else {
@@ -76,7 +76,7 @@ import Testing
         let clock = ContinuousClock()
         let start = clock.now
         do {
-            _ = try await session.fetchStates(1...3, gmail: false)
+            _ = try await session.fetchStates(1...3)
             Issue.record("the trickled reply was waited out")
         } catch let error as SyncError {
             guard case .connectionClosed(let text?) = error else {

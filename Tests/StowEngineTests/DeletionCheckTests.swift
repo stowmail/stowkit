@@ -15,7 +15,7 @@ import Testing
 
     @Test func theCountDropsToZeroOnlyAfterAFullCheck() async throws {
         let fixtures = try TestFixtures.small()
-        let server = gmailServer(fixtures)
+        let server = microsoftServer(fixtures)
         let harness = try await EngineHarness(server: server)
         defer { harness.cleanUp() }
         _ = try await harness.run()
@@ -26,12 +26,9 @@ import Testing
         #expect(first.stillAtProvider == fixtures.count)
         #expect(first.lastFullCheck != nil && !first.isCurrent && !first.deletedAsExpected)
 
-        // They delete everything before the date: Gmail moves it to the Bin.
-        let deleted = server.mailbox(allMail).messages
-        server.mutate(allMail) { $0.messages.removeAll(); $0.uidNextOverride = 100 }
-        server.mutate("[Gmail]/Bin") { box in
-            box.messages = deleted.enumerated().map { .init(uid: UInt32($0.offset + 1), bytes: $0.element.bytes, gmailMessageID: $0.element.gmailMessageID) }
-        }
+        // They delete everything before the date for good: Deleted Items is synced,
+        // so mail only moved there would still be at the provider.
+        server.mutate(inbox) { $0.messages.removeAll(); $0.uidNextOverride = 100 }
         // Still stale until a full check has run after `since` (stored in whole seconds).
         try await Task.sleep(nanoseconds: 1_100_000_000)
         _ = try await harness.run(SyncOptions(checkChanges: .quick))
@@ -59,16 +56,16 @@ import Testing
 
     @Test func messagesLeftUnclassifiedByACutShortRunAreClassifiedNextTime() async throws {
         let fixtures = try TestFixtures.small()
-        let server = gmailServer(fixtures)
+        let server = microsoftServer(fixtures)
         let harness = try await EngineHarness(server: server)
         defer { harness.cleanUp() }
         _ = try await harness.run()
 
         // As if a run marked the copy removed, then lost the connection before
-        // looking in the Bin: the message still says `present`.
-        let gone = server.mailbox(allMail).messages[0]
-        server.mutate(allMail) { box in box.messages.removeAll { $0.uid == gone.uid } }
-        server.mutate("[Gmail]/Bin") { $0.messages = [.init(uid: 1, bytes: gone.bytes, gmailMessageID: gone.gmailMessageID)] }
+        // looking in Junk: the message still says `present`.
+        let gone = server.mailbox(inbox).messages[0]
+        server.mutate(inbox) { box in box.messages.removeAll { $0.uid == gone.uid } }
+        server.mutate("Junk Email") { $0.messages = [.init(uid: 1, bytes: gone.bytes)] }
         let goneUID = Int64(gone.uid)
         try await harness.archive.database.write { db in
             try db.execute(sql: "UPDATE message_folders SET removed_from_server_at = 1 WHERE uid = ?", arguments: [goneUID])
@@ -76,7 +73,8 @@ import Testing
         #expect(try harness.count("messages", "source_state = 'present'") == fixtures.count)
 
         let report = try await harness.run()
-        #expect(report.sourceChanges == [.trashed: 1])
-        #expect(try harness.count("messages", "source_state = 'trashed'") == 1)
+        // Found in Junk by its Message-ID (D-039).
+        #expect(report.sourceChanges == [.spam: 1])
+        #expect(try harness.count("messages", "source_state = 'spam'") == 1)
     }
 }

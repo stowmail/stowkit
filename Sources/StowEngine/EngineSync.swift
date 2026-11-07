@@ -12,9 +12,8 @@ public struct EngineSync: Sendable {
     let sessions: @Sendable (Account) -> (@Sendable () async throws -> IMAPSession)
     let settingsURL: URL
     let sleep: @Sendable (TimeInterval) async throws -> Void
-    /// Signs Gmail accounts in to the Gmail API (D-583). Without it (tests that
-    /// play Gmail over IMAP), Gmail still syncs over IMAP until that path is
-    /// removed (brief step 10).
+    /// Signs Gmail accounts in to the Gmail API (D-583). Without it a Gmail
+    /// account cannot sync: its IMAP path is gone (D-601).
     let tokens: TokenProvider?
 
     public init(
@@ -39,8 +38,9 @@ public struct EngineSync: Sendable {
         }
     }
 
-    /// Gmail through the Gmail API when signed in with tokens (D-583); every
-    /// other account, and Gmail in IMAP tests, over IMAP.
+    /// Gmail through the Gmail API (D-583); every other account over IMAP. A
+    /// Gmail account with no token provider gets the IMAP syncer, which refuses
+    /// it (`SyncError.gmailUsesTheAPI`, D-601).
     public func syncer(for account: Account) throws -> any MailSyncer {
         let rules = try EngineRules.ruleSet(settings: settingsURL, archive: archive, account: account.id)
         let store = ArchiveSyncStore(archive: archive, importer: Importer(archive: archive, classifier: EngineRules.classifier(rules)))

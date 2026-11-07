@@ -50,7 +50,6 @@ public struct IMAPEndpoint: Sendable, Equatable {
     }
     #endif
 
-    public static let gmail = IMAPEndpoint(host: "imap.gmail.com")
     public static let office365 = IMAPEndpoint(host: "outlook.office365.com")
     /// iCloud Mail: implicit TLS on 993, the only way Stow reaches it (D-467).
     public static let icloud = IMAPEndpoint(host: "imap.mail.me.com")
@@ -133,8 +132,6 @@ public struct MessageSummary: Sendable, Equatable {
     public var internalDate: Date? = nil
     /// Only filled in by the re-listing of specific UIDs.
     public var flags: [String] = []
-    /// Gmail's permanent message ID, when listed from a Gmail account.
-    public var gmailMessageID: UInt64? = nil
 }
 
 /// One message as fetched, before it is turned into a `RawMessage`.
@@ -144,9 +141,6 @@ public struct FetchedMessage: Sendable, Equatable {
     /// only: Exchange's value is not the exact byte count (D-120).
     public var size: Int
     public var internalDate: Date
-    public var gmailMessageID: UInt64?
-    public var gmailThreadID: UInt64?
-    public var labels: [String]
     public var flags: [String] = []
     /// The complete message from BODY.PEEK[]. Never log it.
     public var bytes: Data
