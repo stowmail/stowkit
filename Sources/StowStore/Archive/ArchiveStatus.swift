@@ -150,18 +150,19 @@ public enum ArchiveStatus {
                     status.folderErrors = gmail["status"] as String == "error" ? [gmail["last_error"] as String?].compactMap { $0 } : []
                 }
                 status.folderErrors = folders.compactMap { $0["status"] as String == "error" ? $0["last_error"] as String? : nil }
+                let origin = try ArchiveSchema.origin(db)
                 status.bytesLast24Hours = try Int64.fetchOne(db, sql: """
                     SELECT coalesce(sum(bytes), 0) FROM byte_budget WHERE account_id = ? AND at > ?
                     """, arguments: [id, Int(now.timeIntervalSince1970) - 86_400]) ?? 0
                 for row in try Row.fetchAll(db, sql: """
-                    SELECT source_state, count(*) AS n FROM messages WHERE account_id = ? AND source_state != 'present' AND origin = 'synced'
+                    SELECT source_state, count(*) AS n FROM messages WHERE account_id = ? AND source_state != 'present' AND \(origin) = 'synced'
                     GROUP BY source_state
                     """, arguments: [id]) {
                     if let state = SourceState(rawValue: row["source_state"]) { status.sourceStates[state] = row["n"] }
                 }
                 status.removed = try Int.fetchOne(db, sql: "SELECT count(*) FROM tombstones WHERE account_id = ?", arguments: [id]) ?? 0
                 status.importedMessages = try Int.fetchOne(db, sql: """
-                    SELECT count(*) FROM messages WHERE account_id = ? AND origin = 'imported'
+                    SELECT count(*) FROM messages WHERE account_id = ? AND \(origin) = 'imported'
                     """, arguments: [id]) ?? 0
                 status.unfinishedImports = try MboxImporter.unfinished(db, account: record.account.id)
                 status.ocrPending = try Int.fetchOne(db, sql: """
@@ -192,7 +193,7 @@ public struct ArchiveGmailSource: GmailMessageSource {
             try Int64.fetchAll(db, sql: """
                 SELECT DISTINCT m.gmail_msgid FROM messages m
                 JOIN message_folders mf ON mf.message_id = m.id JOIN folders f ON f.id = mf.folder_id
-                WHERE m.account_id = ? AND m.gmail_msgid IS NOT NULL AND m.origin = 'synced'
+                WHERE m.account_id = ? AND m.gmail_msgid IS NOT NULL AND \(try ArchiveSchema.origin(db, "m")) = 'synced'
                   AND f.account_id = m.account_id AND f.special_use = '\\all' AND mf.removed_from_server_at IS NULL
                 """, arguments: [account.rawValue]).map { UInt64(bitPattern: $0) }.sorted()
         }
@@ -201,7 +202,7 @@ public struct ArchiveGmailSource: GmailMessageSource {
     public func storedGmailThreadID(_ id: UInt64) async throws -> UInt64? {
         try await archive.database.read { [account] db in
             try Int64.fetchOne(db, sql: """
-                SELECT gmail_thrid FROM messages WHERE account_id = ? AND gmail_msgid = ? AND origin = 'synced' ORDER BY id LIMIT 1
+                SELECT gmail_thrid FROM messages WHERE account_id = ? AND gmail_msgid = ? AND \(try ArchiveSchema.origin(db)) = 'synced' ORDER BY id LIMIT 1
                 """, arguments: [account.rawValue, Int64(bitPattern: id)]).map { UInt64(bitPattern: $0) }
         }
     }
@@ -209,7 +210,7 @@ public struct ArchiveGmailSource: GmailMessageSource {
     public func readGmailMessage(_ id: UInt64) async throws -> Data {
         let found = try await archive.database.read { [account] db -> (hash: Data, state: String)? in
             try Row.fetchOne(db, sql: """
-                SELECT raw_hash, raw_state FROM messages WHERE account_id = ? AND gmail_msgid = ? AND origin = 'synced' ORDER BY id LIMIT 1
+                SELECT raw_hash, raw_state FROM messages WHERE account_id = ? AND gmail_msgid = ? AND \(try ArchiveSchema.origin(db)) = 'synced' ORDER BY id LIMIT 1
                 """, arguments: [account.rawValue, Int64(bitPattern: id)]).map { ($0["raw_hash"], $0["raw_state"]) }
         }
         guard let found else { throw CocoaError(.fileNoSuchFile) }
@@ -283,7 +284,7 @@ public struct GmailArchiveRows: Sendable, Equatable {
             let id = account.rawValue
             var rows = GmailArchiveRows()
             rows.duplicateGmailIDs = try Int.fetchOne(db, sql: """
-                SELECT count(*) FROM (SELECT gmail_msgid FROM messages WHERE account_id = ? AND gmail_msgid IS NOT NULL AND origin = 'synced'
+                SELECT count(*) FROM (SELECT gmail_msgid FROM messages WHERE account_id = ? AND gmail_msgid IS NOT NULL AND \(try ArchiveSchema.origin(db)) = 'synced'
                 GROUP BY gmail_msgid HAVING count(*) > 1)
                 """, arguments: [id]) ?? 0
             let copies = """

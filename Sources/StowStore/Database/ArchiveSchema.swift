@@ -75,6 +75,32 @@ public enum ArchiveSchema {
         return "Reader level: needs \(value ?? "1"); this build reads up to \(readerLevel)."
     }
 
+    // MARK: - Reading an archive that has not been migrated (D-605)
+
+    /// A read-only open never migrates (`Archive.open`), so `status`, coverage,
+    /// the removed list and the app's reader can meet an archive that a newer
+    /// build has not yet written to. Reads that touch a column or table added
+    /// after `v4` ask these first and fall back to what the migration's default
+    /// says about every older row. Checked by shape, not by `grdb_migrations`,
+    /// because a branch build can leave a gap (D-577).
+
+    /// The SQL for a message's `origin` (`v5`, D-562): the column, or
+    /// `'synced'` before `v5`, which is what the column's default gives every
+    /// message stored before it. `alias` is the table's alias in the query, if any.
+    public static func origin(_ db: Database, _ alias: String? = nil) throws -> String {
+        guard try hasColumn(db, table: "messages", column: "origin") else { return "'synced'" }
+        return alias.map { "\($0).origin" } ?? "origin"
+    }
+
+    /// Whether the mbox import's tables exist (`v5`). Without them nothing was imported.
+    public static func hasImportTables(_ db: Database) throws -> Bool {
+        try db.tableExists("import_batches")
+    }
+
+    static func hasColumn(_ db: Database, table: String, column: String) throws -> Bool {
+        try db.columns(in: table).contains { $0.name == column }
+    }
+
     /// Applies every outstanding migration.
     public static func migrate(_ writer: some DatabaseWriter) throws {
         try migrator.migrate(writer)

@@ -41,7 +41,7 @@ public final class MessageReader: MessageReading, InlinePartReading, MessageBody
         // An archive not yet upgraded to v2 (opened read-only) has no marks.
         let marks = try UnreadText.hasMarks(db)
         guard let row = try Row.fetchOne(db, sql: """
-            SELECT m.account_id, m.thread_key, m.internal_date, m.sent_date, m.subject, m.source_state, m.imported_at, m.source_state_at, m.origin,
+            SELECT m.account_id, m.thread_key, m.internal_date, m.sent_date, m.subject, m.source_state, m.imported_at, m.source_state_at, \(try ArchiveSchema.origin(db, "m")) AS origin,
                    \(marks ? "m.text_state = 'incomplete'" : "0") AS text_incomplete,
                    b.text_plain IS NULL AND b.text_from_html IS NOT NULL AS from_html,
                    substr(coalesce(b.text_plain, b.text_from_html), 1, ?) AS body,

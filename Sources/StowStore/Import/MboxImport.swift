@@ -197,13 +197,18 @@ public struct MboxImporter: Sendable {
     }
 
     /// Unfinished imports, oldest first, for `stowmail status` (D-564).
+    /// None on an archive that predates `v5` (a read-only open never migrates, D-605).
     public static func unfinished(_ db: Database, account: AccountID) throws -> [ImportBatch] {
-        try batches(db, sql: "account_id = ? AND finished_at IS NULL", [account.rawValue])
+        guard try ArchiveSchema.hasImportTables(db) else { return [] }
+        return try batches(db, sql: "account_id = ? AND finished_at IS NULL", [account.rawValue])
     }
 
     /// Every batch of an account, oldest first.
     public static func batches(_ archive: Archive, account: AccountID) throws -> [ImportBatch] {
-        try archive.database.read { db in try batches(db, sql: "account_id = ?", [account.rawValue]) }
+        try archive.database.read { db in
+            guard try ArchiveSchema.hasImportTables(db) else { return [] }
+            return try batches(db, sql: "account_id = ?", [account.rawValue])
+        }
     }
 
     // MARK: - Messages
@@ -238,7 +243,7 @@ public struct MboxImporter: Sendable {
 
     static func hasImportedMail(_ archive: Archive) throws -> Bool {
         try archive.database.read { db in
-            try Bool.fetchOne(db, sql: "SELECT EXISTS (SELECT 1 FROM messages WHERE origin = 'imported')") ?? false
+            try Bool.fetchOne(db, sql: "SELECT EXISTS (SELECT 1 FROM messages WHERE \(try ArchiveSchema.origin(db)) = 'imported')") ?? false
         }
     }
 

@@ -72,6 +72,8 @@ public struct ArchiveServers: Sendable {
     }
 
     static func server(_ db: Database, _ id: AccountID) throws -> AccountServer? {
+        // No `imap` account can predate `v6`; a read-only open may not have migrated (D-605).
+        guard try db.tableExists("account_servers") else { return nil }
         guard let row = try Row.fetchOne(db, sql: "SELECT * FROM account_servers WHERE account_id = ?", arguments: [id.rawValue]) else {
             return nil
         }

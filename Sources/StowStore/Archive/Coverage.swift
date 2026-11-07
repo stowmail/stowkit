@@ -183,7 +183,7 @@ public enum Coverage {
     static func presentBefore(_ db: Database, account: AccountID, date: Date) throws -> (count: Int, bytes: Int) {
         let row = try Row.fetchOne(db, sql: """
             SELECT count(*) AS n, coalesce(sum(size), 0) AS bytes FROM messages
-            WHERE account_id = ? AND source_state = 'present' AND origin = 'synced' AND internal_date < ?
+            WHERE account_id = ? AND source_state = 'present' AND \(try ArchiveSchema.origin(db)) = 'synced' AND internal_date < ?
             """, arguments: [account.rawValue, Int(date.timeIntervalSince1970)])!
         return (row["n"], row["bytes"])
     }

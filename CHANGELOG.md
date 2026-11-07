@@ -4,6 +4,10 @@ Changes to StowKit and the `stowmail` command-line tool, newest first. Security 
 
 ## Unreleased
 
+### Fixed
+
+- `stowmail status`, coverage, the removed list, search and the app's reader work again on an archive a newer build has not yet written to. Read-only opens never migrate, so on an archive still at schema `v4` (what 0.1.5 and 0.1.6 leave) `status` failed with "no such column: origin". Reads that touch `v5` to `v7` additions now take each missing column's default instead (`ArchiveSchema.origin`, `ArchiveSchema.hasImportTables`); nothing is written (D-605).
+
 ### Changed
 
 - `stowmail account remove` is now `stowmail account disconnect`, which says what it does: Stow stops syncing the account and forgets its sign-in, keeps its archived mail, and changes nothing in the mailbox. `remove` still works as an alias (D-604).

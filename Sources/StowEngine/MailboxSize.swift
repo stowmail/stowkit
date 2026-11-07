@@ -48,12 +48,13 @@ extension MailboxSize {
                 FROM download_queue q JOIN folders f ON f.id = q.folder_id WHERE f.account_id = ?
                 """, arguments: [account.rawValue])!
             // Gmail through the API queues by message ID instead (D-591), with `sizeEstimate`.
-            let gmailQueued = try Row.fetchOne(db, sql: """
+            // No such queue before `v7` (a read-only open never migrates, D-605).
+            let gmailQueued = try db.tableExists("gmail_queue") ? try Row.fetchOne(db, sql: """
                 SELECT count(*) AS n, coalesce(sum(size), 0) AS bytes FROM gmail_queue WHERE account_id = ?
-                """, arguments: [account.rawValue])!
+                """, arguments: [account.rawValue])! : Row(["n": 0, "bytes": Int64(0)])
             let archived = try Row.fetchOne(db, sql: """
                 SELECT count(*) AS n, coalesce(sum(size), 0) AS bytes FROM messages
-                WHERE account_id = ? AND source_state = 'present' AND origin = 'synced'
+                WHERE account_id = ? AND source_state = 'present' AND \(try ArchiveSchema.origin(db)) = 'synced'
                 """, arguments: [account.rawValue])!
             let provider = try String.fetchOne(db, sql: "SELECT provider FROM accounts WHERE id = ?", arguments: [account.rawValue])
             return MailboxSize(account: account,

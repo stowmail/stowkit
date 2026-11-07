@@ -148,7 +148,7 @@ public struct TidySummary: Sendable, Equatable {
                 let rows = try Row.fetchAll(db, sql: """
                     SELECT m.account_id, count(*) AS n, sum(m.size) AS bytes, max(m.internal_date) AS newest,
                         sum(\(isProtected)) AS protected
-                    FROM messages m WHERE \(scope) AND m.source_state = ? AND m.origin = 'synced' GROUP BY m.account_id
+                    FROM messages m WHERE \(scope) AND m.source_state = ? AND \(try ArchiveSchema.origin(db, "m")) = 'synced' GROUP BY m.account_id
                     """, arguments: StatementArguments(scopeArguments + [state.rawValue]))
                 var group = SourceGroup(state: state, messages: 0, bytes: 0, newest: nil, protectedIncluded: 0, olderThanRetention: 0)
                 for row in rows {
@@ -159,7 +159,7 @@ public struct TidySummary: Sendable, Equatable {
                     group.newest = max(group.newest ?? newest, newest)
                     if state != .spam, let cutoff = cutoffs[row["account_id"] as String] {
                         group.olderThanRetention += try Int.fetchOne(db, sql: """
-                            SELECT count(*) FROM messages WHERE account_id = ? AND source_state = ? AND origin = 'synced' AND internal_date < ?
+                            SELECT count(*) FROM messages WHERE account_id = ? AND source_state = ? AND \(try ArchiveSchema.origin(db)) = 'synced' AND internal_date < ?
                             """, arguments: [row["account_id"] as String, state.rawValue, cutoff]) ?? 0
                     }
                 }
