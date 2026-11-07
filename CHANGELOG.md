@@ -45,6 +45,7 @@ Changes to StowKit and the `stowmail` command-line tool, newest first. Security 
 
 ### Fixed
 
+- A Gmail message deleted and put back with the same bytes (so Gmail gives it a new ID) was downloaded again on every sync and its old ID reported as gone; the archived message now moves to the new Gmail ID and thread (D-602).
 - The full check never completed for a synced folder that has been empty since its first sync (for example an unused Deleted Items), so the deletion check for that account never became current. An empty folder with nothing listed now counts as fully checked (D-601).
 - A read-only open of an archive older than `v7` (`status`, coverage, the removed list) no longer fails on the Gmail API tables (D-599).
 - Capabilities with a value, such as `AUTH=PLAIN`, were recorded as just `AUTH`. iCloud sign-in was unaffected (it always uses PLAIN); choosing between PLAIN and LOGIN needs the whole name (D-574).

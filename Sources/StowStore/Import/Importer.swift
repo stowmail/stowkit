@@ -606,6 +606,20 @@ public final class Importer: Sendable {
         try db.execute(sql: "UPDATE messages SET origin = 'synced', import_batch_id = NULL WHERE id = ? AND origin = 'imported'",
                        arguments: [messageID])
         let account = raw.key.accountID.rawValue
+        // A Gmail API copy is known only by its Gmail ID (D-591). When its bytes
+        // match a message archived under another Gmail ID (the same message
+        // deleted and put back, which Gmail numbers afresh), the message takes
+        // the copy's ID and thread. Otherwise the next listing finds the new ID
+        // unknown and downloads it again, every run, while the old ID reads as gone (D-602).
+        if raw.key.hasNoServerUID, let gmailID = raw.gmailMessageID {
+            try db.execute(sql: """
+                UPDATE messages SET gmail_msgid = :id, gmail_thrid = coalesce(:thread, gmail_thrid),
+                    thread_key = CASE WHEN :threadKey IS NOT NULL AND (thread_key IS NULL OR thread_key LIKE 'g:%')
+                                      THEN :threadKey ELSE thread_key END
+                WHERE id = :message AND gmail_msgid IS NOT :id
+                """, arguments: ["id": Int64(bitPattern: gmailID), "thread": raw.gmailThreadID.map { Int64(bitPattern: $0) },
+                                 "threadKey": raw.gmailThreadID.map { "g:\($0)" }, "message": messageID])
+        }
         let folderID = try folderID(db, account: account, name: raw.key.folder, kind: "folder")
         try db.execute(sql: """
             INSERT INTO message_folders (message_id, folder_id, uid_validity, uid, flags, last_seen_at)

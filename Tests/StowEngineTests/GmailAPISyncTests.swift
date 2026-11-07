@@ -170,6 +170,40 @@ actor FakeGmailAPI: GmailTransport {
         }
     }
 
+    /// D-602: a message deleted and put back with the same bytes gets a new
+    /// Gmail ID. Stow downloads it once, keeps one message, and moves it to the
+    /// new ID, so the next run neither downloads it again nor calls it gone.
+    /// Seen on the test account, 7 Nov 2026, after two demo fills overlapped.
+    @Test func theSameBytesUnderANewGmailIDAreDownloadedOnceAndFollowed() async throws {
+        let fixtures = try TestFixtures.small()
+        let harness = try await EngineHarness.gmail()
+        defer { harness.cleanUp() }
+        let api = FakeGmailAPI(fixtures)
+        _ = try await syncer(harness, api).run()
+        let before = try harness.count("messages")
+
+        let oldID: UInt64 = 1_900_000_000_000
+        let newID: UInt64 = 1_900_000_000_900
+        await api.remove(oldID)
+        await api.deliver(fixtures[0].bytes, id: newID, labels: ["INBOX"])
+        await api.expireHistory()
+        _ = try await syncer(harness, api).run()
+        let fetchesAfterMove = await api.rawFetches
+
+        // One message, now known by the new ID and its thread, and present.
+        #expect(try harness.count("messages") == before)
+        #expect(try harness.count("messages", "gmail_msgid = \(Int64(newID)) AND thread_key = 'g:\(newID)'") == 1)
+        #expect(try harness.count("messages", "gmail_msgid = \(Int64(oldID))") == 0)
+        #expect(try harness.count("messages", "source_state != 'present'") == 0)
+
+        // The next runs download nothing and find nothing gone.
+        _ = try await syncer(harness, api).run(SyncOptions(checkChanges: .full))
+        _ = try await syncer(harness, api).run()
+        #expect(await api.rawFetches == fetchesAfterMove)
+        #expect(try harness.count("messages", "source_state != 'present'") == 0)
+        #expect(try harness.count("gmail_queue") == 0)
+    }
+
     @Test func aNewAccountSyncsEverythingByteForByteWithNoUIDs() async throws {
         let fixtures = try TestFixtures.small()
         let harness = try await EngineHarness.gmail()
