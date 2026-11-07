@@ -134,7 +134,7 @@ public enum ArchiveStatus {
                     SELECT coalesce(sum(q.state = 'queued'), 0) AS queued,
                            coalesce(sum(CASE WHEN q.state = 'queued' THEN q.size ELSE 0 END), 0) AS bytes,
                            coalesce(sum(q.state = 'unfetchable'), 0) AS unfetchable
-                    FROM \(ArchiveSyncStore.bothQueues) q
+                    FROM \(try ArchiveSyncStore.bothQueues(db)) q
                     """, arguments: ["account": id])!
                 status.queue = QueueTotals(queued: queue["queued"], queuedBytes: queue["bytes"], unfetchable: queue["unfetchable"])
                 let folders = try Row.fetchAll(db, sql: """

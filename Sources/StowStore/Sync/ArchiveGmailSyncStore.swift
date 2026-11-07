@@ -32,7 +32,7 @@ extension ArchiveSyncStore: GmailSyncStateStore {
 
     public func gmailState(_ account: AccountID) async throws -> GmailSyncState? {
         try await database.read { db in
-            try Row.fetchOne(db, sql: "SELECT * FROM gmail_sync_state WHERE account_id = ?", arguments: [account.rawValue]).map {
+            try Self.gmailStateRow(db, account: account).map {
                 GmailSyncState(
                     historyID: ($0["history_id"] as Int64?).map { UInt64(bitPattern: $0) },
                     fullListingCompletedAt: Self.date($0["full_listing_completed_at"]),
@@ -341,15 +341,26 @@ extension ArchiveSyncStore: GmailSyncStateStore {
 
     /// The account's Gmail API state row, if it syncs through the API. Status,
     /// coverage and the deletion check read it instead of IMAP's per-folder state.
+    /// Nil too when the archive predates `v7`: a read-only open (status, the
+    /// app's reader) never migrates, so an archive a newer build has not yet
+    /// written to has no Gmail API tables, and no account in it syncs through the API.
     static func gmailStateRow(_ db: Database, account: AccountID) throws -> Row? {
-        try Row.fetchOne(db, sql: "SELECT * FROM gmail_sync_state WHERE account_id = ?", arguments: [account.rawValue])
+        guard try hasGmailAPITables(db) else { return nil }
+        return try Row.fetchOne(db, sql: "SELECT * FROM gmail_sync_state WHERE account_id = ?", arguments: [account.rawValue])
     }
 
-    /// Queued and unfetchable messages in both queues, as one table for status and coverage.
-    static let bothQueues = """
-        (SELECT q.state, q.size, q.internal_date FROM download_queue q JOIN folders f ON f.id = q.folder_id WHERE f.account_id = :account
-         UNION ALL SELECT state, size, internal_date FROM gmail_queue WHERE account_id = :account)
-        """
+    /// Whether `v7` has run on this archive.
+    static func hasGmailAPITables(_ db: Database) throws -> Bool {
+        try db.tableExists("gmail_sync_state")
+    }
+
+    /// Queued and unfetchable messages in both queues, as one table for status
+    /// and coverage. IMAP's queue alone on an archive that predates `v7`.
+    static func bothQueues(_ db: Database) throws -> String {
+        let imap = "SELECT q.state, q.size, q.internal_date FROM download_queue q JOIN folders f ON f.id = q.folder_id WHERE f.account_id = :account"
+        guard try hasGmailAPITables(db) else { return "(\(imap))" }
+        return "(\(imap) UNION ALL SELECT state, size, internal_date FROM gmail_queue WHERE account_id = :account)"
+    }
 
     static func date(_ seconds: Int64?) -> Date? {
         seconds.map { Date(timeIntervalSince1970: TimeInterval($0)) }

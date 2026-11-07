@@ -310,7 +310,7 @@ public final class ArchiveSyncStore: RawMessageSink, SyncStateStore, Sendable {
                 SELECT coalesce(sum(q.state = 'queued'), 0) AS queued,
                        coalesce(sum(CASE WHEN q.state = 'queued' THEN q.size ELSE 0 END), 0) AS bytes,
                        coalesce(sum(q.state = 'unfetchable'), 0) AS unfetchable
-                FROM \(Self.bothQueues) q
+                FROM \(try Self.bothQueues(db)) q
                 """, arguments: ["account": account.rawValue])!
             return QueueTotals(queued: row["queued"], queuedBytes: row["bytes"], unfetchable: row["unfetchable"])
         }

@@ -34,6 +34,26 @@ import Testing
         #expect(ArchiveSchema.readerLevel == 3 && ArchiveSchema.gmailAPIReaderLevel == 3)
     }
 
+    /// Read-only opens never migrate, so a newer build reads an archive at v6
+    /// (status, the app's reader) before anything has written to it.
+    @Test func aReadOnlyOpenOfAV6ArchiveStillReports() throws {
+        let test = try TestArchive()
+        defer { test.remove() }
+        try test.archive.database.write { db in
+            try db.execute(sql: "DROP TABLE gmail_queue")
+            try db.execute(sql: "DROP TABLE gmail_sync_state")
+            try db.execute(sql: "ALTER TABLE folders DROP COLUMN provider_id")
+            try db.execute(sql: "DELETE FROM grdb_migrations WHERE identifier = 'v7'")
+        }
+        let reader = try Archive.open(test.location, keys: test.keys, readOnly: true)
+        let status = try ArchiveStatus.collect(reader)
+        #expect(status.count == 1)
+        _ = try Coverage.report(reader, account: test.account.id)
+        _ = try ArchiveStatus.folders(reader, account: test.account.id)
+        #expect(try ArchiveRemoval(archive: reader).tombstones().isEmpty)
+        #expect(try reader.database.read { db in try db.tableExists("gmail_sync_state") } == false)
+    }
+
     @Test func theFirstAPISyncRaisesTheReaderLevelAndDropsTheIMAPQueue() async throws {
         let test = try TestArchive()
         defer { test.remove() }

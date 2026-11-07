@@ -128,7 +128,7 @@ public enum Coverage {
             let warnUntil = cutoff.addingTimeInterval(TimeInterval(warningDays * 86_400))
             report.atRiskBefore = warnUntil
             report.atRisk = try Int.fetchOne(db, sql: """
-                SELECT count(*) FROM \(ArchiveSyncStore.bothQueues) q WHERE q.internal_date < :before
+                SELECT count(*) FROM \(try ArchiveSyncStore.bothQueues(db)) q WHERE q.internal_date < :before
                 """, arguments: ["account": account.rawValue, "before": Int(warnUntil.timeIntervalSince1970)]) ?? 0
         }
         return report
@@ -153,7 +153,7 @@ public enum Coverage {
         let queue = try Row.fetchOne(db, sql: """
             SELECT coalesce(sum(q.state = 'queued'), 0) AS queued, coalesce(sum(q.state = 'unfetchable'), 0) AS unfetchable,
                    min(q.internal_date) AS oldest, coalesce(sum(q.internal_date IS NULL), 0) AS undated
-            FROM \(ArchiveSyncStore.bothQueues) q
+            FROM \(try ArchiveSyncStore.bothQueues(db)) q
             """, arguments: ["account": account.rawValue])!
         report.queued = queue["queued"]
         report.unfetchable = queue["unfetchable"]

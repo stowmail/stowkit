@@ -326,7 +326,7 @@ public struct ArchiveRemoval: Sendable {
     public func tombstones(account: AccountID? = nil) throws -> [Tombstone] {
         try archive.database.read { db in
             try Row.fetchAll(db, sql: """
-                SELECT t.*, EXISTS (\(Self.restorablePlaceSQL)) AS restorable FROM tombstones t
+                SELECT t.*, EXISTS (\(try Self.restorablePlaceSQL(db))) AS restorable FROM tombstones t
                 WHERE ? IS NULL OR t.account_id = ? ORDER BY t.removed_at DESC, t.internal_date DESC
                 """, arguments: [account?.rawValue, account?.rawValue]).map { row in
                 Tombstone(
@@ -343,14 +343,21 @@ public struct ArchiveRemoval: Sendable {
     /// A place `requestRestore` can queue tombstone `t` at: its folder still
     /// synced, at the same UIDVALIDITY; or, for Gmail through the API, its
     /// Gmail message ID (D-591, D-598).
-    static let restorablePlaceSQL = """
-        SELECT 1 FROM tombstone_copies c
-        JOIN sync_state s ON s.folder_id = c.folder_id AND s.uid_validity = c.uid_validity
-        JOIN folders f ON f.id = c.folder_id AND f.skipped_reason IS NULL
-        WHERE c.tombstone_id = t.id
-        UNION ALL
-        SELECT 1 FROM gmail_sync_state g WHERE g.account_id = t.account_id AND t.gmail_msgid IS NOT NULL
-        """
+    /// The Gmail half is left out on an archive that predates `v7` (read-only opens never migrate).
+    static func restorablePlaceSQL(_ db: Database) throws -> String {
+        let imap = """
+            SELECT 1 FROM tombstone_copies c
+            JOIN sync_state s ON s.folder_id = c.folder_id AND s.uid_validity = c.uid_validity
+            JOIN folders f ON f.id = c.folder_id AND f.skipped_reason IS NULL
+            WHERE c.tombstone_id = t.id
+            """
+        guard try ArchiveSyncStore.hasGmailAPITables(db) else { return imap }
+        return imap + """
+
+            UNION ALL
+            SELECT 1 FROM gmail_sync_state g WHERE g.account_id = t.account_id AND t.gmail_msgid IS NOT NULL
+            """
+    }
 
     /// Puts removed messages back in the download queue, at the place the
     /// server last had them (for Gmail through the API, by message ID). Messages whose folder has since changed
