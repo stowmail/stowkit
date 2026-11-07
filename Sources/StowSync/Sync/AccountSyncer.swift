@@ -25,6 +25,10 @@ public struct SyncOptions: Sendable {
     /// the run also reads the storage quota when the server offers QUOTA, for
     /// the mailbox size shown before the first download (R6, D-055 step 5, D-404).
     public var listOnly: Bool
+    /// Gmail API only: how many `messages.get` requests may be in flight at
+    /// once while describing and downloading. IMAP ignores it; it has its own
+    /// connection limit (`ProviderProfile.maxConnections`).
+    public var requestsInFlight: Int
 
     public init(
         limit: Int? = nil,
@@ -34,7 +38,8 @@ public struct SyncOptions: Sendable {
         partialRetry: [PartialRetryRound] = PartialRetryRound.default,
         deadline: Date? = nil,
         checkChanges: ChangeCheck = .skip,
-        listOnly: Bool = false
+        listOnly: Bool = false,
+        requestsInFlight: Int = ProviderProfile.gmailAPIRequestsInFlight
     ) {
         self.limit = limit
         self.batches = batches
@@ -44,6 +49,7 @@ public struct SyncOptions: Sendable {
         self.deadline = deadline
         self.checkChanges = checkChanges
         self.listOnly = listOnly
+        self.requestsInFlight = max(1, requestsInFlight)
     }
 }
 

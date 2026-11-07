@@ -19,6 +19,19 @@ struct Folders: AsyncParsableCommand {
         let archive = try CLIArchive.open()
         let accounts = CLIArchive.accounts(archive)
         let record = try accounts.find(account)
+        if record.account.provider == .gmail,
+           let gmail = try EngineSync(archive: archive, tokens: try CLI.tokenProvider(accounts: accounts)).syncer(for: record.account) as? GmailSyncer {
+            // Through the Gmail API there is one place to sync and labels on each message (D-583, D-595).
+            let labels = try await gmail.labelNames()
+            print("Gmail, through the Gmail API: All Mail is synced, with \(labels.count) labels.")
+            print("Synced:")
+            print("  [Gmail]/All Mail  (\\all)")
+            print("Labels kept with each email:")
+            for label in labels { print("  \(label)") }
+            print("Not synced:")
+            print("  Spam and Bin  - mail there is not archived (D-104)")
+            return
+        }
         let session = try await SessionFactory(account: record.account, in: archive,
                                                tokens: try CLI.tokenProvider(accounts: accounts)).open()
         do {
@@ -68,6 +81,8 @@ struct Size: AsyncParsableCommand {
             print("\(count) emails, your mail uses \(mail) of \(ByteCountFormatter.string(fromByteCount: quota.limitBytes, countStyle: .file)).")
         } else {
             print("\(count) emails, your mail uses \(size.sizesAreEstimates ? "about " : "")\(mail).")
+            // Gmail through the API has no storage quota to read under gmail.readonly (brief step 6).
+            if record.account.provider == .gmail { return }
             print(size.quotaAdvertised ? "The server offers QUOTA but did not report a storage limit." : "The server does not offer QUOTA after sign-in.")
         }
     }
@@ -108,7 +123,11 @@ struct Sync: AsyncParsableCommand {
     @Option(name: .long, help: "Compare archived mail with the mailbox afterwards: skip, quick (changed flags only) or full.")
     var check: ChangeCheckArgument = .full
 
+    @Option(name: .long, help: .hidden)
+    var inFlight: Int = ProviderProfile.gmailAPIRequestsInFlight
+
     func validate() throws {
+        if inFlight < 1 || inFlight > 8 { throw ValidationError("--in-flight must be from 1 to 8.") }
         if let limit, limit <= 0 { throw ValidationError("--limit must be at least 1.") }
         if batchSize <= 0 { throw ValidationError("--batch-size must be at least 1.") }
     }
@@ -129,7 +148,8 @@ struct Sync: AsyncParsableCommand {
         let started = Date()
         let report: SyncReport
         do {
-            report = try await syncer.run(SyncOptions(limit: limit, batches: BatchPlanner(maxMessages: batchSize), checkChanges: check.check)) { event in
+            report = try await syncer.run(SyncOptions(limit: limit, batches: BatchPlanner(maxMessages: batchSize), checkChanges: check.check,
+                                                   requestsInFlight: inFlight)) { event in
                 Self.describe(event)
             }
         } catch {

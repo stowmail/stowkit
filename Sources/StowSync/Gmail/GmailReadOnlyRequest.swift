@@ -26,6 +26,17 @@ enum GmailReadOnlyRequest: Sendable, Equatable {
 
     /// The call's name, for logs and errors. Never includes an ID or a query,
     /// which may hold a search term.
+    /// Google's quota cost of the call, from the Usage limits page as read on
+    /// 6 November 2026: a `raw` get costs 60 units, any other get 20 (D-598).
+    var quotaUnits: Int {
+        switch self {
+        case .profile, .labels: 1
+        case .history: 2
+        case .messages: 5
+        case .message(_, let format): format == .raw ? 60 : 20
+        }
+    }
+
     var name: String {
         switch self {
         case .profile: "users.getProfile"

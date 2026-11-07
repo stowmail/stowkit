@@ -340,16 +340,20 @@ public struct ArchiveRemoval: Sendable {
         }
     }
 
-    /// A place `requestRestore` can queue tombstone `t` at: its folder still synced, at the same UIDVALIDITY.
+    /// A place `requestRestore` can queue tombstone `t` at: its folder still
+    /// synced, at the same UIDVALIDITY; or, for Gmail through the API, its
+    /// Gmail message ID (D-591, D-598).
     static let restorablePlaceSQL = """
         SELECT 1 FROM tombstone_copies c
         JOIN sync_state s ON s.folder_id = c.folder_id AND s.uid_validity = c.uid_validity
         JOIN folders f ON f.id = c.folder_id AND f.skipped_reason IS NULL
         WHERE c.tombstone_id = t.id
+        UNION ALL
+        SELECT 1 FROM gmail_sync_state g WHERE g.account_id = t.account_id AND t.gmail_msgid IS NOT NULL
         """
 
     /// Puts removed messages back in the download queue, at the place the
-    /// server last had them. Messages whose folder has since changed
+    /// server last had them (for Gmail through the API, by message ID). Messages whose folder has since changed
     /// UIDVALIDITY (or is no longer synced) cannot be found that way and are
     /// counted as unavailable. The next sync downloads the rest; a message
     /// the provider has deleted meanwhile simply drops out of the queue.
@@ -359,8 +363,23 @@ public struct ArchiveRemoval: Sendable {
             var unavailable = 0
             let now = Int(Date().timeIntervalSince1970)
             for id in tombstoneIDs {
-                guard let tombstone = try Row.fetchOne(db, sql: "SELECT size, internal_date, gmail_msgid FROM tombstones WHERE id = ?",
+                guard let tombstone = try Row.fetchOne(db, sql: "SELECT account_id, size, internal_date, gmail_msgid FROM tombstones WHERE id = ?",
                                                        arguments: [id]) else { continue }
+                // Gmail through the API downloads by message ID, not by folder and UID (D-591).
+                if let gmailID = tombstone["gmail_msgid"] as Int64?,
+                   try Bool.fetchOne(db, sql: "SELECT EXISTS (SELECT 1 FROM gmail_sync_state WHERE account_id = ?)",
+                                     arguments: [tombstone["account_id"] as String]) ?? false {
+                    try db.execute(sql: """
+                        INSERT INTO gmail_queue (account_id, gmail_msgid, size, internal_date, priority, restore, queued_at)
+                        VALUES (?, ?, ?, ?, 0, 1, ?)
+                        ON CONFLICT (account_id, gmail_msgid) DO UPDATE SET restore = 1, state = 'queued', attempts = 0,
+                            last_run_id = NULL, priority = 0
+                        """, arguments: [tombstone["account_id"] as String, gmailID, tombstone["size"] as Int64,
+                                         tombstone["internal_date"] as Int64, now])
+                    try db.execute(sql: "UPDATE tombstones SET restore_requested_at = ? WHERE id = ?", arguments: [now, id])
+                    queued += 1
+                    continue
+                }
                 let copies = try Row.fetchAll(db, sql: """
                     SELECT c.folder_id, c.uid_validity, c.uid FROM tombstone_copies c
                     JOIN sync_state s ON s.folder_id = c.folder_id AND s.uid_validity = c.uid_validity

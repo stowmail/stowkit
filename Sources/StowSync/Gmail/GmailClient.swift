@@ -17,18 +17,24 @@ struct GmailClient: Sendable {
     let transport: any GmailTransport
     private let accessToken: AccessToken
     private let markNeedsSignIn: @Sendable () async throws -> Void
+    /// Keeps the account under Google's per-user quota (D-598); nil in tests
+    /// that do not measure pacing.
+    private let pacer: GmailQuotaPacer?
     private let logger = Logger(label: "ee.getstow.sync.gmail")
 
     init(account: AccountID, transport: any GmailTransport = URLSessionGmailTransport(),
-         markNeedsSignIn: @escaping @Sendable () async throws -> Void, accessToken: @escaping AccessToken) {
+         markNeedsSignIn: @escaping @Sendable () async throws -> Void, pacer: GmailQuotaPacer? = nil,
+         accessToken: @escaping AccessToken) {
         self.account = account
         self.transport = transport
+        self.pacer = pacer
         self.markNeedsSignIn = markNeedsSignIn
         self.accessToken = accessToken
     }
 
     init(account: AccountID, tokens: TokenProvider, transport: any GmailTransport = URLSessionGmailTransport()) {
-        self.init(account: account, transport: transport, markNeedsSignIn: { try await tokens.permissionMissing(account) }) { force in
+        self.init(account: account, transport: transport, markNeedsSignIn: { try await tokens.permissionMissing(account) },
+                  pacer: GmailQuotaPacer()) { force in
             try await tokens.accessToken(for: account, forceRefresh: force)
         }
     }
@@ -40,9 +46,11 @@ struct GmailClient: Sendable {
     /// (D-592). Only a missing read permission marks the account.
     func send(_ request: GmailReadOnlyRequest) async throws -> Data {
         let get = request.get
+        try await pacer?.spend(request.quotaUnits)
         var response = try await transport.send(get, accessToken: try await accessToken(false))
         if response.status == 401 {
             logger.info("Gmail refused the access token; refreshing once", metadata: ["call": "\(get.name)"])
+            try await pacer?.spend(request.quotaUnits)
             response = try await transport.send(get, accessToken: try await accessToken(true))
         }
         if (200..<300).contains(response.status) { return response.body }

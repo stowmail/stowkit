@@ -185,10 +185,19 @@ public struct GmailSyncer: MailSyncer {
             }
             let threads = Dictionary(page.messages.map { ($0.id.number, $0.threadID.number) }, uniquingKeysWith: { first, _ in first })
             var queued: [GmailQueuedMessage] = []
-            for id in sort.new {
-                if let message = try await describe(id, thread: threads[id]) { queued.append(message) }
+            var stopped: Error?
+            let described = await Self.inOrder(sort.new, width: options.requestsInFlight, stops: Self.endsBatch) { id in
+                await Self.capture { try await describe(id, thread: threads[id]) }
             }
+            describing: for result in described {
+                switch result {
+                case .success(let message): if let message { queued.append(message) }
+                case .failure(let error): stopped = error; break describing
+                }
+            }
+            // What was described before a failure is kept, so the retry does not ask again.
             report.queued += try await state.enqueueGmail(account.id, queued)
+            if let stopped { throw stopped }
             pageToken = page.nextPageToken
             if pageToken != nil, let deadline = options.deadline, now() >= deadline { return false }
         } while pageToken != nil
@@ -240,17 +249,28 @@ public struct GmailSyncer: MailSyncer {
             var written = 0
             var gone: [UInt64] = []
             var failed: [UInt64] = []
-            for queued in batch {
+            var stopped: Error?
+            // Fetched up to `requestsInFlight` at a time, written one by one in queue order.
+            let fetched = await Self.inOrder(batch, width: options.requestsInFlight, stops: Self.endsBatch) { queued in
+                await Self.capture { try await client.message(GmailMessageID(number: queued.gmailID), format: .raw) }
+            }
+            writing: for (queued, result) in zip(batch, fetched) {
                 let message: GmailMessage
-                do {
-                    message = try await client.message(GmailMessageID(number: queued.gmailID), format: .raw)
-                } catch is GmailNotFound {
+                switch result {
+                case .success(let fetchedMessage):
+                    message = fetchedMessage
+                case .failure(let error) where error is GmailNotFound:
                     gone.append(queued.gmailID)
                     continue
-                } catch SyncError.protocolViolation, SyncError.commandFailed {
+                case .failure(SyncError.protocolViolation), .failure(SyncError.commandFailed):
                     // This message's reply was unusable; others carry on (D-113).
                     failed.append(queued.gmailID)
                     continue
+                case .failure(let error):
+                    // Anything else (429, 5xx, offline, sign-in) ends the batch here;
+                    // what came before it is still written and flushed below.
+                    stopped = error
+                    break writing
                 }
                 guard let raw = message.raw else { failed.append(queued.gmailID); continue }
                 try await sink.write(RawMessage(
@@ -285,6 +305,71 @@ public struct GmailSyncer: MailSyncer {
             report.messagesWritten += written
             report.bytesWritten += bytes
             onEvent(.batchWritten(messages: written, bytes: bytes))
+            if let stopped { throw stopped }
+        }
+    }
+
+    /// The outcome of one request, success or error, so several can run at once
+    /// and be handled in order afterwards.
+    static func capture<Output: Sendable>(_ body: () async throws -> Output) async -> Result<Output, Error> {
+        do { return .success(try await body()) } catch { return .failure(error) }
+    }
+
+    /// Runs `work` on each item with at most `width` running at once, and
+    /// returns the results in the items' order. Once an output `stops` (Google
+    /// asked Stow to slow down, the network went), nothing new is started: the
+    /// results end at the first stopping one, in order, so a throttled batch
+    /// sends no more requests (D-598).
+    static func inOrder<Item: Sendable, Output: Sendable>(
+        _ items: [Item], width: Int, stops: @escaping (Output) -> Bool = { _ in false },
+        _ work: @escaping @Sendable (Item) async -> Output
+    ) async -> [Output] {
+        guard width > 1, items.count > 1 else {
+            var outputs: [Output] = []
+            for item in items {
+                let output = await work(item)
+                outputs.append(output)
+                if stops(output) { break }
+            }
+            return outputs
+        }
+        return await withTaskGroup(of: (Int, Output).self) { group in
+            var outputs = [Output?](repeating: nil, count: items.count)
+            var next = 0
+            var stopped = false
+            while next < min(width, items.count) {
+                let index = next, item = items[index]
+                group.addTask { (index, await work(item)) }
+                next += 1
+            }
+            while let (index, output) = await group.next() {
+                outputs[index] = output
+                if stops(output) { stopped = true }
+                if !stopped, next < items.count {
+                    let index = next, item = items[index]
+                    group.addTask { (index, await work(item)) }
+                    next += 1
+                }
+            }
+            // The finished prefix, up to and including the first stopping output.
+            var ordered: [Output] = []
+            for output in outputs {
+                guard let output else { break }
+                ordered.append(output)
+                if stops(output) { break }
+            }
+            return ordered
+        }
+    }
+
+    /// Whether a request's outcome should stop the batch: anything but success
+    /// or a per-message problem (gone, unreadable) the batch carries on past.
+    static func endsBatch<Output>(_ result: Result<Output, Error>) -> Bool {
+        guard case .failure(let error) = result else { return false }
+        if error is GmailNotFound { return false }
+        switch error as? SyncError {
+        case .protocolViolation?, .commandFailed?: return false
+        default: return true
         }
     }
 
@@ -310,6 +395,18 @@ public struct GmailSyncer: MailSyncer {
 
     /// Reads `labels.list` and stores the labels by ID; returns ID to stored name.
     private func readLabels() async throws -> [String: String] {
+        let names = try await labelNamesByID()
+        try await state.recordGmailLabels(account.id, names.map { GmailLabelName(id: $0.key, name: $0.value) }.sorted { $0.id < $1.id })
+        return names
+    }
+
+    /// The account's labels as Stow names them, read from Gmail and not
+    /// recorded, for `stowmail folders`. Sorted by name.
+    public func labelNames() async throws -> [String] {
+        try await labelNamesByID().values.sorted()
+    }
+
+    private func labelNamesByID() async throws -> [String: String] {
         var names: [String: String] = [:]
         for label in try await client.labels() {
             if label.type == .user {
@@ -320,7 +417,6 @@ public struct GmailSyncer: MailSyncer {
         }
         // System labels are always there, whether or not labels.list named them.
         for (id, name) in Self.systemLabelNames where names[id] == nil { names[id] = name }
-        try await state.recordGmailLabels(account.id, names.map { GmailLabelName(id: $0.key, name: $0.value) }.sorted { $0.id < $1.id })
         return names
     }
 

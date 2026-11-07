@@ -19,6 +19,18 @@ public struct ProviderProfile: Sendable, Equatable {
     }
 
     /// Gmail allows 15 connections and 2,500 MB a day; Stow stays well under both.
+    /// Gmail API requests in flight per account while describing and
+    /// downloading (brief step 6). One until the test account's measurements
+    /// set it.
+    public static let gmailAPIRequestsInFlight = 1
+
+    /// Gmail API quota units Stow spends per account per minute, and the most
+    /// it may spend at once (D-598). Google allows 6,000 per user per minute
+    /// (since 1 May 2026); 5,000 plus a burst of 800 stays under it in any
+    /// minute, about 60 new messages a minute at 80 units each.
+    public static let gmailAPIUnitsPerMinute = 5_000
+    public static let gmailAPIUnitBurst = 800
+
     public static let gmail = ProviderProfile(provider: .gmail, endpoint: .gmail, maxConnections: 3, dailyByteLimit: 2_000_000_000)
 
     /// Exchange Online publishes no per-mailbox IMAP cap, so Stow keeps to a

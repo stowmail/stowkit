@@ -32,6 +32,8 @@ actor FakeGmailAPI: GmailTransport {
     let pageSize: Int
     /// IDs whose `raw` fetch answers with a reply Stow cannot read.
     var unreadable: Set<UInt64> = []
+    /// `raw` fetches answered with 403 rateLimitExceeded, counting down.
+    var throttledRawFetches = 0
     private(set) var paths: [String] = []
 
     init(_ fixtures: [(name: String, bytes: Data)], pageSize: Int = 3, historyID: UInt64 = 4242) {
@@ -49,6 +51,7 @@ actor FakeGmailAPI: GmailTransport {
 
     func remove(_ id: UInt64) { messages.removeAll { $0.id == id } }
     func setUnreadable(_ ids: Set<UInt64>) { unreadable = ids }
+    func throttleRaw(_ count: Int) { throttledRawFetches = count }
     func addUserLabel(_ id: String, _ name: String) { userLabels.append((id, name)) }
     func renameUserLabel(_ id: String, to name: String) {
         userLabels = userLabels.map { $0.id == id ? (id, name) : $0 }
@@ -136,6 +139,10 @@ actor FakeGmailAPI: GmailTransport {
             let labels = message.labels.map { "\"\($0)\"" }.joined(separator: ",")
             let common = #""id":"\#(hex)","threadId":"\#(hex)","labelIds":[\#(labels)],"internalDate":"1700000000000","sizeEstimate":\#(message.bytes.count)"#
             if query["format"] == "raw" {
+                if throttledRawFetches > 0 {
+                    throttledRawFetches -= 1
+                    return json(#"{"error":{"code":403,"errors":[{"reason":"rateLimitExceeded"}]}}"#, status: 403)
+                }
                 if unreadable.contains(id) { return json(#"{"id":"\#(hex)"}"#) }
                 let raw = message.bytes.base64EncodedString().replacingOccurrences(of: "+", with: "-")
                     .replacingOccurrences(of: "/", with: "_").replacingOccurrences(of: "=", with: "")
@@ -218,6 +225,139 @@ actor FakeGmailAPI: GmailTransport {
         #expect(try harness.count("messages") == fixtures.count)
         #expect(Set(try harness.storedBytes()) == Set(fixtures.map(\.bytes)))
         #expect(try harness.count("gmail_queue") == 0)
+    }
+
+    /// Step 6: several requests in flight give the same archive as one, and a
+    /// crash still resumes with no duplicates or gaps.
+    @Test func requestsInFlightGiveTheSameArchive() async throws {
+        let fixtures = try TestFixtures.small()
+        let harness = try await EngineHarness(server: gmailServer(fixtures))
+        defer { harness.cleanUp() }
+        let api = FakeGmailAPI(fixtures)
+        let store = ArchiveSyncStore(archive: harness.archive)
+        struct Killed: Error {}
+        let crashing = CrashingSink(store: store, failAfter: 3)
+        await #expect(throws: Killed.self) {
+            do {
+                _ = try await syncer(harness, api, sink: crashing)
+                    .run(SyncOptions(batches: BatchPlanner(maxMessages: 4), requestsInFlight: 4))
+            } catch is CrashingSink.Crash { throw Killed() }
+        }
+        #expect(try harness.count("messages") == 3)
+        let report = try await syncer(harness, api).run(SyncOptions(batches: BatchPlanner(maxMessages: 4), requestsInFlight: 4))
+        #expect(report.messagesWritten == fixtures.count - 3)
+        #expect(Set(try harness.storedBytes()) == Set(fixtures.map(\.bytes)))
+        #expect(try harness.count("messages") == fixtures.count)
+        #expect(try harness.count("gmail_queue") == 0)
+    }
+
+    /// `stowmail size` before the first download counts Gmail's own queue (step 6).
+    @Test func theMailboxSizeCountsGmailsQueue() async throws {
+        let fixtures = try TestFixtures.small()
+        let harness = try await EngineHarness(server: gmailServer(fixtures))
+        defer { harness.cleanUp() }
+        _ = try await syncer(harness, FakeGmailAPI(fixtures)).run(SyncOptions(listOnly: true))
+        let size = try MailboxSize.totals(harness.archive, account: harness.account.id)
+        #expect(size.messages == fixtures.count)
+        #expect(size.bytes == Int64(fixtures.reduce(0) { $0 + $1.bytes.count }))
+        #expect(size.quota == nil && !size.sizesAreEstimates)
+    }
+
+    /// D-598: a throttled batch stops at the refusal, keeps what it downloaded,
+    /// backs off and carries on; nothing is counted against the message.
+    @Test func aThrottledBatchStopsAtTheRefusal() async throws {
+        let fixtures = try TestFixtures.small()
+        let harness = try await EngineHarness(server: gmailServer(fixtures))
+        defer { harness.cleanUp() }
+        let api = FakeGmailAPI(fixtures)
+        _ = try await syncer(harness, api).run(SyncOptions(listOnly: true))
+        await api.throttleRaw(1)
+        let report = try await syncer(harness, api).run(SyncOptions(batches: BatchPlanner(maxMessages: 100), requestsInFlight: 1))
+        #expect(report.messagesWritten == fixtures.count)
+        // One refused request, then each message once: no burst of refusals.
+        #expect(await api.rawFetches == fixtures.count + 1)
+        #expect(try harness.count("gmail_queue") == 0)
+        #expect(try harness.count("gmail_queue", "attempts > 0") == 0)
+    }
+
+    /// Removed Gmail API mail comes back by its Gmail ID (D-598): no folder or UID needed.
+    @Test func removedMailIsRestoredByGmailID() async throws {
+        let fixtures = try TestFixtures.small()
+        let harness = try await EngineHarness(server: gmailServer(fixtures))
+        defer { harness.cleanUp() }
+        let api = FakeGmailAPI(fixtures)
+        _ = try await syncer(harness, api).run()
+        let ids = try await harness.archive.database.read { db in
+            try Int64.fetchAll(db, sql: "SELECT id FROM messages ORDER BY id LIMIT 2")
+        }
+        let removal = ArchiveRemoval(archive: harness.archive)
+        _ = try removal.remove(ids, reason: "sender:test")
+        #expect(try harness.count("messages") == fixtures.count - 2)
+        let tombstones = try removal.tombstones(account: harness.account.id)
+        #expect(tombstones.count == 2 && tombstones.allSatisfy(\.restorable))
+        let result = try removal.requestRestore(tombstones.map(\.id))
+        #expect(result.queued == 2 && result.unavailable == 0)
+        let report = try await syncer(harness, api).run()
+        #expect(report.messagesWritten == 2)
+        #expect(try harness.count("messages") == fixtures.count)
+        #expect(try harness.count("tombstones") == 0)
+        #expect(Set(try harness.storedBytes()) == Set(fixtures.map(\.bytes)))
+    }
+
+    @Test func inOrderStopsStartingWorkAfterAStop() async throws {
+        actor Started { var count = 0; func add() { count += 1 } }
+        for width in [1, 3] {
+            let started = Started()
+            let out = await GmailSyncer.inOrder(Array(0..<20), width: width, stops: { $0 == 4 }) { item in
+                await started.add()
+                return item
+            }
+            #expect(out == [0, 1, 2, 3, 4])
+            #expect(await started.count <= 5 + width - 1)
+        }
+    }
+
+    @Test func thePacerKeepsToTheRate() async throws {
+        actor Clock {
+            var now = Date(timeIntervalSince1970: 0)
+            var slept: TimeInterval = 0
+            func advance(_ seconds: TimeInterval) { now += seconds; slept += seconds }
+        }
+        let clock = Clock()
+        let pacer = GmailQuotaPacer(unitsPerMinute: 6_000, burst: 600, now: { Date(timeIntervalSince1970: 0) },
+                                    sleep: { await clock.advance($0) })
+        // The burst is free; after it every 100 units waits a second (6,000 a minute).
+        try await pacer.spend(600)
+        #expect(await clock.slept == 0)
+        try await pacer.spend(100)
+        #expect(abs(await clock.slept - 1) < 0.001)
+        try await pacer.spend(200)
+        #expect(abs(await clock.slept - 4) < 0.001)
+        #expect(GmailReadOnlyRequest.message(GmailMessageID(number: 1), format: .raw).quotaUnits == 60)
+        #expect(GmailReadOnlyRequest.message(GmailMessageID(number: 1), format: .metadata(headers: [])).quotaUnits == 20)
+        #expect(GmailReadOnlyRequest.messages(GmailMessageListQuery(includeSpamTrash: false)).quotaUnits == 5)
+        #expect(GmailReadOnlyRequest.history(GmailHistoryQuery(startHistoryID: 1)).quotaUnits == 2)
+        #expect(GmailReadOnlyRequest.profile.quotaUnits == 1 && GmailReadOnlyRequest.labels.quotaUnits == 1)
+    }
+
+    @Test func inOrderKeepsOrderAndWidth() async throws {
+        actor Gauge {
+            var now = 0, most = 0
+            func enter() { now += 1; most = max(most, now) }
+            func leave() { now -= 1 }
+        }
+        for width in [1, 2, 4] {
+            let gauge = Gauge()
+            let out = await GmailSyncer.inOrder(Array(0..<20), width: width) { item in
+                await gauge.enter()
+                try? await Task.sleep(nanoseconds: UInt64((20 - item) * 200_000))
+                await gauge.leave()
+                return item * 10
+            }
+            #expect(out == (0..<20).map { $0 * 10 })
+            #expect(await gauge.most <= width)
+            if width > 1 { #expect(await gauge.most > 1) }
+        }
     }
 
     /// Step 9's shape (D-591 item 4): an account synced by IMAP moves to the API
