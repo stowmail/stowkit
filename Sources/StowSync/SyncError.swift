@@ -24,7 +24,7 @@ public enum SyncError: Error, Equatable, CustomStringConvertible {
     /// Something asked the IMAP path to reach Gmail. Gmail syncs only through
     /// the Gmail API (D-583, D-601), so nothing was sent.
     case gmailUsesTheAPI
-    /// The account was removed (disconnected) from Stow. Nothing is refreshed
+    /// The account was disconnected from Stow. Nothing is refreshed
     /// or saved for it; adding the address again reconnects it (A-12, D-513).
     case accountRemoved(AccountID)
     /// An import-only account: its mail came from files and nothing ever connects for it (D-568).
@@ -105,7 +105,7 @@ public enum SyncError: Error, Equatable, CustomStringConvertible {
             "Gmail syncs through the Gmail API, not IMAP, so Stow did not connect. This is our fault, not yours."
         case .importOnly: "This is an import-only account: its mail came from files, and it never syncs."
         case .accountRemoved(let id):
-            "Account \(id) was removed from Stow, so it no longer signs in or syncs. Add the address again with `stowmail account add` to reconnect it."
+            "Account \(id) was disconnected from Stow, so it no longer signs in or syncs. Add the address again with `stowmail account add` to reconnect it."
         case .authenticationFailed(let text):
             "The mail server rejected the sign-in (\(text)). Try `stowmail account signin`."
         case .mailboxUnavailable(let text):

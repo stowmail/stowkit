@@ -92,7 +92,7 @@ struct ArchiveDelete: AsyncParsableCommand {
         commandName: "archive-delete",
         abstract: "Delete the whole archive and its keys from this Mac. Your mailboxes are not touched.",
         discussion: """
-            Removes every account first, as `stowmail account remove` does, so Stow forgets their sign-ins; then deletes \
+            Disconnects every account first, as `stowmail account disconnect` does, so Stow forgets their sign-ins; then deletes \
             the archive's files and its two keys in the Keychain. Nothing outside the archive folder is deleted. Asks you \
             to type `delete` first. Refused while the background sync is using the archive. If a deletion was stopped \
             part-way, the folder is refused everywhere until you run this again, which finishes it (R17, D-530).
@@ -128,7 +128,7 @@ struct ArchiveDelete: AsyncParsableCommand {
         }
         let outcome = try ArchiveDeletion.delete(location, keyManager: CLI.keyManager())
         for account in outcome.removedAccounts where account.provider.syncs {
-            print("Removed account \(account.id) (\(account.provider.rawValue)); its \(account.provider.credentialKind.label) \(account.provider.oauth == nil ? "is" : "are") deleted from this Mac.")
+            print("Disconnected account \(account.id) (\(account.provider.rawValue)); its \(account.provider.credentialKind.label) \(account.provider.oauth == nil ? "is" : "are") deleted from this Mac.")
             if account.provider.oauth == nil { print(ICloudSignIn.revokeSteps) }
         }
         print("Deleted the archive at \(location.root.path).")

@@ -31,7 +31,7 @@ public enum ArchiveDeletionError: Error, Equatable, CustomStringConvertible {
 
 /// Deleting the whole archive (R17, UI-16, D-530), with the writer lock held throughout.
 ///
-/// 0. `accounts`: every account is removed as `stowmail account remove` does
+/// 0. `accounts`: every account is removed as `stowmail account disconnect` does
 ///    (D-032): its tokens or app-specific password deleted from the Keychain,
 ///    the account disconnected. The archive still works if it stops here.
 /// 1. `marker`: `deleting.json` goes into the folder, flushed, naming a digest
@@ -134,7 +134,7 @@ public enum ArchiveDeletion {
         return Outcome(removedAccounts: removedAccounts, deletedKeys: deleteKeys, removedFolder: removedFolder)
     }
 
-    /// `stowmail account remove` for every account: each one's tokens and
+    /// `stowmail account disconnect` for every account: each one's tokens and
     /// app-specific password deleted (absent ones too), connected ones
     /// disconnected. Returns the accounts that were connected.
     static func removeAccounts(_ location: ArchiveLocation, keys: ArchiveKeys, keychain: KeychainStore) throws -> [Account] {

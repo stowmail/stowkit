@@ -42,7 +42,7 @@ final class GatedTokenEndpoint: HTTPFormPosting, @unchecked Sendable {
     }
 }
 
-/// A-12: a refresh that finishes after `account remove` deleted the token
+/// A-12: a refresh that finishes after `account disconnect` deleted the token
 /// item must not add it back, and a disconnected account is refused.
 @Suite struct RemovedAccountTokenTests {
     let keychain = makeTestKeychain()
@@ -65,7 +65,7 @@ final class GatedTokenEndpoint: HTTPFormPosting, @unchecked Sendable {
         let refresh = Task { try await provider.accessToken(for: account.id) }
         var arrivals = endpoint.arrived.makeAsyncIterator()
         _ = await arrivals.next()
-        // `account remove` deletes the token item while the refresh is in flight.
+        // `account disconnect` deletes the token item while the refresh is in flight.
         try tokens.delete(for: account.id)
         endpoint.open()
         let outcome = await refresh.result

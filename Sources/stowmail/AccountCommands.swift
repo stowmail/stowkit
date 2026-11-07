@@ -9,7 +9,7 @@ struct AccountCommand: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "account",
         abstract: "Add, list, re-authorise and remove mail accounts.",
-        subcommands: [Add.self, List.self, SignIn.self, Remove.self]
+        subcommands: [Add.self, List.self, SignIn.self, Disconnect.self]
     )
 
     struct Add: AsyncParsableCommand {
@@ -66,7 +66,7 @@ struct AccountCommand: AsyncParsableCommand {
                 throw ValidationError("You signed in as a different address from --email. Nothing was saved.")
             }
 
-            // An account removed earlier keeps its ID and archived mail, and is simply reconnected (D-032).
+            // An account disconnected earlier keeps its ID and archived mail, and is simply reconnected (D-032).
             if let earlier = try accounts.disconnected(provider: provider.provider, email: address) {
                 try CLI.tokenStore().save(grant.tokens, for: earlier.account.id)
                 try accounts.reconnect(earlier.account.id)
@@ -143,9 +143,13 @@ struct AccountCommand: AsyncParsableCommand {
         }
     }
 
-    struct Remove: AsyncParsableCommand {
+    /// `remove` until 0.2.0, kept as an alias. "Remove" read as if mail were deleted;
+    /// nothing is (D-032, D-604).
+    struct Disconnect: AsyncParsableCommand {
         static let configuration = CommandConfiguration(
-            abstract: "Disconnect an account: stop syncing it and delete its tokens or password. Its archived mail is kept."
+            commandName: "disconnect",
+            abstract: "Disconnect an account: stop syncing it and delete its tokens or password. Its archived mail is kept, and nothing changes in the mailbox.",
+            aliases: ["remove"]
         )
 
         @Argument(help: "Account ID, ID prefix, address or name.")
@@ -161,7 +165,7 @@ struct AccountCommand: AsyncParsableCommand {
             try CLI.passwordStore().delete(for: record.account.id)
             try accounts.disconnect(record.account.id)
             guard record.account.provider.syncs else {
-                print("Removed import-only account \(record.account.id) from the list of accounts. Its imported mail is kept and still searchable.")
+                print("Disconnected import-only account \(record.account.id). Its imported mail is kept and still searchable.")
                 return
             }
             print("Disconnected account \(record.account.id). It no longer syncs and its \(record.account.provider.credentialKind.label) \(record.account.provider.oauth == nil ? "is" : "are") deleted from this Mac.")

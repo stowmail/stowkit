@@ -2,6 +2,12 @@
 
 Changes to StowKit and the `stowmail` command-line tool, newest first. Security fixes rated Medium or worse also get a GitHub security advisory; Low ones are listed here only (see [SECURITY.md](SECURITY.md)).
 
+## Unreleased
+
+### Changed
+
+- `stowmail account remove` is now `stowmail account disconnect`, which says what it does: Stow stops syncing the account and forgets its sign-in, keeps its archived mail, and changes nothing in the mailbox. `remove` still works as an alias (D-604).
+
 ## 0.2.0 (7 November 2026)
 
 **Upgrading from 0.1.x.** Gmail now syncs only through the Gmail API with Google's read-only permission (`gmail.readonly`). Each Gmail account signs in once more (`stowmail account signin <account>`); its archive carries across with nothing downloaded again. If you bring your own Google client, enable the Gmail API in its project and add `.../auth/gmail.readonly` to its scopes. An archive raised to reader level 2 (first import) or 3 (first Gmail API sync) no longer opens in 0.1.x. Some public API changed or went (see Changed and Removed), and `stowmail import` is now `stowmail import dev` (D-603).

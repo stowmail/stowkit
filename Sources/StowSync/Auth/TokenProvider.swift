@@ -24,7 +24,7 @@ public enum SignInCredential: Sendable {
 ///   never retried, since there is nothing to refresh (D-467 item 5).
 /// - A removed (disconnected) account is refused before anything else, and a
 ///   refresh saves its tokens only into an item that still exists, for an
-///   account still connected, so it never brings back what `account remove`
+///   account still connected, so it never brings back what `account disconnect`
 ///   deleted (A-12, D-513).
 public actor TokenProvider {
     let tokenStore: TokenStore
