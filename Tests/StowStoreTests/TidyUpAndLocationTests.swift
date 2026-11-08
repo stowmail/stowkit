@@ -168,8 +168,15 @@ import Testing
         #expect(try accounts.connected().isEmpty)
         #expect(try accounts.disconnected(provider: .microsoft, email: "SAM@example.com")?.account.id == test.account.id)
         #expect(try test.count("messages") == 25) // mail kept
+        try await test.archive.database.write {
+            try $0.execute(sql: "UPDATE accounts SET last_error = 'Sign in again.' WHERE id = ?", arguments: [test.account.id.rawValue])
+        }
+        let disconnected = try #require(try ArchiveStatus.collect(test.archive).first)
+        #expect(disconnected.lastError == nil && !disconnected.account.needsSignIn) // no stale "sign in again"
+        #expect(disconnected.archivedMessages == 25)
         try accounts.reconnect(test.account.id)
         #expect(try accounts.connected().count == 1)
+        #expect(try ArchiveStatus.collect(test.archive).first?.lastError == "Sign in again.")
 
         // Phase 1 Keychain records keep their IDs when moved in.
         let phase1 = AccountRecord(account: Account(id: .generate(), provider: .gmail, email: "old@example.com", displayName: "Old"))

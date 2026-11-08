@@ -2,6 +2,12 @@
 
 Changes to StowKit and the `stowmail` command-line tool, newest first. Security fixes rated Medium or worse also get a GitHub security advisory; Low ones are listed here only (see [SECURITY.md](SECURITY.md)).
 
+## Unreleased
+
+### Fixed
+
+- `stowmail status` and the app no longer show a disconnected account's last sync error, such as "sign in once more": a disconnected account no longer syncs, so the error no longer applies. `status` also leaves out its sign-in method and today's downloads.
+
 ## 0.2.1 (8 November 2026)
 
 ### Fixed

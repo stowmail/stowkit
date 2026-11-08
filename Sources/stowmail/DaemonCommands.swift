@@ -103,7 +103,7 @@ struct Status: AsyncParsableCommand {
             }
             if !record.isConnected { print("  Disconnected: no longer syncs. Its \(status.archivedMessages) archived messages are kept.") }
             if record.needsSignIn { print("  Needs sign-in: run `stowmail account signin \(record.account.id.rawValue.prefix(8))`.") }
-            print("  Signs in with: \(record.account.provider.credentialKind.label), kept in the Keychain")
+            if record.isConnected { print("  Signs in with: \(record.account.provider.credentialKind.label), kept in the Keychain") }
             print("  Last sync: \(status.lastSyncAt.map(CLI.time) ?? "never")\(status.lastError == nil ? "" : " (failed)")")
             if let error = status.lastError { print("  Last error: \(error)") }
             print("  Archived: \(status.archivedMessages) messages, \(CLI.megabytes(status.archivedBytes))")
@@ -120,7 +120,7 @@ struct Status: AsyncParsableCommand {
                 print("  Could not download: \(status.queue.unfetchable) message(s) the server lists but never returns (recorded after 3 runs).")
             }
             let profile = try ProviderProfile.forAccount(record.account, in: archive)
-            print("  Downloaded in the last 24 hours: \(CLI.megabytes(status.bytesLast24Hours))\(profile.dailyByteLimit.map { " of \(CLI.megabytes($0)) allowed" } ?? "")")
+            if record.isConnected { print("  Downloaded in the last 24 hours: \(CLI.megabytes(status.bytesLast24Hours))\(profile.dailyByteLimit.map { " of \(CLI.megabytes($0)) allowed" } ?? "")") }
             if let coverage = status.coverageDate { print("  Everything before \(CLI.day(coverage)) is archived and verified.") }
             if !status.sourceStates.isEmpty {
                 let parts = status.sourceStates.sorted { $0.key.rawValue < $1.key.rawValue }.map { "\($0.value) \($0.key.rawValue)" }

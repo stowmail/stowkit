@@ -121,7 +121,9 @@ public enum ArchiveStatus {
                 }
                 status.lastSyncAt = date("last_sync_at")
                 status.lastSuccessAt = date("last_success_at")
-                status.lastError = account?["last_error"]
+                // A disconnected account no longer syncs, so its last error (often "sign in
+                // again") no longer applies; reconnecting clears it with the next sync.
+                status.lastError = record.isConnected ? account?["last_error"] : nil
                 var coverage = CoverageReport(account: record.account.id)
                 try Coverage.measure(db, into: &coverage)
                 status.coverageDate = coverage.coverageDate
