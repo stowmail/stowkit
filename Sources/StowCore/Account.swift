@@ -2,7 +2,7 @@ import Foundation
 
 /// The engine's version, reported by `stowmail --version`.
 public enum StowVersion {
-    public static let current = "0.2.0"
+    public static let current = "0.2.1"
 }
 
 /// Stable identifier for a mail account inside one Stow install.
