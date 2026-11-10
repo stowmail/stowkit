@@ -320,6 +320,14 @@ public struct GmailSyncer: MailSyncer {
     /// asked Stow to slow down, the network went), nothing new is started: the
     /// results end at the first stopping one, in order, so a throttled batch
     /// sends no more requests (D-598).
+    ///
+    /// Work runs in a window of `width` items from the first unfinished one
+    /// (D-610): item `i` starts only once every item before `i - width + 1`
+    /// has finished. So while a slow request is in flight, later ones cannot
+    /// keep finishing and starting more. If item `s` is the first to stop,
+    /// nothing past `s + width - 1` was started before `s` finished, and
+    /// nothing at all after, so at most `width - 1` requests are wasted past a
+    /// stop, and at most `width` finished outputs wait to be put in order.
     static func inOrder<Item: Sendable, Output: Sendable>(
         _ items: [Item], width: Int, stops: @escaping (Output) -> Bool = { _ in false },
         _ work: @escaping @Sendable (Item) async -> Output
@@ -335,7 +343,8 @@ public struct GmailSyncer: MailSyncer {
         }
         return await withTaskGroup(of: (Int, Output).self) { group in
             var outputs = [Output?](repeating: nil, count: items.count)
-            var next = 0
+            var next = 0          // the next item to start
+            var unfinished = 0    // the first item without an output yet
             var stopped = false
             while next < min(width, items.count) {
                 let index = next, item = items[index]
@@ -345,7 +354,8 @@ public struct GmailSyncer: MailSyncer {
             while let (index, output) = await group.next() {
                 outputs[index] = output
                 if stops(output) { stopped = true }
-                if !stopped, next < items.count {
+                while unfinished < items.count, outputs[unfinished] != nil { unfinished += 1 }
+                while !stopped, next < items.count, next < unfinished + width {
                     let index = next, item = items[index]
                     group.addTask { (index, await work(item)) }
                     next += 1

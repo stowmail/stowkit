@@ -2,6 +2,12 @@
 
 Changes to StowKit and the `stowmail` command-line tool, newest first. Security fixes rated Medium or worse also get a GitHub security advisory; Low ones are listed here only (see [SECURITY.md](SECURITY.md)).
 
+## Unreleased
+
+### Fixed
+
+- Gmail sync with more than one request in flight (the hidden `--in-flight` option; the default is one) no longer keeps starting downloads past a slow request that Google then refuses, only to throw them away. Requests now run at most that many ahead of the oldest unfinished one, so a refusal wastes at most `in-flight - 1` requests (D-610).
+
 ## 0.2.2 (9 November 2026)
 
 ### Fixed

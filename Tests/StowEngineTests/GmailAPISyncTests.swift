@@ -349,6 +349,10 @@ actor FakeGmailAPI: GmailTransport {
                 return item
             }
             #expect(out == [0, 1, 2, 3, 4])
+            // Items start in a window of `width` from the first unfinished one
+            // (D-610), so before item 4 has finished nothing past 4 + width - 1
+            // can start, and after it nothing starts: at most 5 + width - 1,
+            // however the tasks are scheduled.
             #expect(await started.count <= 5 + width - 1)
         }
     }
