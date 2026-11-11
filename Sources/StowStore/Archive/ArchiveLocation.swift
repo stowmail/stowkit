@@ -350,7 +350,13 @@ public final class ArchiveLock: @unchecked Sendable {
     /// Takes the lock, waiting up to `wait` seconds (nil: do not wait).
     /// `onWait` runs once if it has to wait.
     public static func acquire(_ location: ArchiveLocation, wait: TimeInterval? = nil, onWait: (() -> Void)? = nil) throws -> ArchiveLock {
-        let descriptor = open(location.lockURL.path, O_CREAT | O_RDWR | O_CLOEXEC, 0o600)
+        try acquire(url: location.lockURL, wait: wait, onWait: onWait)
+    }
+
+    /// The same kind of lock on another file in the archive folder, such as
+    /// `.migration.lock` (D-609).
+    public static func acquire(url: URL, wait: TimeInterval? = nil, onWait: (() -> Void)? = nil) throws -> ArchiveLock {
+        let descriptor = open(url.path, O_CREAT | O_RDWR | O_CLOEXEC, 0o600)
         guard descriptor >= 0 else { throw ArchiveLockError.cannotOpen }
         let deadline = Date().addingTimeInterval(wait ?? 0)
         var waited = false

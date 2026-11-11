@@ -63,6 +63,15 @@ public enum ArchiveMover {
         for (from, to) in [(archive.location.rawDirectory, target.rawDirectory), (archive.location.attachmentsDirectory, target.attachmentsDirectory)] {
             try copyContents(of: from, into: to)
         }
+        // The copy from before the last format migration, and a database a
+        // restore set aside, go with the archive; the moved database still
+        // names them, so they expire there as they would have here (D-606).
+        for kept in archive.location.keptAsideDatabaseFiles()
+        where kept.pathExtension == "db" && !kept.lastPathComponent.hasPrefix(".") {
+            let copied = target.root.appendingPathComponent(kept.lastPathComponent)
+            try FileManager.default.copyItem(at: kept, to: copied)
+            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: copied.path)
+        }
         if FileManager.default.fileExists(atPath: archive.location.recoveryBundleURL.path) {
             try FileManager.default.copyItem(at: archive.location.recoveryBundleURL, to: target.recoveryBundleURL)
             try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: target.recoveryBundleURL.path)

@@ -27,7 +27,7 @@ public final class Archive: Sendable {
     }
 
     public static func open(_ location: ArchiveLocation, keys: ArchiveKeys, readOnly: Bool = false,
-                            diskSync: DiskSync = .system) throws -> Archive {
+                            diskSync: DiskSync = .system, upgrade: ArchiveUpgrade = .standard) throws -> Archive {
         // A moved archive's old folder is never opened or written again (A-10).
         try location.refuseIfMoved()
         if !readOnly { try location.prepare() }
@@ -41,13 +41,22 @@ public final class Archive: Sendable {
             throw error
         }
         if !readOnly {
-            try ArchiveSchema.migrate(database)
-            try database.write { db in
-                let now = String(Int(Date().timeIntervalSince1970))
-                try db.execute(sql: "INSERT INTO archive_meta (key, value) VALUES ('archive_id', ?) ON CONFLICT DO NOTHING",
-                               arguments: [UUID().uuidString.lowercased()])
-                try db.execute(sql: "INSERT INTO archive_meta (key, value) VALUES ('created_at', ?) ON CONFLICT DO NOTHING",
-                               arguments: [now])
+            do {
+                // A copy of the database first when the format changes, under
+                // `.migration.lock`, then the migrations (D-606, D-609).
+                try PreUpgradeCopy.migrate(database, location: location, keys: keys, upgrade: upgrade, diskSync: diskSync)
+                try database.write { db in
+                    let now = String(Int(Date().timeIntervalSince1970))
+                    try db.execute(sql: "INSERT INTO archive_meta (key, value) VALUES ('archive_id', ?) ON CONFLICT DO NOTHING",
+                                   arguments: [UUID().uuidString.lowercased()])
+                    try db.execute(sql: "INSERT INTO archive_meta (key, value) VALUES ('created_at', ?) ON CONFLICT DO NOTHING",
+                                   arguments: [now])
+                }
+                // A copy or a set-aside database more than 7 days old goes (D-606, D-608).
+                try PreUpgradeCopy.expire(database, location: location, now: upgrade.now())
+            } catch {
+                try? database.close()
+                throw error
             }
             secureDatabaseFiles(location)
         }
@@ -192,12 +201,20 @@ public enum ArchiveError: Error, Equatable, CustomStringConvertible {
     /// The archive needs reader level `needs` (nil: a value this build cannot
     /// read as a level); this build reads up to `knows` (D-536).
     case newerArchive(needs: Int?, knows: Int)
+    /// Not enough free space for the copy made before a format migration (D-606).
+    case notEnoughSpaceToUpgrade(needed: Int64)
+    /// The copy made before a format migration did not pass its check (D-606).
+    case upgradeCopyFailedCheck
 
     public var description: String {
         switch self {
         case .missingArchiveID: "The archive has no archive ID; it was not opened for writing yet"
         case .unknownAccount: "No account in the archive matches that. See `stowmail account list`."
         case .newerArchive: "This archive was made by a newer version of Stow. Update Stow to open it."
+        case .notEnoughSpaceToUpgrade(let needed):
+            "Stow needs about \(ByteCountFormatter.string(fromByteCount: needed, countStyle: .file)) free to update your archive safely. Free up some space and open Stow again."
+        case .upgradeCopyFailedCheck:
+            "Stow could not make a sound copy of your archive before updating it, so it left the archive as it was. Check the disk with Disk Utility's First Aid, then open Stow again."
         }
     }
 }

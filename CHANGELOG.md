@@ -4,8 +4,14 @@ Changes to StowKit and the `stowmail` command-line tool, newest first. Security 
 
 ## Unreleased
 
+### Added
+
+- Before an update changes the archive's format, Stow keeps a copy of the archive's database in the archive folder, encrypted with the same key, checks it, and only then updates. The copy is deleted 7 days later, or replaced at the next such update, and goes with the archive when it is moved or deleted. Without room for it, Stow does not update and says how much space it needs ("Stow needs about ... free to update your archive safely"); the background sync tries again each minute. `stowmail doctor` shows the copy and until when it is kept (D-606, D-607).
+- `stowmail restore-pre-upgrade` puts that copy back, for support when an update damaged archives. It asks first (`--yes` for scripts), refuses while the background sync uses that archive, keeps the replaced database aside for 7 days, and lists messages whose files tidy-up removed since the copy was made (D-608).
+
 ### Fixed
 
+- Two Stow processes opening the archive at once right after an update (the background sync and a command, say) no longer both run its format migration: one does, under a new lock, and the other waits and finds it done. Before, the second could fail with a database error (D-609).
 - Gmail sync with more than one request in flight (the hidden `--in-flight` option; the default is one) no longer keeps starting downloads past a slow request that Google then refuses, only to throw them away. Requests now run at most that many ahead of the oldest unfinished one, so a refusal wastes at most `in-flight - 1` requests (D-610).
 
 ## 0.2.2 (9 November 2026)

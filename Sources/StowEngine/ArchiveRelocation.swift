@@ -74,7 +74,7 @@ public enum ArchiveRelocation {
         let database = old.databaseURL.path
         for url in [old.databaseURL, URL(fileURLWithPath: database + "-wal"), URL(fileURLWithPath: database + "-shm"),
                     old.rawDirectory, old.attachmentsDirectory, old.recoveryBundleURL,
-                    old.root.appendingPathComponent(RecoveryBundle.pendingFileName)]
+                    old.root.appendingPathComponent(RecoveryBundle.pendingFileName)] + old.keptAsideDatabaseFiles()
         where FileManager.default.fileExists(atPath: url.path) {
             try FileManager.default.removeItem(at: url)
         }

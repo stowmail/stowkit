@@ -38,12 +38,13 @@ public enum ArchiveDeletionError: Error, Equatable, CustomStringConvertible {
 ///    of the keys (never the keys). From here every open, create or choice of
 ///    the folder is refused (`ArchiveLocationError.beingDeleted`), so a
 ///    half-deleted archive never looks empty and gets filled again.
-/// 2. `database`: the database, its WAL and SHM.
+/// 2. `database`: the database, its WAL and SHM, and the copy kept from before
+///    a format migration or the database a restore set aside (D-606, D-608).
 /// 3. `files`: `raw/` and `attachments/`.
 /// 4. `folderFiles`: `keys.recovery`, `keys.recovery.pending`, `rules.json`
 ///    and the Spotlight marker.
 /// 5. `keys`: the two archive key items, only once they are known to be this archive's.
-/// 6. `lockFile`: `.writer.lock`.
+/// 6. `lockFile`: `.writer.lock` and `.migration.lock` (D-609).
 /// 7. `finish`: the marker, then the folder itself if nothing else is in it.
 ///
 /// Besides the accounts' sign-ins in step 0, nothing outside the folder and its
@@ -105,7 +106,8 @@ public enum ArchiveDeletion {
 
         try willRun(.database)
         let database = location.databaseURL.path
-        try remove([location.databaseURL, URL(fileURLWithPath: database + "-wal"), URL(fileURLWithPath: database + "-shm")])
+        try remove([location.databaseURL, URL(fileURLWithPath: database + "-wal"), URL(fileURLWithPath: database + "-shm")]
+                   + location.keptAsideDatabaseFiles())
         try sync.flushFolder(location.root)
 
         try willRun(.files)
@@ -120,7 +122,7 @@ public enum ArchiveDeletion {
         if deleteKeys { try keyManager.deleteKeys() }
 
         try willRun(.lockFile)
-        try remove([location.lockURL])
+        try remove([location.lockURL, location.migrationLockURL])
 
         try willRun(.finish)
         try remove([location.deletingMarkerURL])

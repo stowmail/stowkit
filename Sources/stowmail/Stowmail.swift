@@ -16,7 +16,7 @@ struct Stowmail: AsyncParsableCommand {
         subcommands: [
             Doctor.self, Status.self, Init.self, RecoveryKeyCommand.self, Recover.self, AccountCommand.self, Folders.self,
             Sync.self, Size.self, Daemon.self, Verify.self, Export.self, Rules.self, Tidy.self, Remove.self, Removed.self, Restore.self,
-            Coverage.self, DeletionCheckCommand.self, ArchiveLocationCommand.self, ArchiveMove.self, ArchiveDelete.self, Import.self, Stats.self, Search.self, ThreadCommand.self, OCR.self, MCPCommand.self,
+            Coverage.self, DeletionCheckCommand.self, ArchiveLocationCommand.self, ArchiveMove.self, ArchiveDelete.self, RestorePreUpgrade.self, Import.self, Stats.self, Search.self, ThreadCommand.self, OCR.self, MCPCommand.self,
         ]
     )
 
@@ -107,6 +107,14 @@ struct Doctor: AsyncParsableCommand {
             } else if let archive = try? opened.get() {
                 if let schema = try? await archive.database.read({ try ArchiveSchema.versionSummary($0) }) { print("  \(schema)") }
                 if let level = try? await archive.database.read({ try ArchiveSchema.readerLevelSummary($0) }) { print("  \(level)") }
+                // The copy kept from before the last format update, and a database a restore set aside (D-606, D-608).
+                if let copy = try? PreUpgradeCopy.copy(archive), let from = copy.from, let to = copy.to {
+                    print("  Copy from before the \(from) to \(to) update, kept until \(CLI.day(copy.keptUntil))")
+                }
+                if let replaced = try? PreUpgradeCopy.replaced(archive) {
+                    print("  Database replaced by restore-pre-upgrade, kept until \(CLI.day(replaced.keptUntil))")
+                }
+                if let problem = try? PreUpgradeCopy.spaceProblem(archive) { print("  NOT UPDATED: \(problem.description)") }
                 switch ArchiveSetup.recoveryState(archive) {
                 case .confirmed: print("  recovery key confirmed: yes")
                 case .unconfirmed: print("  recovery key confirmed: NO (run `stowmail recovery-key create`)")
