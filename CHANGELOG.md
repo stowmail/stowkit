@@ -2,6 +2,12 @@
 
 Changes to StowKit and the `stowmail` command-line tool, newest first. Security fixes rated Medium or worse also get a GitHub security advisory; Low ones are listed here only (see [SECURITY.md](SECURITY.md)).
 
+## Unreleased
+
+### Security
+
+- Disconnecting a Google account now asks Google to end Stow's access to it, before the tokens are deleted from the Keychain (`stowmail account disconnect`). One request goes to Google's token host (`oauth2.googleapis.com/revoke`) with a 10 second limit; the tokens are deleted whatever the answer, and the command says whether Google confirmed. Revoking also signs Stow out of that Google account on any other Mac and for any other Stow client. Other providers are unchanged: Microsoft has no revocation request for a public client (security review L-3, D-810 to D-812).
+
 ## 0.2.3 (13 November 2026)
 
 No archive format changes in this release (the schema is still `v7`); the copy first happens at the next release that changes it.

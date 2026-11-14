@@ -149,6 +149,9 @@ struct AccountCommand: AsyncParsableCommand {
         static let configuration = CommandConfiguration(
             commandName: "disconnect",
             abstract: "Disconnect an account: stop syncing it and delete its tokens or password. Its archived mail is kept, and nothing changes in the mailbox.",
+            discussion: """
+                For a Google account, Stow also asks Google to end its access to the account. That signs Stow out of the same Google account on any other Mac and in the app as well as the command-line tool. If Google cannot be reached the account is still disconnected and the tokens are still deleted; you are then told how to remove access in your Google Account.
+                """,
             aliases: ["remove"]
         )
 
@@ -161,8 +164,9 @@ struct AccountCommand: AsyncParsableCommand {
             defer { lock.release() }
             let accounts = CLIArchive.accounts(archive)
             let record = try accounts.find(account)
-            try CLI.tokenStore().delete(for: record.account.id)
-            try CLI.passwordStore().delete(for: record.account.id)
+            // Google: ask Google to end Stow's access first, then delete the tokens whatever it
+            // answers (L-3, D-810). Nothing here waits on Google for more than ten seconds.
+            let revocation = try await CredentialRemoval.discard(record.account, tokens: CLI.tokenStore(), passwords: CLI.passwordStore())
             try accounts.disconnect(record.account.id)
             guard record.account.provider.syncs else {
                 print("Disconnected import-only account \(record.account.id). Its imported mail is kept and still searchable.")
@@ -175,7 +179,12 @@ struct AccountCommand: AsyncParsableCommand {
             } else if record.account.provider.oauth == nil {
                 // D-467 item 6: the password still works until revoked at Apple.
                 print(ICloudSignIn.revokeSteps)
+            } else if record.account.provider == .gmail, revocation?.accessEnded == true {
+                print("Stow's access to this Google account has been removed at Google. That also signs Stow out of this account on any other Mac, and for the command-line tool and the app alike (D-810).")
+            } else if record.account.provider == .gmail {
+                print("Stow could not confirm with Google that its access was removed, so it is still listed in the account's security settings until you revoke it there (myaccount.google.com/permissions).")
             } else {
+                // Microsoft has no revocation request for a public client (D-810).
                 print("Stow's access is still listed in the account's security settings until you revoke it there.")
             }
         }
