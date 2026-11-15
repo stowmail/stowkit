@@ -57,8 +57,9 @@ in a file named by `STOW_ENV_FILE`. Environment variables override the file. A
 `.env` in the current folder is never read, so running `stowmail` inside a
 downloaded folder cannot swap in someone else's app IDs. `stowmail doctor`
 says where the configuration came from, never the values. Builds made with
-`scripts/bundle-config.sh` and `-Xswiftc -DSTOW_BUNDLED_CONFIG` (the app and the
-CLI bundled with it) have the IDs built in and read no file or variable. User
+`scripts/bundle-config.sh` and `-Xswiftc -DSTOW_BUNDLED_CONFIG` have the IDs built
+in and read no file or variable; `--app` writes the Mac app's sign-in keys instead
+of the command-line tool's. User
 tokens and encryption keys live in the macOS Keychain only.
 
 ## Modules

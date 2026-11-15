@@ -6,6 +6,11 @@
 #   scripts/bundle-config.sh ~/Library/Application\ Support/Stow/config.env
 #   swift build -c release -Xswiftc -DSTOW_BUNDLED_CONFIG
 #
+# By default it writes the command-line tool's keys (AppConfig). With --app it writes the
+# Mac app's instead (AppSignInConfig: its own Google client, the Microsoft client and the
+# tenant, which must be `common`), and nothing the app does not use, so the command-line
+# tool's Google secret never ships inside the app (D-725).
+#
 # Values are never printed. With --clean, deletes the generated file.
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -15,10 +20,16 @@ if [ "${1:-}" = "--clean" ]; then
     trash "$out"
     exit 0
 fi
-[ $# -eq 1 ] && [ -f "$1" ] || { echo "usage: $0 <config file> | --clean" >&2; exit 1; }
+keys=(STOW_GOOGLE_CLIENT_ID STOW_GOOGLE_CLIENT_SECRET STOW_MS_CLIENT_ID STOW_MS_TENANT)
+app=0
+if [ "${1:-}" = "--app" ]; then
+    keys=(STOW_APP_GOOGLE_CLIENT_ID STOW_MS_CLIENT_ID STOW_MS_TENANT)
+    app=1
+    shift
+fi
+[ $# -eq 1 ] && [ -f "$1" ] || { echo "usage: $0 [--app] <config file> | --clean" >&2; exit 1; }
 git check-ignore -q "$out" || { echo "bundle-config: $out is not git-ignored; refusing" >&2; exit 1; }
 
-keys=(STOW_GOOGLE_CLIENT_ID STOW_GOOGLE_CLIENT_SECRET STOW_MS_CLIENT_ID STOW_MS_TENANT)
 umask 077
 trap 'rm -f "$out.tmp"' EXIT
 {
@@ -36,6 +47,12 @@ trap 'rm -f "$out.tmp"' EXIT
             exit 1
         fi
         case "$value" in *[!A-Za-z0-9._-]*) echo "bundle-config: $key has characters a client ID never has" >&2; exit 1 ;; esac
+        # The app signs in to personal and work Microsoft accounts alike; a tenant ID there
+        # refuses every account outside that tenant (AADSTS50020, seen 14 Nov).
+        if [ $app -eq 1 ] && [ "$key" = STOW_MS_TENANT ] && [ "$value" != common ]; then
+            echo "bundle-config: STOW_MS_TENANT must be common for the app" >&2
+            exit 1
+        fi
         echo "        \"$key\": \"$value\","
     done
     echo "    ]"
@@ -43,4 +60,4 @@ trap 'rm -f "$out.tmp"' EXIT
     echo "#endif"
 } > "$out.tmp"
 mv "$out.tmp" "$out"
-echo "Wrote $out (values not shown). Build with -Xswiftc -DSTOW_BUNDLED_CONFIG."
+echo "Wrote $out with ${#keys[@]} keys (values not shown). Build with -Xswiftc -DSTOW_BUNDLED_CONFIG."

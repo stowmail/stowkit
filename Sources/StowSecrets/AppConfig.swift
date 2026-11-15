@@ -4,9 +4,10 @@ import Foundation
 /// registrations Stow signs in through. Not user tokens, which live in the Keychain.
 ///
 /// Where they come from (D-482, D-512):
-/// - **A bundled-config build** (compiled with `STOW_BUNDLED_CONFIG`, as the
-///   app and the CLI and MCP helper bundled with it are) uses the values built
-///   in and reads no file and no environment variable.
+/// - **A bundled-config build** (compiled with `STOW_BUNDLED_CONFIG`) uses the
+///   values built in and reads no file and no environment variable. The Mac
+///   app's release build bundles only `AppSignInConfig`'s keys
+///   (`bundle-config.sh --app`, D-725), so `AppConfig.load` there reports them missing.
 /// - **A source build** reads the file named by `STOW_ENV_FILE`, or else
 ///   `~/Library/Application Support/Stow/config.env`, or neither if that does
 ///   not exist; environment variables override the file. Never the current folder.

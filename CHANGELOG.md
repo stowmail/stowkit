@@ -4,6 +4,10 @@ Changes to StowKit and the `stowmail` command-line tool, newest first. Security 
 
 ## Unreleased
 
+### Changed
+
+- `scripts/bundle-config.sh --app <file>` writes the Mac app's sign-in keys (`STOW_APP_GOOGLE_CLIENT_ID`, `STOW_MS_CLIENT_ID`, `STOW_MS_TENANT`, which must be `common`) and nothing else, for the app's release build; before, it wrote only the command-line tool's keys, so a bundled app could not sign in to Google, and the tool's Google client secret would have been built into the app. Without `--app` it writes the command-line tool's four keys as before (D-725).
+
 ### Added
 
 - `StowHome`, the base folder Stow's files hang from: the user's home folder for the command-line tool (`StowHome.cli`), or an app group container for a sandboxed app's processes (`StowHome.appGroup(_:)`). `ArchiveLocation.defaultLocation(in:)`, `EngineRules.settingsURL(in:)`, `LogFile.named(_:in:)` and `MCPAuditLog(home:)` take it, so an app's processes share one archive folder, `rules.json` and log folder. The command-line tool's folders are unchanged (R19, D-666).
