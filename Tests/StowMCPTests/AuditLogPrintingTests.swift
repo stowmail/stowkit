@@ -1,4 +1,5 @@
 import Foundation
+import StowCore
 @testable import StowMCP
 import Testing
 
@@ -25,5 +26,14 @@ import Testing
         }
         #expect(line.hasPrefix("2026-10-29 22:00  client"))
         #expect(line.contains("limit=5") && line.hasSuffix("-> 3"))
+    }
+}
+
+/// R19: the audit log sits in the log folder of whichever base the process passes.
+@Suite struct AuditLogHomeTests {
+    @Test func theAuditLogFollowsTheHome() {
+        let home = StowHome.appGroup(URL(fileURLWithPath: "/tmp/Group Containers/group.example", isDirectory: true))
+        #expect(MCPAuditLog(home: home).url.path == "/tmp/Group Containers/group.example/Library/Logs/Stow/mcp-audit.log")
+        #expect(MCPAuditLog(home: .cli).url.path == StowHome.cli.logFolder.appendingPathComponent("mcp-audit.log").path)
     }
 }

@@ -57,6 +57,12 @@ public struct ArchiveLocation: Sendable, Equatable {
         return ArchiveLocation(root: support.appendingPathComponent("Stow", isDirectory: true))
     }
 
+    /// The default archive folder under `home` (R19): `Library/Application Support/Stow`. For
+    /// `StowHome.cli` that is `defaultForCLI`; the app's processes pass their app group container.
+    public static func defaultLocation(in home: StowHome) -> ArchiveLocation {
+        ArchiveLocation(root: home.supportFolder)
+    }
+
     /// The location to use: `STOW_ARCHIVE_DIR` if set (development and
     /// tests), else the folder the user chose (D-035), else the CLI default.
     public static func fromEnvironment(

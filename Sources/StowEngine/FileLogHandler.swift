@@ -80,6 +80,12 @@ public struct StandardErrorLogHandler: LogHandler {
 /// One log file shared by every handler in the process.
 public final class LogFile: @unchecked Sendable {
     public static let shared = LogFile(url: LaunchAgent.logDirectory.appendingPathComponent("stowmail.log"))
+
+    /// A log named `name` in `home`'s log folder (R19). The app's processes pass their app group
+    /// container, so the app's Show Activity Log finds every process's log in one place (D-436).
+    public static func named(_ name: String, in home: StowHome) -> LogFile {
+        LogFile(url: home.logFolder.appendingPathComponent(name))
+    }
     static let maximumSize = 10 << 20
     static let keep = 3
 

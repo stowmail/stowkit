@@ -4,6 +4,11 @@ Changes to StowKit and the `stowmail` command-line tool, newest first. Security 
 
 ## Unreleased
 
+### Added
+
+- `StowHome`, the base folder Stow's files hang from: the user's home folder for the command-line tool (`StowHome.cli`), or an app group container for a sandboxed app's processes (`StowHome.appGroup(_:)`). `ArchiveLocation.defaultLocation(in:)`, `EngineRules.settingsURL(in:)`, `LogFile.named(_:in:)` and `MCPAuditLog(home:)` take it, so an app's processes share one archive folder, `rules.json` and log folder. The command-line tool's folders are unchanged (R19, D-666).
+- Signing in with the browser step in another process, for the Mac app (R21, D-677): `ExternalSignIn` makes the provider's page and later checks the reply URL (state, provider error, code) and exchanges the code with the PKCE verifier it kept; `OAuthProviderConfig.google(clientID:clientSecret:)` and `.microsoft(clientID:tenant:)` take an explicit client; `AppSignInConfig` reads the app's own client IDs (`STOW_APP_GOOGLE_CLIENT_ID`, `STOW_MS_CLIENT_ID`, `STOW_MS_TENANT`) the way `AppConfig` reads the CLI's; `MicrosoftSetup.check` signs in to Outlook's IMAP server with a new token and lists folders, so a Microsoft account with no mailbox is found before anything is saved. The CLI's loopback sign-in is unchanged.
+
 ### Security
 
 - Disconnecting a Google account now asks Google to end Stow's access to it, before the tokens are deleted from the Keychain (`stowmail account disconnect`). One request goes to Google's token host (`oauth2.googleapis.com/revoke`) with a 10 second limit; the tokens are deleted whatever the answer, and the command says whether Google confirmed. Revoking also signs Stow out of that Google account on any other Mac and for any other Stow client. Other providers are unchanged: Microsoft has no revocation request for a public client (security review L-3, D-810 to D-812).

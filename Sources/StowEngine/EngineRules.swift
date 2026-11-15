@@ -8,7 +8,13 @@ import StowStore
 public enum EngineRules {
     /// Where rule switches and weights are kept for the CLI (D-304).
     public static var defaultSettingsURL: URL {
-        FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/Stow/rules.json")
+        settingsURL(in: .cli)
+    }
+
+    /// Where rule switches and weights are kept under `home` (R19): `rules.json` in the default
+    /// archive folder. The app's processes pass their app group container.
+    public static func settingsURL(in home: StowHome) -> URL {
+        home.rulesURL
     }
 
     /// The rule settings for `account`: switches and weights from the settings

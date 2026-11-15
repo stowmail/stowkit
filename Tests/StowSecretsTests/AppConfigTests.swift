@@ -172,3 +172,21 @@ import Testing
         #expect(AppConfig.Source.environment.description == "environment")
     }
 }
+
+/// R21: the app's own sign-in clients, read the same way, and Google's redirect scheme.
+@Suite struct AppSignInConfigTests {
+    @Test func loadsTheAppsKeysAndNamesTheScheme() throws {
+        let home = FileManager.default.temporaryDirectory.appendingPathComponent("stow-signin-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: home) }
+        let url = AppConfig.configFileURL(home: home)
+        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try "STOW_APP_GOOGLE_CLIENT_ID=123-abc.apps.googleusercontent.com\nSTOW_MS_CLIENT_ID=fake-ms\nSTOW_MS_TENANT=common\n"
+            .write(to: url, atomically: true, encoding: .utf8)
+        let config = try AppSignInConfig.load(environment: [:], home: home, bundled: nil)
+        #expect(config.googleClientID == "123-abc.apps.googleusercontent.com")
+        #expect(config.googleRedirectScheme == "com.googleusercontent.apps.123-abc")
+        #expect(config.microsoftTenant == "common")
+        try "STOW_APP_GOOGLE_CLIENT_ID=REPLACE_ME\nSTOW_MS_CLIENT_ID=fake-ms\nSTOW_MS_TENANT=common\n".write(to: url, atomically: true, encoding: .utf8)
+        #expect(throws: AppConfigError.self) { try AppSignInConfig.load(environment: [:], home: home, bundled: nil) }
+    }
+}

@@ -77,12 +77,18 @@ public struct OAuthProviderConfig: Sendable, Equatable {
     /// asks for a refresh token and `prompt=consent` makes Google send one again
     /// on a repeat sign-in.
     public static func google(_ config: AppConfig) -> OAuthProviderConfig {
+        google(clientID: config.googleClientID, clientSecret: config.googleClientSecret)
+    }
+
+    /// Google with an explicit client (R21): the Mac app signs in through an iOS-type client,
+    /// which has no secret and redirects to its reversed client ID (D-554, D-677).
+    public static func google(clientID: String, clientSecret: String?) -> OAuthProviderConfig {
         OAuthProviderConfig(
             provider: .gmail,
             authorizationEndpoint: URL(string: "https://accounts.google.com/o/oauth2/v2/auth")!,
             tokenEndpoint: URL(string: "https://oauth2.googleapis.com/token")!,
-            clientID: config.googleClientID,
-            clientSecret: config.googleClientSecret,
+            clientID: clientID,
+            clientSecret: clientSecret,
             scopes: [gmailReadOnlyScope, "openid", "email"],
             redirectHost: "127.0.0.1",
             extraAuthorizationParameters: [("access_type", "offline"), ("prompt", "consent")],
@@ -95,13 +101,18 @@ public struct OAuthProviderConfig: Sendable, Equatable {
     /// `localhost` cannot hand the reply to another process (D-483, audit A-07).
     /// Entra ignores the port for loopback addresses.
     public static func microsoft(_ config: AppConfig) -> OAuthProviderConfig {
-        let tenant = config.microsoftTenant
+        microsoft(clientID: config.microsoftClientID, tenant: config.microsoftTenant)
+    }
+
+    /// Microsoft with an explicit client (R21): the same registration as the CLI, with the
+    /// app's `msauth.<bundle ID>://auth` redirect (D-554, D-677).
+    public static func microsoft(clientID: String, tenant: String) -> OAuthProviderConfig {
         let base = "https://login.microsoftonline.com/\(tenant)/oauth2/v2.0"
         return OAuthProviderConfig(
             provider: .microsoft,
             authorizationEndpoint: URL(string: "\(base)/authorize")!,
             tokenEndpoint: URL(string: "\(base)/token")!,
-            clientID: config.microsoftClientID,
+            clientID: clientID,
             clientSecret: nil,
             scopes: ["https://outlook.office.com/IMAP.AccessAsUser.All", "offline_access", "openid", "email"],
             redirectHost: "127.0.0.1",

@@ -121,7 +121,8 @@ public struct AppConfig: Sendable {
     }
 
     /// Built-in values alone; otherwise the file, then the environment for anything it sets.
-    static func resolve(environment: [String: String], home: URL, bundled: [String: String]?)
+    static func resolve(environment: [String: String], home: URL, bundled: [String: String]?,
+                        keys: [String] = Key.allCases.map(\.rawValue))
         throws -> (values: [String: (value: String, source: Source)], file: Source?) {
         if let bundled {
             return (bundled.mapValues { ($0, .builtIn) }, nil)
@@ -143,8 +144,8 @@ public struct AppConfig: Sendable {
             else { throw AppConfigError.unreadableFile(file.url.lastPathComponent) }
             values = parseEnvFile(text).mapValues { ($0, file.source) }
         }
-        for key in Key.allCases {
-            if let value = environment[key.rawValue] { values[key.rawValue] = (value, .environment) }
+        for key in keys {
+            if let value = environment[key] { values[key] = (value, .environment) }
         }
         return (values, file?.source)
     }

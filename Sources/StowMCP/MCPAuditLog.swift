@@ -52,6 +52,11 @@ public actor MCPAuditLog {
     public nonisolated let url: URL
     private let encoder: JSONEncoder
 
+    /// `mcp-audit.log` in `home`'s log folder (R19), beside the other logs.
+    public init(home: StowHome) {
+        self.init(directory: home.logFolder)
+    }
+
     public init(directory: URL) {
         url = directory.appendingPathComponent(Self.fileName)
         encoder = JSONEncoder()
