@@ -15,6 +15,7 @@ let package = Package(
         .library(name: "StowRules", targets: ["StowRules"]),
         .library(name: "StowMCP", targets: ["StowMCP"]),
         .library(name: "StowEngine", targets: ["StowEngine"]),
+        .library(name: "StowExtraction", targets: ["StowExtraction"]),
         .executable(name: "stowmail", targets: ["stowmail"]),
     ],
     dependencies: [
@@ -34,6 +35,10 @@ let package = Package(
         // Shared types and protocols. No package dependencies.
         .target(name: "StowCore"),
         .target(name: "StowSecrets", dependencies: ["StowCore"]),
+        // Apple's parsers on attachment bytes: PDFKit, Vision, the .docx reader (L-2). StowCore
+        // only, never StowSecrets or StowStore, so the Mac app's extraction helper can link it
+        // without any code that reads a key or opens the archive.
+        .target(name: "StowExtraction", dependencies: ["StowCore"]),
         .target(
             name: "StowSync",
             dependencies: [
@@ -104,6 +109,7 @@ let package = Package(
                 "StowRules",
                 "StowMCP",
                 "StowEngine",
+                "StowExtraction",
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
                 .product(name: "Logging", package: "swift-log"),
             ]
@@ -123,13 +129,13 @@ let package = Package(
                 .product(name: "NIOCore", package: "swift-nio"),
             ]
         ),
-        .testTarget(name: "StowStoreTests", dependencies: ["StowStore", .product(name: "GRDB", package: "GRDB")]),
-        .testTarget(name: "StowSearchTests", dependencies: ["StowSearch", "StowStore", "StowSecrets", .product(name: "GRDB", package: "GRDB")]),
+        .testTarget(name: "StowStoreTests", dependencies: ["StowStore", "StowExtraction", .product(name: "GRDB", package: "GRDB")]),
+        .testTarget(name: "StowSearchTests", dependencies: ["StowSearch", "StowStore", "StowExtraction", "StowSecrets", .product(name: "GRDB", package: "GRDB")]),
         .testTarget(name: "StowRulesTests", dependencies: ["StowRules"]),
         .testTarget(
             name: "StowMCPTests",
             dependencies: [
-                "StowMCP", "StowCore", "StowEngine", "StowSearch", "StowStore", "StowSecrets",
+                "StowMCP", "StowCore", "StowEngine", "StowSearch", "StowStore", "StowSecrets", "StowExtraction",
                 .product(name: "MCP", package: "swift-sdk"),
                 .product(name: "GRDB", package: "GRDB"),
             ]
@@ -137,7 +143,7 @@ let package = Package(
         .testTarget(
             name: "StowEngineTests",
             dependencies: [
-                "StowEngine", "StowSync", "StowStore", "StowSearch", "StowRules", "StowSecrets", "StowCore", "StowTestSupport",
+                "StowEngine", "StowSync", "StowStore", "StowSearch", "StowRules", "StowSecrets", "StowCore", "StowTestSupport", "StowExtraction",
                 .product(name: "GRDB", package: "GRDB"),
             ]
         ),

@@ -15,15 +15,20 @@ public struct EngineSync: Sendable {
     /// Signs Gmail accounts in to the Gmail API (D-583). Without it a Gmail
     /// account cannot sync: its IMAP path is gone (D-601).
     let tokens: TokenProvider?
+    /// Apple's parsers for attachment text (L-2): in this process for the command-line
+    /// tool, the key-less helper for the Mac app's login item.
+    public let reader: any AttachmentTextReading
 
     public init(
         archive: Archive,
+        reader: any AttachmentTextReading,
         settingsURL: URL = EngineRules.defaultSettingsURL,
         sleep: @escaping @Sendable (TimeInterval) async throws -> Void = { try await Task.sleep(nanoseconds: UInt64($0 * 1_000_000_000)) },
         tokens: TokenProvider? = nil,
         sessions: @escaping @Sendable (Account) -> (@Sendable () async throws -> IMAPSession)
     ) {
         self.archive = archive
+        self.reader = reader
         self.settingsURL = settingsURL
         self.sleep = sleep
         self.tokens = tokens
@@ -31,8 +36,8 @@ public struct EngineSync: Sendable {
     }
 
     /// Sessions signed in with the account's tokens, to the provider's server.
-    public init(archive: Archive, tokens: TokenProvider, settingsURL: URL = EngineRules.defaultSettingsURL) {
-        self.init(archive: archive, settingsURL: settingsURL, tokens: tokens) { account in
+    public init(archive: Archive, reader: any AttachmentTextReading, tokens: TokenProvider, settingsURL: URL = EngineRules.defaultSettingsURL) {
+        self.init(archive: archive, reader: reader, settingsURL: settingsURL, tokens: tokens) { account in
             // An `imap` account's server is read from the archive at each connect (D-577).
             return { try await SessionFactory(account: account, in: archive, tokens: tokens).open() }
         }
@@ -43,7 +48,7 @@ public struct EngineSync: Sendable {
     /// it (`SyncError.gmailUsesTheAPI`, D-601).
     public func syncer(for account: Account) throws -> any MailSyncer {
         let rules = try EngineRules.ruleSet(settings: settingsURL, archive: archive, account: account.id)
-        let store = ArchiveSyncStore(archive: archive, importer: Importer(archive: archive, classifier: EngineRules.classifier(rules)))
+        let store = ArchiveSyncStore(archive: archive, importer: Importer(archive: archive, reader: reader, classifier: EngineRules.classifier(rules)))
         let profile = try ProviderProfile.forAccount(account, in: archive)
         if account.provider == .gmail, let tokens {
             return GmailSyncer(

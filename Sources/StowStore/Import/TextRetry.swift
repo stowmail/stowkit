@@ -96,9 +96,9 @@ extension Importer {
         let senderDMARC = Self.senderDMARC(headers, provider: provider)
         // A Gmail thread ID never changes; otherwise the key comes from the headers now they can be read.
         let oldKey: String? = row["thread_key"]
-        let threadKey = oldKey.flatMap { $0.hasPrefix("g:") ? $0 : nil }
-            ?? headers.references.first.map { "m:\($0)" } ?? headers.inReplyTo.first.map { "m:\($0)" }
-            ?? headers.messageID.map { "m:\($0)" } ?? "h:" + rawHash.prefix(8).hex
+        let fromHeaders: String? = headers.references.first.map { "m:\($0)" } ?? headers.inReplyTo.first.map { "m:\($0)" }
+            ?? headers.messageID.map { "m:\($0)" }
+        let threadKey: String = oldKey.flatMap { $0.hasPrefix("g:") ? $0 : nil } ?? fromHeaders ?? "h:" + rawHash.prefix(8).hex
         let warnings = parsed.warnings.isEmpty ? nil : String(decoding: try JSONEncoder().encode(parsed.warnings), as: UTF8.self)
 
         try archive.database.write { db in

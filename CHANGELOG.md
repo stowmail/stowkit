@@ -2,6 +2,19 @@
 
 Changes to StowKit and the `stowmail` command-line tool, newest first. Security fixes rated Medium or worse also get a GitHub security advisory; Low ones are listed here only (see [SECURITY.md](SECURITY.md)).
 
+## Unreleased
+
+No archive format changes (the schema is still `v7`).
+
+### Changed
+
+- Attachment text goes through a reader the caller chooses (security review L-2, D-821). `AttachmentTextReading` in `StowCore` takes one attachment's bytes, its type and a purpose (text at import, or OCR) and answers with the text, or that it failed, timed out or could not be reached. `Importer`, `TextExtractor`, `OCRQueue`, `EngineSync` and `Scheduler` now take a `reader`, and `ArchiveSyncStore` an explicit importer (`nil` for a store that only keeps the queue and the budget); there is no default. `ExtractionResult` and `TimeLimit` moved to `StowCore`; `StowStore` keeps both names.
+- PDFKit, Vision and the .docx reader moved out of `StowStore` and `StowSearch` into a new library, `StowExtraction`, which depends on `StowCore` only: `AttachmentParsers` (the parsers, no time limits) and `LocalTextReader` (the parsers in this process under the existing 30 second and 600 second limits). `stowmail` uses `LocalTextReader`, so the command-line tool reads attachments exactly as before. A program can now link the parsers without anything that opens the archive or reads a key, and the reverse.
+
+### Security
+
+- The Mac app can run attachment parsing in a separate process that holds no keys, through the reader above (L-2). The command-line tool still parses in its own process (D-830).
+
 ## 0.2.4 (15 November 2026)
 
 No archive format changes in this release (the schema is still `v7`).

@@ -1,13 +1,9 @@
-import CoreGraphics
 import Foundation
 import GRDB
-import ImageIO
 import Logging
 import os
-import PDFKit
 import StowCore
 import StowStore
-import Vision
 
 /// Counts for `stowmail ocr status`.
 public struct OCRStatus: Sendable, Equatable, CustomStringConvertible {
@@ -24,7 +20,8 @@ public struct OCRStatus: Sendable, Equatable, CustomStringConvertible {
 
 /// The OCR queue (brief step 7, D-207): attachments with
 /// `text_status = 'ocr_pending'`, worked through one at a time with Apple
-/// Vision on-device.
+/// Vision on-device, through the reader seam (security review L-2): in this
+/// process for the command-line tool, in the key-less helper for the Mac app.
 ///
 /// The queue is the database column itself, so it survives restarts with no
 /// extra state. Each item is read, decrypted and recognised outside any
@@ -34,10 +31,10 @@ public struct OCRStatus: Sendable, Equatable, CustomStringConvertible {
 /// One bad attachment cannot block the queue (A-03, D-481, D-502). Each try is
 /// counted in its own transaction before the file is decrypted, so a crash or
 /// kill still counts; an item that has used up `maximumAttempts` is marked
-/// failed and skipped. Each item runs under a time limit on a thread of its
-/// own; at the limit it is marked failed and the run stops (the stuck thread
-/// is abandoned), so the next run starts at the next item. A failed item is
-/// tried again only by a newer `version` (`requeueAfterUpdate`).
+/// failed and skipped. The reader gives each item a time limit (a thread of its
+/// own in this process, or the helper ended); at the limit the item is marked
+/// failed and the run stops, so the next run starts at the next item. A failed
+/// item is tried again only by a newer `version` (`requeueAfterUpdate`).
 public final class OCRQueue: Sendable {
     /// Scanned PDFs longer than this are recognised up to this many pages.
     public static let maximumPages = 50
@@ -45,32 +42,24 @@ public final class OCRQueue: Sendable {
     /// Tries per item that may never finish before it is marked failed (D-502).
     public static let maximumAttempts = 3
     /// Longest one item may take: up to 50 pages through Vision (D-502).
-    static let itemTimeLimit: Duration = .seconds(600)
-    /// One stuck item at a time: while it still runs, no more OCR starts in this process.
-    static let maximumAbandoned = 1
-    private static let sharedAbandoned = OSAllocatedUnfairLock(initialState: 0)
+    static let itemTimeLimit = InProcessTextReader.recognitionTimeLimit
 
     let archive: Archive
-    let recogniser: @Sendable (CGImage) throws -> String
-    let limit: TimeLimit
+    let reader: any AttachmentTextReading
     /// `version`, except in tests of retrying after an update.
     let ocrVersion: Int
     let logger = Logger(label: "ee.getstow.search.ocr")
 
-    public init(archive: Archive) {
+    public init(archive: Archive, reader: any AttachmentTextReading) {
         self.archive = archive
-        recogniser = OCRQueue.visionText
-        limit = TimeLimit(limit: Self.itemTimeLimit, maximumAbandoned: Self.maximumAbandoned, abandoned: Self.sharedAbandoned)
+        self.reader = reader
         ocrVersion = Self.version
     }
 
-    /// For tests: a stand-in recogniser, a time limit with its own count, and a version.
-    init(archive: Archive, recogniser: @escaping @Sendable (CGImage) throws -> String,
-         limit: TimeLimit = TimeLimit(limit: .seconds(60), maximumAbandoned: 1, abandoned: OSAllocatedUnfairLock(initialState: 0)),
-         version: Int = OCRQueue.version) {
+    /// For tests: a reader with stand-ins and a version.
+    init(archive: Archive, reader: any AttachmentTextReading, version: Int) {
         self.archive = archive
-        self.recogniser = recogniser
-        self.limit = limit
+        self.reader = reader
         ocrVersion = version
     }
 
@@ -118,20 +107,25 @@ public final class OCRQueue: Sendable {
             return true
         }
 
-        let work: @Sendable () -> Result<String, any Error> = { [self] in
-            Result { try autoreleasepool { try recognise(try archive.attachmentFiles.read(hash), mimeType: mimeType) } }
+        let data: Data
+        do {
+            data = try archive.attachmentFiles.read(hash)
+        } catch {
+            logger.warning("OCR could not read the stored file", metadata: ["attachment": "\(id)", "error": "\(Redact.scrub(String(describing: error)))"])
+            try record(id, attempt: attempt, text: nil)
+            return true
         }
-        switch limit.run(work) {
-        case .finished(.success(let text)):
-            try record(id, attempt: attempt, text: text)
-        case .finished(.failure(let error)):
-            logger.warning("OCR failed", metadata: ["attachment": "\(id)", "error": "\(Redact.scrub(String(describing: error)))"])
+        switch reader.read(AttachmentTextRequest(data: data, type: mimeType, purpose: .recognition)) {
+        case .finished(let result):
+            try record(id, attempt: attempt, text: result.text ?? "")
+        case .failed:
+            logger.warning("OCR failed", metadata: ["attachment": "\(id)"])
             try record(id, attempt: attempt, text: nil)
         case .timedOut:
-            logger.warning("OCR did not finish in time; marked failed and abandoned", metadata: ["attachment": "\(id)"])
+            logger.warning("OCR did not finish in time; marked failed", metadata: ["attachment": "\(id)"])
             try record(id, attempt: attempt, text: nil)
             throw OCRError.timedOut
-        case .tooManyStuck:
+        case .unavailable:
             // Not this item's fault: take its try back.
             try archive.database.write { db in
                 try db.execute(sql: "UPDATE attachments SET text_attempts = max(text_attempts - 1, 0) WHERE id = ?", arguments: [id])
@@ -203,51 +197,6 @@ public final class OCRQueue: Sendable {
         }.value
     }
 
-    // MARK: - Recognition
-
-    func recognise(_ data: Data, mimeType: String) throws -> String {
-        if mimeType == "application/pdf" {
-            guard let document = PDFDocument(data: data) else { throw OCRError.unreadable }
-            var pages: [String] = []
-            for index in 0..<min(document.pageCount, Self.maximumPages) {
-                guard let page = document.page(at: index), let image = Self.render(page) else { continue }
-                pages.append(try recogniser(image))
-            }
-            return pages.joined(separator: "\n\n")
-        }
-        guard let source = CGImageSourceCreateWithData(data as CFData, nil),
-              let image = CGImageSourceCreateImageAtIndex(source, 0, nil)
-        else { throw OCRError.unreadable }
-        return try recogniser(image)
-    }
-
-    /// Renders a PDF page at about 200 dpi, capped so huge pages stay manageable.
-    static func render(_ page: PDFPage) -> CGImage? {
-        let bounds = page.bounds(for: .mediaBox)
-        guard bounds.width > 0, bounds.height > 0 else { return nil }
-        let scale = min(200.0 / 72.0, 4000 / max(bounds.width, bounds.height))
-        let width = Int(bounds.width * scale), height = Int(bounds.height * scale)
-        guard let context = CGContext(data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: 0,
-                                      space: CGColorSpaceCreateDeviceRGB(),
-                                      bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue)
-        else { return nil }
-        context.setFillColor(CGColor(red: 1, green: 1, blue: 1, alpha: 1))
-        context.fill(CGRect(x: 0, y: 0, width: width, height: height))
-        context.scaleBy(x: scale, y: scale)
-        context.translateBy(x: -bounds.minX, y: -bounds.minY)
-        page.draw(with: .mediaBox, to: context)
-        return context.makeImage()
-    }
-
-    /// On-device text recognition with Apple Vision (accurate level, language correction on).
-    @Sendable static func visionText(_ image: CGImage) throws -> String {
-        let request = VNRecognizeTextRequest()
-        request.recognitionLevel = .accurate
-        request.usesLanguageCorrection = true
-        try VNImageRequestHandler(cgImage: image, options: [:]).perform([request])
-        return (request.results ?? []).compactMap { $0.topCandidates(1).first?.string }.joined(separator: "\n")
-    }
-
     public enum OCRError: Error, CustomStringConvertible {
         case unreadable
         /// An item did not finish within `itemTimeLimit`; it is marked failed.
@@ -259,7 +208,7 @@ public final class OCRQueue: Sendable {
             switch self {
             case .unreadable: "The file could not be opened as an image or PDF."
             case .timedOut: "Text recognition did not finish in time on one attachment; it is marked as unreadable and the next run moves on."
-            case .tooManyStuck: "Text recognition is still stuck on an earlier attachment in this process; run it again to carry on."
+            case .tooManyStuck: "Text recognition is still stuck on an earlier attachment, or its helper cannot be reached; run it again to carry on."
             }
         }
     }

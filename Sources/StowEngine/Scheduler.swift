@@ -82,6 +82,9 @@ public actor Scheduler {
     let settings: SchedulerSettings
     let openArchive: @Sendable () throws -> Archive
     let makeSync: @Sendable (Archive) throws -> EngineSync
+    /// Apple's parsers for reading attachment text again after an update (L-2): the same
+    /// reader the sync uses.
+    let reader: any AttachmentTextReading
     let power: @Sendable () -> PowerState
     let hold: @Sendable () -> String?
     /// True when work this process abandoned is still stuck, so it should
@@ -108,6 +111,7 @@ public actor Scheduler {
         settings: SchedulerSettings = SchedulerSettings(),
         openArchive: @escaping @Sendable () throws -> Archive,
         makeSync: @escaping @Sendable (Archive) throws -> EngineSync,
+        reader: any AttachmentTextReading,
         power: @escaping @Sendable () -> PowerState = { PowerState.current() },
         hold: @escaping @Sendable () -> String? = { nil },
         restartWhen: @escaping @Sendable () -> Bool = { false },
@@ -117,6 +121,7 @@ public actor Scheduler {
         self.settings = settings
         self.openArchive = openArchive
         self.makeSync = makeSync
+        self.reader = reader
         self.power = power
         self.hold = hold
         self.restartWhen = restartWhen
@@ -216,7 +221,7 @@ public actor Scheduler {
             // with this build's parser and extractor (D-481, D-502). A no-op
             // unless the version went up since the mark.
             retried = true
-            let importer = Importer(archive: archive)
+            let importer = Importer(archive: archive, reader: reader)
             do {
                 let messages = try importer.retryMarkedMessages()
                 let attachments = try importer.retryUnreadAttachments()
@@ -332,7 +337,7 @@ public actor Scheduler {
     /// not sooner than `budgetMinimumWait`. An hour if that can never happen.
     func budgetWait(_ archive: Archive, account: AccountID, mustFree bytes: Int64) async -> Date {
         let earliest = now().addingTimeInterval(settings.budgetMinimumWait)
-        guard let freed = try? await ArchiveSyncStore(archive: archive).budgetFreesUp(account, bytes: max(1, bytes), now: now()) else {
+        guard let freed = try? await ArchiveSyncStore(archive: archive, importer: nil).budgetFreesUp(account, bytes: max(1, bytes), now: now()) else {
             return now().addingTimeInterval(3600)
         }
         return max(earliest, freed)

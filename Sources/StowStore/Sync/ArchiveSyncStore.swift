@@ -19,12 +19,13 @@ import StowCore
 /// that many times, so the next try stores it whole and unread instead.
 public final class ArchiveSyncStore: RawMessageSink, SyncStateStore, Sendable {
     public let archive: Archive
-    let importer: Importer
+    /// Nil for a store used only for the queue and the byte budget, which writes no message.
+    let importer: Importer?
     let logger = Logger(label: "ee.getstow.store.sync")
 
-    public init(archive: Archive, importer: Importer? = nil) {
+    public init(archive: Archive, importer: Importer?) {
         self.archive = archive
-        self.importer = importer ?? Importer(archive: archive)
+        self.importer = importer
     }
 
     var database: DatabasePool { archive.database }
@@ -37,6 +38,7 @@ public final class ArchiveSyncStore: RawMessageSink, SyncStateStore, Sendable {
 
     /// `write`, synchronously: tests run it on a thread they can leave stuck.
     func store(_ message: RawMessage) throws {
+        guard let importer else { throw ImportError.noImporter }
         let key = message.key
         // A Gmail API message is queued by Gmail ID, an IMAP one by its place (D-591).
         let queueRow: String

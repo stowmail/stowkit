@@ -69,8 +69,9 @@ tokens and encryption keys live in the macOS Keychain only.
 | `StowCore` | Shared types and protocols: accounts and the account directory, raw messages, sink and source, sync state, headers, search shapes, log redaction. A file-based raw message store for tests and imports. No package dependencies. |
 | `StowSecrets` | Keychain access, OAuth token storage, archive key management, the recovery key and its bundle, app configuration. |
 | `StowSync` | Gmail API sync, IMAP sync and OAuth sign-in. Read-only by construction: Gmail calls only through `GmailReadOnlyRequest` (GET only), IMAP commands only through `ReadOnlyCommand` (EXAMINE, `BODY.PEEK[]`). |
-| `StowStore` | MIME parsing, encrypted database, skeletons and attachment files, the sync sink and state, accounts, tidy-up, coverage, verify, export, archive location. |
-| `StowSearch` | FTS5 search, text extraction and OCR. |
+| `StowStore` | MIME parsing, inline text extraction (through an attachment reader), encrypted database, skeletons and attachment files, the sync sink and state, accounts, tidy-up, coverage, verify, export, archive location. |
+| `StowSearch` | FTS5 search and the OCR queue (through an attachment reader). |
+| `StowExtraction` | Apple's attachment parsers: PDFKit text, the .docx reader, PDF rendering and Vision for OCR, and `LocalTextReader`, which runs them in-process for the CLI. Depends on `StowCore` only. |
 | `StowRules` | Bulk-mail signals and rules, from headers only. |
 | `StowMCP` | Local, read-only MCP server: four tools, per-account access, an audit log. |
 | `StowEngine` | Joins sync, storage and rules: the scheduler and background sync, archive setup and recovery, rules over the archive, logs. Used by the CLI and the app. |
@@ -78,8 +79,11 @@ tokens and encryption keys live in the macOS Keychain only.
 
 ### Dependency rule
 
-- Every module may depend on `StowCore` and `StowSecrets`.
+- Every module may depend on `StowCore` and `StowSecrets`, except `StowExtraction`, which
+  depends on `StowCore` alone: it holds Apple's attachment parsers and must be linkable by a
+  process that holds no keys (the Mac app's extraction helper, security review L-2).
 - `StowSearch` may also depend on `StowStore`.
+- Nothing but the CLI (and tests) depends on `StowExtraction`; the libraries take a reader instead.
 - Nothing else depends sideways. In particular `StowSync`, `StowStore` and
   `StowRules` never import each other, so they can be built in parallel.
 - `stowmail` (the CLI) and `StowEngine` may depend on everything.

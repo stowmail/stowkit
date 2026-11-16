@@ -2,6 +2,7 @@ import ArgumentParser
 import Foundation
 import StowCore
 import StowEngine
+import StowExtraction
 import StowSearch
 import StowSecrets
 import StowStore
@@ -79,7 +80,7 @@ struct ImportMbox: AsyncParsableCommand {
         print("Importing into \(record.account.email) (\(record.account.id.rawValue.prefix(8)))\(record.account.provider.syncs ? "" : ", import only").")
         fflush(stdout)
         let rules = try EngineRules.ruleSet(archive: archive, account: record.account.id)
-        let importer = MboxImporter(archive: archive, importer: Importer(archive: archive, classifier: EngineRules.classifier(rules)))
+        let importer = MboxImporter(archive: archive, importer: Importer(archive: archive, reader: LocalTextReader(), classifier: EngineRules.classifier(rules)))
         for url in urls {
             print("\(url.lastPathComponent):")
             fflush(stdout)
@@ -89,7 +90,7 @@ struct ImportMbox: AsyncParsableCommand {
             })
             Self.describe(report, asked: variant)
         }
-        let queue = try OCRQueue(archive: archive).status()
+        let queue = try OCRQueue(archive: archive, reader: LocalTextReader()).status()
         if queue.pending > 0 { print("\(queue.pending) attachments queued for OCR; the background sync reads them, or run `stowmail ocr run`.") }
     }
 
@@ -216,7 +217,7 @@ struct ImportDev: AsyncParsableCommand {
         defer { lock.release() }
         let url = URL(fileURLWithPath: (directory as NSString).expandingTildeInPath, isDirectory: true)
         let rules = try EngineRules.ruleSet(archive: archive, account: nil)
-        let importer = Importer(archive: archive, extractText: !noExtraction, classifier: EngineRules.classifier(rules))
+        let importer = Importer(archive: archive, reader: LocalTextReader(), extractText: !noExtraction, classifier: EngineRules.classifier(rules))
         let progress: @Sendable (ImportSummary) -> Void = { summary in print("  \(summary)") }
 
         let summary: ImportSummary
@@ -233,7 +234,7 @@ struct ImportDev: AsyncParsableCommand {
             summary = try await importer.importAll(from: store, progress: progress)
         }
         print(summary)
-        let queue = try OCRQueue(archive: archive).status()
+        let queue = try OCRQueue(archive: archive, reader: LocalTextReader()).status()
         if queue.pending > 0 { print("\(queue.pending) attachments queued for OCR; run `stowmail ocr run`.") }
     }
 }

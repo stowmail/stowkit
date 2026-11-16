@@ -2,6 +2,7 @@ import ArgumentParser
 import Foundation
 import StowCore
 import StowEngine
+import StowExtraction
 import StowSearch
 import StowSecrets
 import StowStore
@@ -139,7 +140,7 @@ struct OCR: AsyncParsableCommand {
         static let configuration = CommandConfiguration(abstract: "Show the OCR queue.")
 
         func run() async throws {
-            print(try OCRQueue(archive: try CLIArchive.open(readOnly: true)).status())
+            print(try OCRQueue(archive: try CLIArchive.open(readOnly: true), reader: LocalTextReader()).status())
         }
     }
 
@@ -151,7 +152,7 @@ struct OCR: AsyncParsableCommand {
         func run() async throws {
             let (archive, lock) = try CLIArchive.openForWriting(requireRecovery: false)
             defer { lock.release() }
-            let queue = OCRQueue(archive: archive)
+            let queue = OCRQueue(archive: archive, reader: LocalTextReader())
             let start = Date()
             let processed = try await queue.run(limit: limit ?? .max)
             print(String(format: "Processed %d items in %.1f s. Queue: %@", processed, Date().timeIntervalSince(start),

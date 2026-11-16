@@ -19,6 +19,8 @@ public enum ImportError: Error, Equatable, CustomStringConvertible {
     /// A message with no IMAP place came without its Gmail ID, so it cannot be
     /// matched to its queue row or to the archive (D-591). Nothing was recorded.
     case missingGmailID(RawMessageKey)
+    /// A sync store made for the queue and the byte budget only was asked to store a message.
+    case noImporter
 
     public var description: String {
         switch self {
@@ -28,6 +30,7 @@ public enum ImportError: Error, Equatable, CustomStringConvertible {
         case .retryTimedOut(let id): "Reading message \(id) again did not finish in time; it stays marked"
         case .tooManyStuck: "Reading earlier messages is still stuck in this process; restart it to carry on"
         case .missingGmailID(let key): "Message \(key) came through the Gmail API without its Gmail ID; it was not recorded"
+        case .noImporter: "This sync store has no importer, so it cannot store messages"
         }
     }
 }
@@ -141,9 +144,14 @@ public final class Importer: Sendable {
     let classifier: RuleClassifier?
     let logger = Logger(label: "ee.getstow.store.import")
 
-    public convenience init(archive: Archive, extractText: Bool = true, classifier: RuleClassifier? = nil) {
-        self.init(archive: archive, extractText: extractText, classifier: classifier, extractor: TextExtractor())
+    /// `reader` runs Apple's parsers on PDFs, Word documents and, for the OCR queue, scans (L-2):
+    /// `LocalTextReader` in the command-line tool, the key-less helper in the Mac app.
+    public convenience init(archive: Archive, reader: any AttachmentTextReading, extractText: Bool = true, classifier: RuleClassifier? = nil) {
+        self.init(archive: archive, extractText: extractText, classifier: classifier, extractor: TextExtractor(reader: reader))
     }
+
+    /// The reader this importer's extractor uses, for the stores and retries made from it.
+    public var reader: any AttachmentTextReading { extractor.reader }
 
     /// Tests pass an extractor with a stand-in for PDFKit, a stand-in parser,
     /// a parser version and their own time limit.

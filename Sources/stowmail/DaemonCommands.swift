@@ -2,6 +2,7 @@ import ArgumentParser
 import Foundation
 import StowCore
 import StowEngine
+import StowExtraction
 import StowStore
 import StowSync
 
@@ -27,7 +28,8 @@ struct Daemon: AsyncParsableCommand {
             print("Stow background sync started. Logs: \(LaunchAgent.logDirectory.path)")
             let scheduler = Scheduler(
                 openArchive: { try CLIArchive.open() },
-                makeSync: { archive in EngineSync(archive: archive, tokens: try CLI.tokenProvider(accounts: ArchiveAccounts(archive: archive))) },
+                makeSync: { archive in EngineSync(archive: archive, reader: LocalTextReader(), tokens: try CLI.tokenProvider(accounts: ArchiveAccounts(archive: archive))) },
+                reader: LocalTextReader(),
                 restartWhen: { Importer.stuckPreparations > 0 }
             )
             let stop = await Task(priority: .background) { await scheduler.run() }.value

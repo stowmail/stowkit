@@ -72,8 +72,8 @@ mime)
     echo "==> Building the mime target"
     swiftc "${SANITIZE[@]}" "${with_stowcore[@]}" -module-name MIMEFuzz \
         Fuzz/MIMEFuzz.swift Fuzz/Shims.swift Sources/StowStore/MIME/*.swift \
-        Sources/StowStore/Archive/RawCompaction.swift Sources/StowStore/Extraction/ZipReader.swift \
-        Sources/StowStore/Extraction/TextExtractor.swift Sources/StowStore/Extraction/TimeLimit.swift \
+        Sources/StowStore/Archive/RawCompaction.swift Sources/StowExtraction/ZipReader.swift \
+        Sources/StowStore/Extraction/TextExtractor.swift \
         -o "$OUT/fuzz"
     # The 15 MiB fixture is left out: libFuzzer mutates inputs up to -max_len.
     if [ -d Tests/Fixtures/eml ]; then find Tests/Fixtures/eml -name '*.eml' -size -2M -exec cp {} "$OUT/corpus/" \; ; fi
@@ -105,7 +105,7 @@ query)
     ;;
 zip)
     echo "==> Building the zip target"
-    swiftc "${SANITIZE[@]}" -module-name ZipReaderFuzz Fuzz/ZipReaderFuzz.swift Sources/StowStore/Extraction/ZipReader.swift -o "$OUT/fuzz"
+    swiftc "${SANITIZE[@]}" -module-name ZipReaderFuzz Fuzz/ZipReaderFuzz.swift Sources/StowExtraction/ZipReader.swift -o "$OUT/fuzz"
     if [ -d Tests/Fixtures/eml ]; then
         # A real .docx, decoded from the fixture that carries one.
         perl -0777 -ne 'print $1 if /filename="[^"]*\.docx".*?\r?\n\r?\n(.*?)\r?\n--/s' Tests/Fixtures/eml/09-docx.eml \

@@ -2,6 +2,7 @@ import ArgumentParser
 import Foundation
 import StowCore
 import StowEngine
+import StowExtraction
 import StowSecrets
 import StowStore
 import StowSync
@@ -20,7 +21,7 @@ struct Folders: AsyncParsableCommand {
         let accounts = CLIArchive.accounts(archive)
         let record = try accounts.find(account)
         if record.account.provider == .gmail,
-           let gmail = try EngineSync(archive: archive, tokens: try CLI.tokenProvider(accounts: accounts)).syncer(for: record.account) as? GmailSyncer {
+           let gmail = try EngineSync(archive: archive, reader: LocalTextReader(), tokens: try CLI.tokenProvider(accounts: accounts)).syncer(for: record.account) as? GmailSyncer {
             // Through the Gmail API there is one place to sync and labels on each message (D-583, D-595).
             let labels = try await gmail.labelNames()
             print("Gmail, through the Gmail API: All Mail is synced, with \(labels.count) labels.")
@@ -74,7 +75,7 @@ struct Size: AsyncParsableCommand {
         guard record.isConnected else {
             throw ValidationError("That account is disconnected. Add it again with `stowmail account add` to reconnect it.")
         }
-        let size = try await EngineSync(archive: archive, tokens: try CLI.tokenProvider(accounts: accounts)).mailboxSize(for: record.account)
+        let size = try await EngineSync(archive: archive, reader: LocalTextReader(), tokens: try CLI.tokenProvider(accounts: accounts)).mailboxSize(for: record.account)
         let count = size.messages.formatted(.number)
         let mail = ByteCountFormatter.string(fromByteCount: size.bytes, countStyle: .file)
         if let quota = size.quota {
@@ -142,7 +143,7 @@ struct Sync: AsyncParsableCommand {
             throw ValidationError("That account is disconnected. Add it again with `stowmail account add` to reconnect it.")
         }
         if record.needsSignIn { throw SyncError.needsSignIn(record.account.id) }
-        let syncer = try EngineSync(archive: archive, tokens: try CLI.tokenProvider(accounts: accounts)).syncer(for: record.account)
+        let syncer = try EngineSync(archive: archive, reader: LocalTextReader(), tokens: try CLI.tokenProvider(accounts: accounts)).syncer(for: record.account)
 
         print("Syncing \(record.account.email) into the encrypted archive at \(archive.location.root.path)")
         let started = Date()
@@ -269,7 +270,7 @@ struct Verify: AsyncParsableCommand {
         if record.needsSignIn { throw SyncError.needsSignIn(record.account.id) }
         let profile = try ProviderProfile.forAccount(record.account, in: archive)
         let tokens = try CLI.tokenProvider(accounts: accounts)
-        let budget = ByteBudget(limit: profile.dailyByteLimit, store: ArchiveSyncStore(archive: archive), account: record.account.id)
+        let budget = ByteBudget(limit: profile.dailyByteLimit, store: ArchiveSyncStore(archive: archive, importer: nil), account: record.account.id)
         let report: VerifyReport
         var rows: GmailArchiveRows?
         if record.account.provider == .gmail, out == nil {
