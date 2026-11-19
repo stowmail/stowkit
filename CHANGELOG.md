@@ -2,6 +2,12 @@
 
 Changes to StowKit and the `stowmail` command-line tool, newest first. Security fixes rated Medium or worse also get a GitHub security advisory; Low ones are listed here only (see [SECURITY.md](SECURITY.md)).
 
+## Unreleased
+
+### Fixed
+
+- `scripts/fetch-sqlcipher.sh` no longer fails now and then with "SQLCipher framework is not signed by Zetetic" on a correctly signed framework. It piped `codesign` into `grep -q` under `pipefail`, so when `grep` stopped at the first match `codesign` could be killed mid-write and the check read as a failure. The signature is now read in full before it is searched, and the team line must match exactly. Seen when creating a track worktree with `new-track.sh`.
+
 ## 0.2.5 (16 November 2026)
 
 No archive format changes (the schema is still `v7`).

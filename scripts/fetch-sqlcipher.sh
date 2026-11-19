@@ -48,7 +48,11 @@ mkdir -p "$DEST"
 ditto -x -k "$ZIP" "$DEST"
 
 codesign --verify --deep --strict "$FRAMEWORK"
-if ! codesign -dv "$FRAMEWORK" 2>&1 | grep -q "TeamIdentifier=$TEAM_ID"; then
+# Read the signature into a variable before searching it. Piping codesign into
+# `grep -q` failed now and then under pipefail: grep exits at the first match,
+# and codesign, still writing, is killed by SIGPIPE, which reads as unsigned.
+SIGNATURE="$(codesign -dv "$FRAMEWORK" 2>&1)"
+if ! grep -qx "TeamIdentifier=$TEAM_ID" <<< "$SIGNATURE"; then
     echo "SQLCipher framework is not signed by Zetetic (team $TEAM_ID)" >&2
     exit 1
 fi
