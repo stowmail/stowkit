@@ -109,6 +109,23 @@ public enum ArchiveStatus {
         }
     }
 
+    /// Whether an account's first download has finished: every synced folder's, or
+    /// the Gmail API's one listing (D-591). False while it has no folders yet.
+    public static func firstSyncComplete(_ archive: Archive, account: AccountID) throws -> Bool {
+        try archive.database.read { db in try firstSyncComplete(db, account: account) }
+    }
+
+    static func firstSyncComplete(_ db: Database, account: AccountID) throws -> Bool {
+        if let gmail = try ArchiveSyncStore.gmailStateRow(db, account: account) {
+            return (gmail["first_sync_completed_at"] as Int64?) != nil
+        }
+        let folders = try Row.fetchAll(db, sql: """
+            SELECT s.first_sync_completed_at FROM folders f JOIN sync_state s ON s.folder_id = f.id
+            WHERE f.account_id = ? AND f.kind = 'folder' AND f.skipped_reason IS NULL
+            """, arguments: [account.rawValue])
+        return !folders.isEmpty && folders.allSatisfy { ($0["first_sync_completed_at"] as Int64?) != nil }
+    }
+
     public static func collect(_ archive: Archive, now: Date = Date()) throws -> [AccountStatus] {
         let records = try ArchiveAccounts(archive: archive).all()
         return try archive.database.read { db in
@@ -144,11 +161,10 @@ public enum ArchiveStatus {
                     WHERE f.account_id = ? AND f.kind = 'folder' AND f.skipped_reason IS NULL
                     """, arguments: [id])
                 status.foldersSynced = folders.count
-                status.firstSyncComplete = !folders.isEmpty && folders.allSatisfy { ($0["first_sync_completed_at"] as Int64?) != nil }
+                status.firstSyncComplete = try firstSyncComplete(db, account: record.account.id)
                 if let gmail = try ArchiveSyncStore.gmailStateRow(db, account: record.account.id) {
                     // The API's one listing stands in for IMAP's folders (D-591).
                     status.foldersSynced = 1
-                    status.firstSyncComplete = (gmail["first_sync_completed_at"] as Int64?) != nil
                     status.folderErrors = gmail["status"] as String == "error" ? [gmail["last_error"] as String?].compactMap { $0 } : []
                 }
                 status.folderErrors = folders.compactMap { $0["status"] as String == "error" ? $0["last_error"] as String? : nil }

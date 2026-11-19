@@ -1,4 +1,5 @@
 import Foundation
+import Logging
 import StowCore
 import StowExtraction
 @testable import StowStore
@@ -50,9 +51,10 @@ extension Scheduler {
         hold: @escaping @Sendable () -> String? = { nil },
         restartWhen: @escaping @Sendable () -> Bool = { false },
         now: @escaping @Sendable () -> Date = { Date() },
-        sleep: @escaping @Sendable (TimeInterval) async throws -> Void = { try await Task.sleep(nanoseconds: UInt64($0 * 1_000_000_000)) }
+        sleep: @escaping @Sendable (TimeInterval) async throws -> Void = { try await Task.sleep(nanoseconds: UInt64($0 * 1_000_000_000)) },
+        logger: Logger = Logger(label: "ee.getstow.engine.scheduler")
     ) {
         self.init(settings: settings, openArchive: openArchive, makeSync: makeSync, reader: LocalTextReader(), power: power, hold: hold,
-                  restartWhen: restartWhen, now: now, sleep: sleep)
+                  restartWhen: restartWhen, now: now, sleep: sleep, logger: logger)
     }
 }

@@ -188,7 +188,7 @@ extension RecoveryRotationTests {
         let scheduler = Scheduler(openArchive: { try Archive.open(self.location, keys: try manager.loadKeys()) },
                                   makeSync: { _ in throw CocoaError(.fileNoSuchFile) },
                                   power: { PowerState(onBattery: false, batteryPercent: nil, lowPowerMode: false) })
-        #expect(await scheduler.round().0 == .paused(ArchiveSetupError.recoveryNotConfirmed.description))
+        #expect(await scheduler.round().0 == .paused(Scheduler.recoveryPauseReason))
         #expect(!RecoveryBundle.exists(in: location.root))
         try ArchiveSetup.discardUnconfirmedKey(archive)
         #expect(ArchiveSetup.recoveryState(archive) == .none)

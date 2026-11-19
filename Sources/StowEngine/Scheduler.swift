@@ -92,7 +92,7 @@ public actor Scheduler {
     let restartWhen: @Sendable () -> Bool
     let now: @Sendable () -> Date
     let sleep: @Sendable (TimeInterval) async throws -> Void
-    private let logger = Logger(label: "ee.getstow.engine.scheduler")
+    private let logger: Logger
 
     private var notBefore: [AccountID: Date] = [:]
     private var failures: [AccountID: Int] = [:]
@@ -103,6 +103,9 @@ public actor Scheduler {
     private var retried = false
     private var backfilled = false
     private var recordedHold: String?
+    /// Whether each account's first download had finished when last looked at, so
+    /// its end is logged once, in the round it happens (D-935).
+    private var firstDownloadDone: [AccountID: Bool] = [:]
 
     /// The `archive_meta` key holding the reason while the app holds sync, for `stowmail status`.
     public static let heldMetaKey = "sync_held"
@@ -116,7 +119,8 @@ public actor Scheduler {
         hold: @escaping @Sendable () -> String? = { nil },
         restartWhen: @escaping @Sendable () -> Bool = { false },
         now: @escaping @Sendable () -> Date = { Date() },
-        sleep: @escaping @Sendable (TimeInterval) async throws -> Void = { try await Task.sleep(nanoseconds: UInt64($0 * 1_000_000_000)) }
+        sleep: @escaping @Sendable (TimeInterval) async throws -> Void = { try await Task.sleep(nanoseconds: UInt64($0 * 1_000_000_000)) },
+        logger: Logger = Logger(label: "ee.getstow.engine.scheduler")
     ) {
         self.settings = settings
         self.openArchive = openArchive
@@ -127,6 +131,7 @@ public actor Scheduler {
         self.restartWhen = restartWhen
         self.now = now
         self.sleep = sleep
+        self.logger = logger
     }
 
     /// Runs rounds until cancelled, pausing between them as the last round's
@@ -135,7 +140,7 @@ public actor Scheduler {
     @discardableResult
     public func run() async -> SchedulerStop {
         while !Task.isCancelled {
-            let (result, _) = await round()
+            let (result, outcomes) = await round()
             if restartWhen() {
                 logger.notice("Reading a message got stuck and was abandoned; stopping so the process starts afresh")
                 return .restartRequested
@@ -152,7 +157,14 @@ public actor Scheduler {
                 case .busy: logger.info("Archive busy; waiting")
                 case .held(let reason): logger.notice("Sync held by the Stow app", metadata: ["reason": "\(reason)"])
                 case .moved: break
-                case .worked, .idle: if lastLogged != nil, lastLogged != .worked, lastLogged != .idle { logger.notice("Sync resumed") }
+                case .worked, .idle:
+                    // A line when this scheduler first syncs and after a pause, so the log
+                    // shows sync is running even when every round is quiet (D-935).
+                    if lastLogged == nil {
+                        logger.notice("Sync running", metadata: ["accounts": "\(outcomes.count)"])
+                    } else if lastLogged != .worked, lastLogged != .idle {
+                        logger.notice("Sync resumed", metadata: ["accounts": "\(outcomes.count)"])
+                    }
                 }
                 lastLogged = result
             }
@@ -192,7 +204,7 @@ public actor Scheduler {
         defer { try? archive.database.close() }
         // An archive opened before a move (the app's, or a turn that started early).
         if let destination = archive.location.movedTo() { return (.moved(destination), [:]) }
-        guard ArchiveSetup.recoveryState(archive) == .confirmed else { return (.paused(ArchiveSetupError.recoveryNotConfirmed.description), [:]) }
+        guard ArchiveSetup.recoveryState(archive) == .confirmed else { return (.paused(Self.recoveryPauseReason), [:]) }
         guard let lock = try? ArchiveLock.acquire(archive.location) else { return (.busy, [:]) }
         defer { lock.release() }
         // Opened before a move finished: the lock is ours, but this copy is no
@@ -276,6 +288,7 @@ public actor Scheduler {
             if power().pauseReason != nil { break }
             let full = lastFullCheck[id].map { now().timeIntervalSince($0) >= settings.fullCheckInterval } ?? true
             let options = SyncOptions(deadline: now().addingTimeInterval(settings.turn), checkChanges: full ? .full : .quick)
+            if firstDownloadDone[id] == nil { firstDownloadDone[id] = (try? ArchiveStatus.firstSyncComplete(archive, account: id)) ?? true }
             do {
                 let report = try await sync.syncer(for: record.account).run(options)
                 try accounts.recordSync(id, at: now(), error: nil)
@@ -284,6 +297,7 @@ public actor Scheduler {
                 } catch {
                     logger.warning("Coverage date not updated", metadata: ["account": "\(id)", "error": "\(Self.plainWords(error))"])
                 }
+                let recovered = (failures[id] ?? 0) > 0
                 failures[id] = 0
                 notBefore[id] = nil
                 if full, report.outcome == .complete, report.remaining.queued == 0 { lastFullCheck[id] = now() }
@@ -292,6 +306,15 @@ public actor Scheduler {
                 }
                 if report.messagesWritten > 0 || report.outcome == .yielded { worked = true }
                 outcomes[id] = .synced(report)
+                if let message = Self.turnMessage(report, recovered: recovered) {
+                    logger.notice(message, metadata: Self.turnMetadata(report, account: id))
+                }
+                if firstDownloadDone[id] == false, (try? ArchiveStatus.firstSyncComplete(archive, account: id)) == true {
+                    firstDownloadDone[id] = true
+                    logger.notice("First download finished", metadata: [
+                        "account": "\(id)", "unfetchable": "\(report.remaining.unfetchable)",
+                    ])
+                }
             } catch {
                 let text = Self.plainWords(error)
                 try? accounts.recordSync(id, at: now(), error: text)
@@ -330,6 +353,32 @@ public actor Scheduler {
     /// The reason the app is holding sync, as the last held round recorded it (R15).
     public static func heldReason(_ archive: Archive) -> String? {
         (try? archive.meta(heldMetaKey)).flatMap { $0 }
+    }
+
+    /// Why sync is paused while the archive has no confirmed recovery key. Worded for
+    /// the app and the command line alike: it reaches the app's log (D-936).
+    public static let recoveryPauseReason = "No confirmed recovery key yet, so no mail is imported until one is saved and confirmed."
+
+    /// The notice for one account's successful turn, or nil for a quiet one: a turn
+    /// is logged only if it downloaded mail or follows a failure, so an idle
+    /// round every five minutes adds nothing to the log (D-935).
+    static func turnMessage(_ report: SyncReport, recovered: Bool) -> Logger.Message? {
+        if recovered { return "Account synced again after a failure" }
+        return report.messagesWritten > 0 ? "Account synced" : nil
+    }
+
+    /// Counts only, and the account's ID: never an address, subject or content (D-014).
+    static func turnMetadata(_ report: SyncReport, account: AccountID) -> Logger.Metadata {
+        let outcome = switch report.outcome {
+        case .complete: "complete"
+        case .limitReached: "limitReached"
+        case .budgetExhausted: "budgetExhausted"
+        case .yielded: "yielded"
+        }
+        return [
+            "account": "\(account)", "downloaded": "\(report.messagesWritten)", "bytes": "\(report.bytesWritten)",
+            "queued": "\(report.remaining.queued)", "outcome": "\(outcome)",
+        ]
     }
 
     /// When to try again after the byte budget ran out: as soon as enough of the

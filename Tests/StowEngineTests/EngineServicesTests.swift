@@ -62,7 +62,7 @@ func testKeychain() -> KeychainStore {
         let location = ArchiveLocation(root: TestFixtures.temporaryDirectory())
         defer { try? FileManager.default.removeItem(at: location.root) }
         let manager = KeyManager(keychain: keychain)
-        let paused = RoundResult.paused(ArchiveSetupError.recoveryNotConfirmed.description)
+        let paused = RoundResult.paused(Scheduler.recoveryPauseReason)
 
         let archive = try ArchiveSetup.createArchive(location, keyManager: manager)
         #expect(!RecoveryBundle.exists(in: location.root))
@@ -332,7 +332,7 @@ func testKeychain() -> KeychainStore {
         let archive = try Archive.open(location, keys: keys)
         try ArchiveSetup.markConfirmed(archive)
         try archive.database.close()
-        #expect(await unconfirmed.round().0 == .paused(ArchiveSetupError.recoveryNotConfirmed.description))
+        #expect(await unconfirmed.round().0 == .paused(Scheduler.recoveryPauseReason))
     }
 
     /// R15 (D-442): the app's hold comes before power, is its own result, is

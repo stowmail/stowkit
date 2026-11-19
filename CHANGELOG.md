@@ -4,6 +4,11 @@ Changes to StowKit and the `stowmail` command-line tool, newest first. Security 
 
 ## Unreleased
 
+### Changed
+
+- A healthy sync now leaves a few `notice` lines in the log, so a log at the default level shows whether sync is running (D-935): `Sync running` (with the number of accounts) when a scheduler first syncs, `Account synced` for a turn that downloaded mail, `Account synced again after a failure` for the first good turn after a failed one, and `First download finished` once per account. Each carries the account ID and counts only (downloaded, bytes, still queued, outcome); a turn that downloads nothing adds no line. `Sync resumed` now also gives the number of accounts. `Scheduler` takes an optional `logger`, and `ArchiveStatus.firstSyncComplete(_:account:)` is new.
+- Without a confirmed recovery key the scheduler's pause reason is now "No confirmed recovery key yet, so no mail is imported until one is saved and confirmed." (`Scheduler.recoveryPauseReason`), with no command in it, since it reaches the Mac app's log (D-936). Commands that refuse to import still name `stowmail recovery-key create`.
+
 ### Fixed
 
 - `scripts/fetch-sqlcipher.sh` no longer fails now and then with "SQLCipher framework is not signed by Zetetic" on a correctly signed framework. It piped `codesign` into `grep -q` under `pipefail`, so when `grep` stopped at the first match `codesign` could be killed mid-write and the check read as a failure. The signature is now read in full before it is searched, and the team line must match exactly. Seen when creating a track worktree with `new-track.sh`.
